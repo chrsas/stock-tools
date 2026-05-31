@@ -1,0 +1,58 @@
+# stock-tools 配置模板（committed，无密钥）。
+# 用法：复制为 config/config.local.yml 后填值；config.local.yml 已被 .gitignore，绝不入库。
+# 默认值来源：probe/probe_findings.md §11（探针实测建议初值）。
+
+platform: xueqiu
+
+# ── 登录态（敏感）────────────────────────────────────────────────
+# 从已登录雪球的浏览器 DevTools → Application → Cookies 复制。
+# 绝不入库、绝不进任何导出文件（规范硬约束）。二选一：
+auth:
+  # 方式一：直接粘整段 cookie 串（最省事）。至少含 xq_a_token; xqat; u
+  cookie: ""              # 例: "xq_a_token=xxx; xqat=xxx; u=xxx; xq_id_token=xxx"
+  # 方式二：留空上面的 cookie，改从环境变量读（更安全）
+  cookie_env: XUEQIU_COOKIE
+  # 留空两者 = guest 模式：仅能读 feed page1、公开帖直链
+
+# ── 追踪账号 ────────────────────────────────────────────────────
+accounts:
+  - uid: ""                # 数字 uid，例: 1234567890（主页 URL 里 /u/ 后那串）
+    note: ""               # 备注（可选）
+    watch_mode: recent_window   # recent_window | pinned
+
+# ── 采集节奏（温和采集，见 findings §9）────────────────────────────
+polling:
+  feed_interval_minutes: 180          # feed 轮询：每账号 2–6h
+  direct_recheck_interval_minutes: 360
+  request_min_interval_seconds: 2.5   # ≥2–3s/请求
+  request_jitter_seconds: 1.5
+  bootstrap_per_run: true             # 每轮仅 1 次首页引导铸 cookie
+
+# ── 监控与状态机参数（findings §10/§11）──────────────────────────
+monitoring:
+  window_days: 30                     # recent_window 默认窗口
+  absent_threshold_n: 3               # 缺席阈值 N，规范下限 ≥3
+  recent_feed_absent_ttl_days: 7
+  llm_candidate_ttl_days: 14          # 阶段 3
+  min_samples: 30                     # 阶段 3
+
+# ── 正文 fidelity（findings §8 实测）──────────────────────────────
+fidelity:
+  feed: full        # 普通帖 full；is_column/truncated 时运行期自动降为 preview
+  direct: full
+
+adapter:
+  version: xueqiu-1   # 接口结构变更时递增
+
+storage:
+  db_path: data/kol.sqlite3
+  backup_dir: data/backups
+
+# ── 后续阶段占位（阶段2起填）──────────────────────────────────────
+# llm:
+#   provider: ""        # 模型供应商
+#   model: ""
+#   api_key_env: LLM_API_KEY   # 仅环境变量
+#   prompt_version: v1
+# prices:                # 阶段4 行情数据源
+#   source: ""
