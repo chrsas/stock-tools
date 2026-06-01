@@ -51,6 +51,12 @@ storage:
   backup_after_run: true               # 每轮采集完成后生成经恢复验证的快照
   backup_retention_count: 30           # 仅保留最近 N 份快照
 
+# ── 本地网页（阶段 2b）──────────────────────────────────────────
+web:
+  bind_host: 127.0.0.1                 # 手机访问时仅在 local 配置覆盖为 Tailscale 地址
+  port: 8765
+  timeline_limit: 50
+
 # ── 单条改写训练（阶段 2，按需调用）────────────────────────────────
 llm:
   provider: openai_compatible

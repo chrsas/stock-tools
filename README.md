@@ -1,6 +1,6 @@
 # stock-tools
 
-本地单用户 KOL 发言证据存档。当前完成阶段 1 和阶段 2。
+本地单用户 KOL 发言证据存档。当前完成阶段 1、阶段 2 和阶段 2b 的网页基线。
 
 ## 初始化
 
@@ -84,6 +84,21 @@ $env:LLM_API_KEY = "<本地密钥>"
 ```
 
 改写产物只进入 `rewrite_exercises`，并自动钉住帖子。它不会进入事件研究或回测数据。
+
+## 本地网页
+
+启动服务端渲染网页：
+
+```powershell
+.\.venv\Scripts\python.exe -m kol_archive serve --config-dir config
+```
+
+默认地址为 `http://127.0.0.1:8765/`。页面提供原始时间线、证据卡片、钉住、取消钉住、关注理由、
+单条改写训练和人工 verdict。所有写操作都使用 `POST` 并校验 CSRF token。
+
+手机访问只走 Tailscale 私网。在被 Git 忽略的 `config/config.local.yml` 中将
+`web.bind_host` 显式覆盖为部署机器的 Tailscale 地址，可按需覆盖 `web.port`。服务拒绝
+`0.0.0.0`、`::` 等通配监听地址，不配置公网端口映射。
 
 ## 质量门禁
 

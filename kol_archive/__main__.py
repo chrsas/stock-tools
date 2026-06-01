@@ -24,6 +24,7 @@ from kol_archive.models import ArchiveSettings, QueueReason
 from kol_archive.presentation import build_evidence_card, list_timeline
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
 from kol_archive.service import Archive
+from kol_archive.web import load_web_settings, serve_archive
 
 LOGGER = logging.getLogger(__name__)
 
@@ -301,6 +302,15 @@ def _review_rewrite_command(args: argparse.Namespace) -> None:
         connection.close()
 
 
+def _serve_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    serve_archive(
+        _resolve_db_path(args.path, config),
+        args.config_dir,
+        load_web_settings(config, bind_host=args.host, port=args.port),
+    )
+
+
 def main() -> None:
     _configure_stdout_utf8()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -380,6 +390,12 @@ def main() -> None:
     review_parser.add_argument("--path", type=Path)
     review_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     review_parser.set_defaults(handler=_review_rewrite_command)
+    serve_parser = subparsers.add_parser("serve", help="serve the local web archive")
+    serve_parser.add_argument("--path", type=Path)
+    serve_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    serve_parser.add_argument("--host")
+    serve_parser.add_argument("--port", type=int)
+    serve_parser.set_defaults(handler=_serve_command)
     args = parser.parse_args()
 
     args.handler(args)
