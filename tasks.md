@@ -84,8 +84,8 @@ probe_runs                       [append-only]
 
 post_observations                [append-only]
   id, fetch_run_id, post_id, observed_at, present(bool),
-  content_hash, content_fidelity(full|preview|na),
-  version_id nullable FK -> post_versions.id    -- 缺席或 preview 时为空
+  content_hash nullable, content_fidelity(full|preview|na),   -- content_hash 仅 full 必填；缺席/preview/na 降级时为空
+  version_id nullable FK -> post_versions.id    -- 缺席、preview 或 na 降级时为空
   UNIQUE(fetch_run_id, post_id)
 
 posts        (稳定身份登记 + 可变投影；禁删；身份字段不可改)
@@ -227,3 +227,66 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 - LLM 供应商/模型/API Key（环境变量，阶段 2 起）。
 - 行情数据源（阶段 4）。
 - 部署机器；如需远程再配 Tailscale。
+
+---
+
+## 6. 代码质量约束（Agent 执行守则，与第 0 节同级硬约束）
+
+本节是可验收的工程纪律，不是风格偏好。凡涉及证据完整性、事务原子性、凭据安全的条目，违反即视为缺陷，优先级等同第 0 节宪章。
+
+### 6.1 测试（核心，正确性靠测试兜底而非靠人读规范）
+
+- **每条 DoD 对应至少一个自动化测试**；阶段不补齐对应测试，该阶段不算完成。测试用临时文件或 `:memory:` SQLite，连接同样 `PRAGMA foreign_keys=ON`。
+- **必测的不变量**：① 五张证据表 `UPDATE/DELETE` 被触发器拒绝；② `posts` 删除被拒、身份字段 `id/author_id/platform/platform_post_id/first_seen_at` 改写被拒、其余字段可改；③ A→B→A 落三条版本行且首次观察时间各异；④ `content_fidelity=preview` 不建版本、不发 content 事件；⑤ feed 连续完整健康缺席达阈值 N 才 `absent_confirmed` 并入队，partial/failed run 不产生任何负面推断；⑥ `gone_confirmed` 黏性：其后 `restricted/not_found` 不降级，仅 `reachable` 翻回；⑦ 同一帖至多一条 `state='pending'`（部分唯一索引生效）；⑧ **解析失败降级路径**：旧帖原为 `absent_confirmed`，本轮识别出 `post_id` 但正文解析失败时，`fetch_run` 变 `partial`，写 `present=true`/`content_fidelity=na`/`version_id=null`/`content_hash=null` 的 observation，在场投影被重置（`feed_state=present`、`absent_healthy_streak=0`、`last_present_at` 更新），内容投影 `current_version_id/hash` 不变，且本轮对其他帖不执行任何负面推断（见 6.3）。
+- **崩溃注入测试**：在「插证据 → 更新投影」之间强制抛异常，断言整条事务回滚、证据与投影不错位、无半写状态。
+- **采集解析用离线 fixture**，不在测试里打真实平台；fixture 取自 `probe/raw/` 的真实响应样本，覆盖正常帖、置顶帖、删帖错误码（10022 登录失效 / 20210 not_found）、限权、分页边界。
+- **「完整健康」判定**（feed: `status=ok AND login_state=valid AND pagination_complete AND NOT rate_limited`；直链: 去掉分页项）必须有独立单测覆盖各假值组合，这是负面推断与状态推进的总闸。
+
+### 6.2 类型与静态检查
+
+- 全量 type hints；`NormalizedPost` 等跨层契约用 `dataclass`/`TypedDict` 显式建模，不传裸 dict。
+- 提交前过 `ruff`（lint+format）与类型检查器（mypy 或 pyright）零报错；CI 缺位时本地即视为门禁。
+- 三个正交状态维度与各 `result/status` 枚举一律 `enum`，禁止裸字符串字面量散落。
+
+### 6.3 错误处理与采集健壮性
+
+- **失败必须被分类，绝不静默吞掉**：网络/超时/HTTP 错误 → 映射到 `fetch_run.status`、`login_state`、`probe_run.result` 等显式字段，宁可记 `unknown/partial/failed` 也不可把「采集失败」伪装成「确证缺席」（呼应宪章 6、7）。
+- 退避温和：超时与重试有上限、带 jitter，遵守第 1 节「温和采集」；`rate_limited` 命中即如实置位并停止负面推断。
+- 解析容错：单帖解析异常只让该帖降级，不连累整轮其他帖子已成功解析的正面存档。
+- **解析失败必关负面推断（防误判缺席）**：**只要本轮任一帖子未能正常完成 `full` 或 `preview` 解析，就必须把 `fetch_run.status` 标为 `partial`**（绝不保留 `ok`）——触发条件只看「解析有没有正常完成」，与是否识别出 `post_id`、是否补写了降级 observation 无关（降级 na observation 不能洗白 partial）。否则 2.2 的健康门会把本轮实际已返回、只是解析失败的旧帖误计为缺席并累加 `absent_healthy_streak`。`partial` 经健康门即关闭本轮**全部**负面推断（缺席 observation、streak、`out_of_scope`），仅保留其他帖的正面存档。
+  - **降级 observation（能否识别 `post_id` 只决定这一步，不影响上面的 partial 判定）**：识别出 `post_id` 时写一条——该帖确已在 feed 返回，故按在场处理：`present=true`、`content_fidelity=na`、`version_id=null`、`content_hash=null`（为此 `post_observations.content_hash` 须可空，仅 `full` 时必填）。它不是缺席，不参与负面推断。
+  - **同步在场投影**：更新 `last_present_at`、`feed_state=present`、`absent_healthy_streak=0`，但**不动内容投影** `current_version_id/current_content_hash`（无可信正文）。否则已从 feed 返回的帖子会残留 `absent_confirmed`，证据与页面状态错位。
+
+### 6.4 日志与自省
+
+- 结构化日志，每个 `fetch_run/probe_run` 留可追溯痕迹（run id、覆盖范围、健康度、错误计数），对应阶段 1 的「自省日志」交付。
+- **日志、异常消息、导出文件一律不得出现 cookie / API Key / 任何凭据**；记录请求时对敏感头做掩码。
+
+### 6.5 凭据与安全
+
+- API 密钥仅环境变量；登录 cookie 走环境变量或被 gitignore 的本地配置。**凭据绝不入库、绝不进导出、绝不进日志、绝不进异常文本、绝不提交**（呼应第 1 节与 1c）。
+- 所有 SQL 用参数化绑定，禁止字符串拼接；面向用户/LLM 的文本入库前按数据列约束校验（JSON 列走 `json_valid`）。
+
+### 6.6 数据库与事务纪律
+
+- 一次采集的全部写入包进**单一事务**，崩溃整体回滚（宪章 2）；写入顺序按轨分别严格遵守第 2 节，不可混用：
+  - **feed 侧**：`fetch_run → posts 空壳(新帖) → post_versions(full 变化) → post_observations → events → 更新 posts 投影`。`fetch_run` 不引用版本，最先插入；`post_observations.version_id` 引用版本，故版本行须在其之前。
+  - **直链侧**：`(full 变化)post_version → probe_run(带 observed_version_id) → events → 更新 posts 投影`。仅此轨需"先版本行、后 run"，因 `probe_run.observed_version_id` 是版本外键。
+- 每连接 `PRAGMA foreign_keys=ON`；WAL 模式；备份只用 backup API 或 `VACUUM INTO`，**禁止直接 cp 主文件**，且定期做恢复验证。
+- 写一次即不可变的时间（`first_seen_at`、各 `first_observed_at`）在数据访问层也禁止重写，不止依赖触发器。
+
+### 6.7 适配器边界与可演进性
+
+- 平台耦合全部收敛在适配器内，对上只暴露 `NormalizedPost` 契约；状态机、存档逻辑不出现任何雪球字段名。
+- **解析逻辑一变更，`adapter_version` 即递增**并写入对应 run，保证历史证据可溯源到当时的解析器。
+- 解析尽量纯函数化（输入原始响应 → 输出 `NormalizedPost`，无副作用），便于用 fixture 直测。
+
+### 6.8 时间处理
+
+- 统一存储口径（UTC）；epoch 毫秒（如 `created_at/edited_at`）的转换集中在一处工具函数，禁止各处手写。
+- 界面时间一律用「首次观察 / 最后观察 / 检测到缺失」语义（宪章 4），代码注释与变量命名不得暗示精确删改时刻。
+
+### 6.9 简洁性（第一版刻意从简的延伸）
+
+- 不预先引入容器、消息队列、ORM 框架、异步全家桶等第 1 节未列的依赖；新增第三方依赖需有明确必要性。
+- 每阶段代码独立可跑、可作为合理终点（呼应宪章 11、第 4 节），不为后续阶段提前埋抽象。
