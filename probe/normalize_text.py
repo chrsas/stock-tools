@@ -1,4 +1,5 @@
 """雪球正文归一化：展示文本保留词间空格，哈希文本移除全部空白。"""
+
 from __future__ import annotations
 
 import hashlib

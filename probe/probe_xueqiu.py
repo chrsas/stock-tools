@@ -4,17 +4,20 @@
 不写任何业务库；这个脚本的产物是「事实」，不是功能。
 
 用法:
-    python probe/probe_xueqiu.py bootstrap          # 引导 cookie，打印下发的 cookie
-    python probe/probe_xueqiu.py discover           # 用公开热门流发现真实 uid/status_id
-    python probe/probe_xueqiu.py timeline <uid>     # 抓 user_timeline 多页，落盘
-    python probe/probe_xueqiu.py show <status_id>   # 直链 show.json + HTML 页
+    python -m probe.probe_xueqiu bootstrap          # 引导 cookie，记录 cookie 名称
+    python -m probe.probe_xueqiu discover           # 用公开热门流发现真实 uid/status_id
+    python -m probe.probe_xueqiu timeline <uid>     # 抓 user_timeline 多页，落盘
+    python -m probe.probe_xueqiu show <status_id>   # 直链 show.json + HTML 页
 """
+
 from __future__ import annotations
 
 import json
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -33,7 +36,7 @@ HEADERS = {
 }
 
 
-def dump(name: str, obj) -> Path:
+def dump(name: str, obj: object) -> Path:
     p = RAW / name
     if isinstance(obj, (dict, list)):
         p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -47,25 +50,25 @@ def new_client() -> httpx.Client:
     return httpx.Client(headers=HEADERS, timeout=20.0, follow_redirects=False)
 
 
-def bootstrap(client: httpx.Client) -> dict:
-    """访问首页获取 guest cookie。返回 cookie dict。"""
+def bootstrap(client: httpx.Client) -> dict[str, str]:
+    """访问首页获取 guest cookie，仅记录 cookie 名称。"""
     r = client.get("https://xueqiu.com/")
     print(f"GET / -> {r.status_code}, history={[h.status_code for h in r.history]}")
     cookies = dict(client.cookies)
-    print("cookies received:")
-    for k, v in cookies.items():
-        shown = v if len(v) < 24 else v[:21] + "..."
-        print(f"    {k} = {shown}")
-    dump("00_bootstrap_cookies.json", cookies)
+    print(f"cookies received: {sorted(cookies)}")
+    dump(
+        "00_bootstrap_cookies.json",
+        {"cookie_names": sorted(cookies), "cookie_count": len(cookies)},
+    )
     return cookies
 
 
-def cmd_bootstrap():
+def cmd_bootstrap() -> None:
     with new_client() as c:
         bootstrap(c)
 
 
-def cmd_discover():
+def cmd_discover() -> None:
     with new_client() as c:
         bootstrap(c)
         # 公开热门时间线，用来发现真实 uid + status_id 作为后续探测样本
@@ -86,13 +89,15 @@ def cmd_discover():
             time.sleep(1.5)
 
 
-def cmd_timeline(uid: str):
+def cmd_timeline(uid: str) -> None:
     with new_client() as c:
         bootstrap(c)
         for page in (1, 2):
             url = f"https://xueqiu.com/v4/statuses/user_timeline.json?user_id={uid}&page={page}"
             r = c.get(url)
-            print(f"GET user_timeline uid={uid} page={page} -> {r.status_code}, len={len(r.content)}")
+            print(
+                f"GET user_timeline uid={uid} page={page} -> {r.status_code}, len={len(r.content)}"
+            )
             try:
                 dump(f"02_timeline_{uid}_p{page}.json", r.json())
             except Exception:
@@ -100,7 +105,7 @@ def cmd_timeline(uid: str):
             time.sleep(2.0)
 
 
-def cmd_show(status_id: str):
+def cmd_show(status_id: str) -> None:
     with new_client() as c:
         bootstrap(c)
         # 1) JSON 直链
@@ -123,12 +128,22 @@ def cmd_show(status_id: str):
             time.sleep(1.5)
 
 
+def require_arg(value: str | None, command: str) -> str:
+    if value is None:
+        raise SystemExit(f"{command} requires an argument")
+    return value
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "bootstrap"
     arg = sys.argv[2] if len(sys.argv) > 2 else None
-    {
+    commands: dict[str, Callable[[], Any]] = {
         "bootstrap": cmd_bootstrap,
         "discover": cmd_discover,
-        "timeline": lambda: cmd_timeline(arg),
-        "show": lambda: cmd_show(arg),
-    }[cmd]()
+        "timeline": lambda: cmd_timeline(require_arg(arg, "timeline")),
+        "show": lambda: cmd_show(require_arg(arg, "show")),
+    }
+    try:
+        commands[cmd]()
+    except KeyError:
+        raise SystemExit(f"unknown command: {cmd}") from None

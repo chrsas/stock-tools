@@ -76,6 +76,7 @@ htmlcov/
 
 # Type checkers
 .mypy_cache/
+.ruff_cache/
 
 # Jupyter Notebook
 .ipynb_checkpoints

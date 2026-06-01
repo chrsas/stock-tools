@@ -1,16 +1,16 @@
-"""离线校验 feed / show 正文归一化规则。"""
+"""人工离线快速校验入口；pytest 套件复用同一 fixture 覆盖回归断言。
+
+用法: python -m probe.verify_normalization
+"""
+
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
-from normalize_text import content_hash, content_text
-
-FIXTURE = Path(__file__).parent / "fixtures" / "normalization_pair.json"
+from probe.normalization_fixture import load_normalization_pair
+from probe.normalize_text import content_hash, content_text
 
 
 def main() -> None:
-    pair = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    pair = load_normalization_pair()
     feed_text = content_text(pair["feed_text"])
     show_text = content_text(pair["show_text"])
     feed_hash = content_hash(pair["feed_text"])
