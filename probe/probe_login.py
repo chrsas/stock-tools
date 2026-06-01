@@ -9,57 +9,16 @@ cookie 优先环境变量 XUEQIU_COOKIE，其次 config.local.auth.cookie。
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
-from typing import Any
 
 import httpx
-import yaml
 
+from kol_archive.config import load_config, resolve_cookie
 from probe.probe_xueqiu import bootstrap, new_client
 
 ROOT = Path(__file__).parent.parent
 CONF_DIR = ROOT / "config"
-
-
-def deep_merge(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
-    out = dict(base)
-    for key, value in (override or {}).items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = deep_merge(out[key], value)
-        else:
-            out[key] = value
-    return out
-
-
-def load_config(conf_dir: Path = CONF_DIR) -> dict[str, Any]:
-    base = yaml.safe_load((conf_dir / "config.yml").read_text(encoding="utf-8")) or {}
-    local_path = conf_dir / "config.local.yml"
-    local = yaml.safe_load(local_path.read_text(encoding="utf-8")) if local_path.exists() else {}
-    cfg = deep_merge(base, local or {})
-
-    seen: set[str] = set()
-    accounts: list[dict[str, Any]] = []
-    for source in ((base.get("accounts") or []), (local.get("accounts") or [])):
-        for account in source:
-            uid = str((account or {}).get("uid") or "").strip()
-            if uid and uid not in seen:
-                seen.add(uid)
-                accounts.append(account)
-    cfg["accounts"] = accounts
-    return cfg
-
-
-def resolve_cookie(cfg: dict[str, Any]) -> tuple[str | None, str]:
-    env_name = (cfg.get("auth") or {}).get("cookie_env") or "XUEQIU_COOKIE"
-    env_cookie = os.environ.get(env_name)
-    if env_cookie:
-        return env_cookie, "env"
-    local_cookie = (cfg.get("auth") or {}).get("cookie")
-    if local_cookie:
-        return local_cookie, "config.local"
-    return None, "none"
 
 
 def client_with_cookie(cookie_str: str | None) -> httpx.Client:
@@ -74,7 +33,7 @@ def client_with_cookie(cookie_str: str | None) -> httpx.Client:
 
 
 def main() -> None:
-    cfg = load_config()
+    cfg = load_config(CONF_DIR)
     if not cfg["accounts"]:
         raise SystemExit(
             "未配置追踪账号：请在 config/config.local.yml 的 accounts 中至少填写一个 uid"

@@ -1,0 +1,6 @@
+{
+  "error_description": "login required",
+  "error_uri": "/v4/statuses/user_timeline.json",
+  "error_data": null,
+  "error_code": "10022"
+}

@@ -16,5 +16,5 @@ function Invoke-PythonStep {
 
 Invoke-PythonStep -Arguments @("-m", "ruff", "check", ".")
 Invoke-PythonStep -Arguments @("-m", "ruff", "format", "--check", ".")
-Invoke-PythonStep -Arguments @("-m", "mypy", "probe", "tests")
+Invoke-PythonStep -Arguments @("-m", "mypy", "probe", "kol_archive", "tests")
 Invoke-PythonStep -Arguments @("-m", "pytest")

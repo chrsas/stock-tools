@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from probe.probe_login import deep_merge, load_config, resolve_cookie
+from kol_archive.config import deep_merge, load_config, resolve_cookie
 
 
 def write_config(conf_dir: Path, name: str, content: str) -> None:

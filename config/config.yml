@@ -26,6 +26,7 @@ polling:
   direct_recheck_interval_minutes: 360
   request_min_interval_seconds: 2.5   # ≥2–3s/请求
   request_jitter_seconds: 1.5
+  max_feed_pages: 20                  # 单轮翻页硬上限，命中后按 partial 留痕
   bootstrap_per_run: true             # 每轮仅 1 次首页引导铸 cookie
 
 # ── 监控与状态机参数（findings §10/§11）──────────────────────────

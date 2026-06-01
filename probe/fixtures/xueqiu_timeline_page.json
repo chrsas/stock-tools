@@ -1,0 +1,35 @@
+{
+  "count": 3,
+  "statuses": [
+    {
+      "id": 111,
+      "user_id": 100,
+      "created_at": 1762473181000,
+      "truncated": false,
+      "mark": 1,
+      "is_column": false,
+      "text": "old pinned post"
+    },
+    {
+      "id": 222,
+      "user_id": 100,
+      "created_at": 1780214445000,
+      "truncated": false,
+      "mark": 0,
+      "is_column": false,
+      "text": "alpha <a href=\"https://xueqiu.com/S/SH000001\">$index$</a>"
+    },
+    {
+      "id": 333,
+      "user_id": 100,
+      "created_at": 1779000000000,
+      "truncated": true,
+      "mark": 0,
+      "is_column": true,
+      "text": "preview only"
+    }
+  ],
+  "total": 30,
+  "page": 1,
+  "maxPage": 2
+}
