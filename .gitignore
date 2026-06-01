@@ -85,7 +85,7 @@ htmlcov/
 # .python-version
 
 ### Local config & data (规范硬约束：密钥/数据绝不入库)
-config/config.local.yml
+config/*.local.yml
 data/
 probe/raw/
 
