@@ -4,6 +4,7 @@ import json, time
 from pathlib import Path
 import httpx
 from probe_xueqiu import new_client, bootstrap, dump, RAW  # reuse
+from normalize_text import content_hash, content_text
 
 def scan_truncation(c, uids):
     print("\n=== 扫描截断/长文 ===")
@@ -44,6 +45,10 @@ def probe_truncated_pair(c, uid, sid):
     print(f"  feed.truncated={feed.get('truncated') if feed else 'N/A'} "
           f"feed.text_len={len(feed.get('text') or '') if feed else 0} "
           f"show.text_len={len(sh.get('text') or '')} show.truncated={sh.get('truncated')}")
+    if feed:
+        feed_text, show_text = feed.get("text") or "", sh.get("text") or ""
+        print(f"  normalized_text_equal={content_text(feed_text) == content_text(show_text)} "
+              f"content_hash_equal={content_hash(feed_text) == content_hash(show_text)}")
 
 if __name__ == "__main__":
     with new_client() as c:

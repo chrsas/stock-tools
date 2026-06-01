@@ -40,7 +40,7 @@
 | 采集 | Python + httpx / playwright | 单平台适配器，实现 `NormalizedPost` |
 | 富化 | LLM API | 阶段 2 仅手动触发单条；阶段 3 才批量 |
 | 界面 | 本地页面或 CLI | 第一版不上 React |
-| 密钥 | 仅环境变量 | 绝不入库、绝不进导出文件 |
+| 凭据 | API 密钥仅环境变量；登录 cookie 可用环境变量或被忽略的本地配置 | 绝不入库、绝不进导出文件 |
 | 备份 | SQLite backup API 或 `VACUUM INTO` | 不可直接 cp 主文件；定期恢复验证 |
 | 远程 | 暂不做 | 真需手机访问时再配 Tailscale |
 
@@ -192,7 +192,7 @@ prices  (只读)  ticker, date, close, ...
 - feed 与直链两任务，各按第 2 节事务顺序原子写入；实现 2.2–2.6 全部规则。
 
 **1c 备份与导出**
-SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JSON/CSV 导出；密钥仅环境变量。
+SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JSON/CSV 导出；API 密钥仅环境变量，登录 cookie 可用环境变量或被忽略的本地配置，任何凭据绝不进导出文件。
 
 **DoD**：A→B→A 落三条版本行且各带不同首次观察时间；partial run 中已见在场帖仍存档、但不产生缺席推断；full/preview 正确区分，preview 不触发编辑事件；feed 连续完整健康缺席落 `absent_confirmed` 并入队；健康直链删除占位落 `gone_confirmed` 且后续 404/限权不降级，正文被改可捕获为新版本；退化抓取/复查不动帖子状态与 `source_checked_at`；同一帖至多一条 pending；崩溃注入下事务整体回滚、证据与投影不错位；`posts` 身份字段与删除被触发器拒绝；备份可恢复且经验证。
 

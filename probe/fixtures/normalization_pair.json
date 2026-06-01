@@ -1,0 +1,9 @@
+{
+  "note": "脱敏回归样本：保留实测中的内联锚点、块级换行和 HTML 实体差异。",
+  "feed_text": "<p>看好 <a href=\"/S/SH600000\">$浦发银行(SH600000)$</a> &amp; 银行板块</p>\n<p>#长期主义#</p>",
+  "show_text": "<div>看好</div>\n<div><a href=\"/S/SH600000\">$浦发银行(SH600000)$</a>&nbsp;&amp;&nbsp;银行板块</div>\n<div>#长期主义#</div>",
+  "expected_content_text": "看好 $浦发银行(SH600000)$ & 银行板块 #长期主义#",
+  "escaped_literal_text": "<p>a &amp;amp; b</p>",
+  "expected_escaped_literal_text": "a &amp; b",
+  "decoded_entity_text": "<p>a &amp; b</p>"
+}

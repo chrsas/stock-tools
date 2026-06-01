@@ -40,9 +40,15 @@ def load_config() -> dict:
     return cfg
 
 
-def resolve_cookie(cfg: dict) -> str | None:
+def resolve_cookie(cfg: dict) -> tuple[str | None, str]:
     env_name = (cfg.get("auth") or {}).get("cookie_env") or "XUEQIU_COOKIE"
-    return os.environ.get(env_name) or (cfg.get("auth") or {}).get("cookie") or None
+    env_cookie = os.environ.get(env_name)
+    if env_cookie:
+        return env_cookie, "env"
+    local_cookie = (cfg.get("auth") or {}).get("cookie")
+    if local_cookie:
+        return local_cookie, "config.local"
+    return None, "none"
 
 
 def client_with_cookie(cookie_str: str | None) -> httpx.Client:
@@ -58,10 +64,11 @@ def client_with_cookie(cookie_str: str | None) -> httpx.Client:
 
 def main():
     cfg = load_config()
-    cookie = resolve_cookie(cfg)
+    if not cfg["accounts"]:
+        raise SystemExit("未配置追踪账号：请在 config/config.local.yml 的 accounts 中至少填写一个 uid")
+    cookie, source = resolve_cookie(cfg)
     print(f"accounts loaded: {[(a.get('uid'), a.get('note')) for a in cfg['accounts']]}")
-    print(f"cookie present: {bool(cookie)} (source: "
-          f"{'env' if os.environ.get((cfg.get('auth') or {}).get('cookie_env','XUEQIU_COOKIE')) else 'config.local'})")
+    print(f"cookie present: {bool(cookie)} (source: {source})")
     c = client_with_cookie(cookie)
     try:
         # 1) 登录是否解锁 page>=2：用第一个账号测 page1 与 page2

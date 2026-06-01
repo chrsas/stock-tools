@@ -121,7 +121,7 @@
 - **代价/边界**：纯空白编辑不可见（KOL 场景可接受）；哈希对拉丁文丢词边界（仅哈希，`content_text` 保留真实文字，展示不受损）。
 - **退化情形**：`is_column=true`（付费长文/专栏）或 `truncated=true` 时 feed 可能只给预览 → 该帖 feed 侧 `content_fidelity=preview`、不建版本，编辑检测退化为**仅 Track B**（直链 `show.json`）能力，须按规范 §2.4 标注。普通状态帖实测 ≤1547 字均 `truncated=false`、`text` 全量。
 
-> 证据：`raw/cmp_feed_text.txt`、`raw/cmp_show_text.txt`、`raw/05_*`（若有截断样本）。
+> 证据：`raw/cmp_feed_text.txt`、`raw/cmp_show_text.txt`、`raw/05_*`（若有截断样本）。脱敏回归样本与离线校验：`fixtures/normalization_pair.json`、`verify_normalization.py`。
 
 ---
 
@@ -153,7 +153,7 @@
 |---|---|---|
 | 探针平台 | `xueqiu` | 用户选定 |
 | 追踪账号 | **待用户提供**（uid 或主页 URL） | 探针用的是随机公开号，非目标 |
-| 登录 cookie | **建议用户提供**（`xq_a_token`/`xqat`/`u`，环境变量） | 翻页/回填/私密内容需要（§3） |
+| 登录 cookie | **建议用户提供**（`xq_a_token`/`xqat`/`u`，环境变量或本地 `config.local.yml`） | 翻页/回填/私密内容需要（§3） |
 | feed 轮询频率 | 每账号 2–6h | §9 温和节奏 |
 | 监控窗口天数 | 30 | §10 |
 | 缺席阈值 N | 3（规范下限） | §0、§2.2 |
@@ -176,7 +176,7 @@
 5. **错误码 → 状态机**：`10022`=登录降级（健康门不过）；`20210`/HTML404=not_found→unavailable；显式删除文案=gone_confirmed（码待补）；`is_private/is_refused/legal_user_visible`=restricted→unavailable。
 6. **guest 仅 page1**；`fetch_runs.pagination_complete` 据此判定；有登录 cookie 才做多页/回填。
 7. **`adapter_version`** 起始 `xueqiu-1`；接口结构若变更递增。
-8. **cookie 仅环境变量**，绝不入库、绝不进导出（规范硬约束）。
+8. **cookie 仅放环境变量或被忽略的本地 `config.local.yml`**，绝不入库、绝不进导出（规范硬约束）。
 
 ---
 
