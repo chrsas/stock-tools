@@ -39,10 +39,10 @@
 | 调度 | cron 或 APScheduler | feed 轮询、直链复查两个独立任务 |
 | 采集 | Python + httpx / playwright | 单平台适配器，实现 `NormalizedPost` |
 | 富化 | LLM API | 阶段 2 仅手动触发单条；阶段 3 才批量 |
-| 界面 | 本地页面或 CLI | 第一版不上 React |
+| 界面 | 本地页面 + CLI | 第一版不上 React；CLI 保留为维护与故障排查入口 |
 | 凭据 | API 密钥仅环境变量；登录 cookie 可用环境变量或被忽略的本地配置 | 绝不入库、绝不进导出文件 |
 | 备份 | SQLite backup API 或 `VACUUM INTO` | 不可直接 cp 主文件；定期恢复验证 |
-| 远程 | 暂不做 | 真需手机访问时再配 Tailscale |
+| 远程 | 阶段 2b 按需启用 | 手机访问只走 Tailscale 私网，不暴露公网 |
 
 迁移到 Postgres/Redis/worker/FastAPI/React 仅在出现实际瓶颈时。
 
@@ -202,6 +202,24 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 不建批量富化。时间线（三维状态人读标签、删帖强弱信号分级）；证据卡片（无 LLM，单帖观察历史、版本 diff、变迁及证据 run、附注、钉住开关）；`attention_log`（锁 `version_id`、创建即自动钉住）；改写训练（按需单条 LLM 改写写 `rewrite_exercises` 含 `version_id`、创建即自动钉住）。
 **DoD**：原始流与诚实观察时间可见；钉/取消钉遵守 2.6；写理由或改写训练自动钉住并锁版本。
 
+### 阶段 2b：轻量网页界面 + 手机私网访问
+不搬迁现有目录，不拆独立前端工程，不引入 React。网页与 CLI 共用现有 SQLite、状态机、展示投影和脱敏逻辑，继续保持单 Python 进程。
+
+**2b1 本机网页闭环**
+- 新增 `serve --config-dir config` 启动命令，默认只监听 `127.0.0.1`。
+- 服务端渲染原始时间线和证据卡片，原文始终可读；手机窄屏下保持可用。
+- 时间线展示三维状态、人读标签、删帖强弱信号、首次观察、最后观察和检测到缺失时间。
+- 证据卡片展示观察历史、版本列表、版本 diff、状态变迁、关联 run、脱敏附注、关注理由、改写训练和钉住状态。
+- 页面提供钉住、取消钉住、写关注理由、单条改写训练和记录人工 verdict 的操作入口；写入继续复用阶段 2 服务层。
+
+**2b2 手机私网访问**
+- 需要手机访问时，在部署机器和手机安装 Tailscale，只通过 tailnet 私网地址访问。
+- 服务监听地址必须显式配置为部署机器的 Tailscale 地址；默认值仍为 `127.0.0.1`，不得默认监听 `0.0.0.0`。
+- 不配置公网端口映射，不开放公网访问，不在页面、日志或异常中输出 cookie、API Key 或本地配置内容。
+- 所有修改状态的网页请求使用 `POST`，并校验 CSRF token；Tailscale ACL 仅允许用户自己的设备访问。
+
+**DoD**：本机浏览器可以完成阶段 2 的查看与操作闭环；页面只展示脱敏后的证据；CLI 行为保持兼容；默认监听仅限本机；显式绑定 Tailscale 地址后手机可在 tailnet 内访问；公网无法访问；网页路由、脱敏、CSRF 和关键写操作有自动化测试。
+
 ### 阶段 3：LLM 标签 + 标签门过滤（需累积样本）
 批量富化每个 `version` 出 `post_type`、三布尔标签、`rationale`、`evidence_snippet`、`model`、`prompt_version`（幂等键 UNIQUE(version_id, prompt_version)）；命中任一标签进过滤流按时间排序，过滤为默认、原始流一键可达；后期达 `MIN_SAMPLES` 加 `attention_tier`，按 `prompt_version` 隔离。
 **DoD**：命中标签进过滤流；原始流始终可达；样本不足不强行分级。
@@ -226,7 +244,7 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 - `live_monitoring_started_at` 系统自动写入。
 - LLM 供应商/模型/API Key（环境变量，阶段 2 起）。
 - 行情数据源（阶段 4）。
-- 部署机器；如需远程再配 Tailscale。
+- 部署机器；阶段 2b 如需手机访问，配置 Tailscale 地址、端口和 ACL。
 
 ---
 

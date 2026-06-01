@@ -10,7 +10,7 @@ from typing import cast
 import httpx
 import pytest
 
-from kol_archive.__main__ import _print_json, _resolve_db_path
+from kol_archive.__main__ import _configure_stdout_utf8, _print_json, _resolve_db_path
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.models import (
     ContentFidelity,
@@ -315,13 +315,14 @@ def test_explicit_database_path_overrides_configured_storage_path() -> None:
     assert _resolve_db_path(Path("data/override.sqlite3"), config) == Path("data/override.sqlite3")
 
 
-def test_print_json_reconfigures_stdout_to_utf8_for_emoji(
+def test_configure_stdout_utf8_supports_emoji_json_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw = io.BytesIO()
     stdout = io.TextIOWrapper(raw, encoding="gbk")
     monkeypatch.setattr(sys, "stdout", stdout)
 
+    _configure_stdout_utf8()
     _print_json({"text": "🥚"})
     stdout.flush()
 

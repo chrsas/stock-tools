@@ -69,11 +69,14 @@ def _connect_existing_archive(path: Path) -> tuple[sqlite3.Connection, Archive]:
     return connection, Archive(connection)
 
 
-def _print_json(payload: object) -> None:
+def _configure_stdout_utf8() -> None:
     reconfigure = getattr(sys.stdout, "reconfigure", None)
     if callable(reconfigure):
         # CLI JSON stays UTF-8 for Windows consoles and downstream redirection.
         reconfigure(encoding="utf-8")
+
+
+def _print_json(payload: object) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 
@@ -299,6 +302,7 @@ def _review_rewrite_command(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    _configure_stdout_utf8()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="KOL evidence archive")
     subparsers = parser.add_subparsers(required=True)
