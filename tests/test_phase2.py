@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
@@ -8,7 +10,7 @@ from typing import cast
 import httpx
 import pytest
 
-from kol_archive.__main__ import _resolve_db_path
+from kol_archive.__main__ import _print_json, _resolve_db_path
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.models import (
     ContentFidelity,
@@ -311,3 +313,17 @@ def test_explicit_database_path_overrides_configured_storage_path() -> None:
 
     assert _resolve_db_path(None, config) == Path("data/custom.sqlite3")
     assert _resolve_db_path(Path("data/override.sqlite3"), config) == Path("data/override.sqlite3")
+
+
+def test_print_json_reconfigures_stdout_to_utf8_for_emoji(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = io.BytesIO()
+    stdout = io.TextIOWrapper(raw, encoding="gbk")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    _print_json({"text": "🥚"})
+    stdout.flush()
+
+    assert json.loads(raw.getvalue().decode("utf-8")) == {"text": "🥚"}
+    stdout.detach()

@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,10 @@ def _connect_existing_archive(path: Path) -> tuple[sqlite3.Connection, Archive]:
 
 
 def _print_json(payload: object) -> None:
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        # CLI JSON stays UTF-8 for Windows consoles and downstream redirection.
+        reconfigure(encoding="utf-8")
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 

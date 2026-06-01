@@ -47,6 +47,12 @@ def _error_code(payload: dict[str, Any] | None) -> str | None:
     return str(value) if value is not None else None
 
 
+def response_failure_note(http_status: int, payload_issue: str | None = None) -> str:
+    if http_status != 200:
+        return f"http_{http_status}"
+    return payload_issue or "response_not_json"
+
+
 @dataclass(frozen=True)
 class FeedPage:
     posts: list[NormalizedPost]
@@ -178,6 +184,7 @@ def parse_probe_response(
     author_id: int,
     observed_at: str,
     ingest_mode: IngestMode = IngestMode.LIVE,
+    payload_issue: str | None = None,
 ) -> ProbeParse:
     error_code = _error_code(payload)
     if http_status == 429:
@@ -218,7 +225,7 @@ def parse_probe_response(
             ProbeResult.UNKNOWN,
             ContentFidelity.NA,
             None,
-            f"http_{http_status}",
+            response_failure_note(http_status, payload_issue),
         )
     if (
         bool(payload.get("is_private"))

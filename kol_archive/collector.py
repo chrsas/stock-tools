@@ -18,6 +18,7 @@ from kol_archive.adapters.xueqiu import (
     FeedPage,
     parse_feed_page,
     parse_probe_response,
+    response_failure_note,
 )
 from kol_archive.models import (
     FeedRun,
@@ -61,12 +62,14 @@ def utc_now() -> str:
     return datetime.now(tz=UTC).isoformat()
 
 
-def _json_payload(response: httpx.Response) -> dict[str, Any] | None:
+def _json_payload(response: httpx.Response) -> tuple[dict[str, Any] | None, str | None]:
     try:
         payload = response.json()
     except ValueError:
-        return None
-    return cast(dict[str, Any], payload) if isinstance(payload, dict) else None
+        return None, "response_not_json"
+    if not isinstance(payload, dict):
+        return None, "response_json_not_object"
+    return cast(dict[str, Any], payload), None
 
 
 def create_xueqiu_client(cookie: str | None, *, timeout_seconds: float = 20.0) -> httpx.Client:
@@ -126,7 +129,7 @@ class XueqiuCollector:
                 http_error_count += 1
                 notes = "http_error"
                 break
-            payload = _json_payload(response)
+            payload, payload_issue = _json_payload(response)
             error_code = None if payload is None else str(payload.get("error_code") or "")
             if response.status_code == 429:
                 status = RunStatus.PARTIAL
@@ -145,7 +148,7 @@ class XueqiuCollector:
                 status = RunStatus.FAILED if not parsed_pages else RunStatus.PARTIAL
                 login_state = LoginState.UNKNOWN
                 http_error_count += 1
-                notes = f"http_{response.status_code}"
+                notes = response_failure_note(response.status_code, payload_issue)
                 break
             try:
                 parsed = parse_feed_page(
@@ -211,12 +214,13 @@ class XueqiuCollector:
                     f"{BASE_URL}/statuses/show.json",
                     params={"id": target.platform_post_id},
                 )
-                payload = _json_payload(response)
+                payload, payload_issue = _json_payload(response)
                 parsed = parse_probe_response(
                     response.status_code,
                     payload,
                     author_id=target.author_id,
                     observed_at=started_at,
+                    payload_issue=payload_issue,
                 )
                 http_status = response.status_code
             except httpx.HTTPError:

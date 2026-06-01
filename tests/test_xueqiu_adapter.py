@@ -93,6 +93,33 @@ def test_probe_classifies_login_expiry_not_found_and_explicit_removal() -> None:
     assert removed.result is ProbeResult.EXPLICITLY_REMOVED
 
 
+def test_probe_classifies_non_json_200_response() -> None:
+    probe = parse_probe_response(
+        200,
+        None,
+        author_id=1,
+        observed_at="2026-06-01T00:00:00+00:00",
+    )
+
+    assert probe.status is RunStatus.FAILED
+    assert probe.result is ProbeResult.UNKNOWN
+    assert probe.notes == "response_not_json"
+
+
+def test_probe_classifies_json_non_object_200_response() -> None:
+    probe = parse_probe_response(
+        200,
+        None,
+        author_id=1,
+        observed_at="2026-06-01T00:00:00+00:00",
+        payload_issue="response_json_not_object",
+    )
+
+    assert probe.status is RunStatus.FAILED
+    assert probe.result is ProbeResult.UNKNOWN
+    assert probe.notes == "response_json_not_object"
+
+
 @pytest.mark.parametrize(
     "restriction",
     [

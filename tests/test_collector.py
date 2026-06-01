@@ -237,6 +237,55 @@ def test_feed_records_rate_limit_and_http_error(
     assert tuple(row) == expected
 
 
+def test_feed_records_non_json_200_response(archive: Archive) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html></html>", request=request)
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        collector = XueqiuCollector(
+            archive,
+            client,
+            CollectorSettings(0, 0),
+            sleep=lambda _: None,
+            clock=lambda: NOW,
+        )
+        run_id = collector.poll_feed(1, "100", "2026-05-01T00:00:00+00:00")
+
+    row = archive.connection.execute(
+        "SELECT status, login_state, http_error_count, notes FROM fetch_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    assert row is not None
+    assert tuple(row) == (RunStatus.FAILED, LoginState.UNKNOWN, 1, "response_not_json")
+
+
+def test_feed_records_json_non_object_200_response(archive: Archive) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[], request=request)
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        collector = XueqiuCollector(
+            archive,
+            client,
+            CollectorSettings(0, 0),
+            sleep=lambda _: None,
+            clock=lambda: NOW,
+        )
+        run_id = collector.poll_feed(1, "100", "2026-05-01T00:00:00+00:00")
+
+    row = archive.connection.execute(
+        "SELECT status, login_state, http_error_count, notes FROM fetch_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    assert row is not None
+    assert tuple(row) == (
+        RunStatus.FAILED,
+        LoginState.UNKNOWN,
+        1,
+        "response_json_not_object",
+    )
+
+
 def test_due_probe_maps_not_found_to_unavailable(archive: Archive) -> None:
     post_id = seed_post(archive)
     archive.pin_post(post_id, "2026-06-01T01:00:00+00:00")
