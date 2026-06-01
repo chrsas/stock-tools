@@ -175,7 +175,8 @@
 4. **置顶帖按 `mark==1` 识别并排除出 covered 范围**（§2）。
 5. **错误码 → 状态机**：`10022`=登录降级（健康门不过）；`20210`/HTML404=not_found→unavailable；显式删除文案=gone_confirmed（码待补）；`is_private/is_refused/legal_user_visible`=restricted→unavailable。
 6. **guest 仅 page1**；`fetch_runs.pagination_complete` 据此判定；有登录 cookie 才做多页/回填。
-7. **`adapter_version`** 起始 `xueqiu-1`；接口结构若变更递增。
+7. **`adapter_version`** 起始 `xueqiu-1`；接口结构若变更递增。当前实现为 `xueqiu-2`，
+   增补 `legal_user_visible=false` 的受限映射。
 8. **cookie 仅放环境变量或被忽略的本地 `config.local.yml`**，绝不入库、绝不进导出（规范硬约束）。
 
 ---

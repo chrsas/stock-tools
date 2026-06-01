@@ -43,7 +43,7 @@ fidelity:
   direct: full
 
 adapter:
-  version: xueqiu-1   # 接口结构变更时递增
+  version: xueqiu-2   # 接口结构变更时递增
 
 storage:
   db_path: data/kol.sqlite3

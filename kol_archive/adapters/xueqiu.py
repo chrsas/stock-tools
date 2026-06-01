@@ -17,7 +17,7 @@ from kol_archive.models import (
 from kol_archive.time import timestamp_at_or_before
 from probe.normalize_text import content_hash, content_text
 
-ADAPTER_VERSION = "xueqiu-1"
+ADAPTER_VERSION = "xueqiu-2"
 LOGIN_EXPIRED_CODE = "10022"
 NOT_FOUND_CODE = "20210"
 
@@ -220,7 +220,11 @@ def parse_probe_response(
             None,
             f"http_{http_status}",
         )
-    if bool(payload.get("is_private")) or bool(payload.get("is_refused")):
+    if (
+        bool(payload.get("is_private"))
+        or bool(payload.get("is_refused"))
+        or payload.get("legal_user_visible") is False
+    ):
         return ProbeParse(
             RunStatus.OK,
             LoginState.VALID,

@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from kol_archive.adapters.xueqiu import (
     epoch_ms_to_utc,
     parse_feed_page,
@@ -89,3 +91,26 @@ def test_probe_classifies_login_expiry_not_found_and_explicit_removal() -> None:
     assert (expired.status, expired.login_state) == (RunStatus.PARTIAL, LoginState.EXPIRED)
     assert missing.result is ProbeResult.NOT_FOUND
     assert removed.result is ProbeResult.EXPLICITLY_REMOVED
+
+
+@pytest.mark.parametrize(
+    "restriction",
+    [
+        {"is_private": True},
+        {"is_refused": True},
+        {"legal_user_visible": False},
+    ],
+)
+def test_probe_classifies_restricted_visibility_flags(restriction: dict[str, bool]) -> None:
+    payload = load_fixture("xueqiu_show_reachable.json")
+    payload.update(restriction)
+
+    restricted = parse_probe_response(
+        200,
+        payload,
+        author_id=1,
+        observed_at="2026-06-01T00:00:00+00:00",
+    )
+
+    assert restricted.result is ProbeResult.RESTRICTED
+    assert restricted.observed_post is None
