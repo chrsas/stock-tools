@@ -48,6 +48,8 @@ adapter:
 storage:
   db_path: data/kol.sqlite3
   backup_dir: data/backups
+  backup_after_run: true               # 每轮采集完成后生成经恢复验证的快照
+  backup_retention_count: 30           # 仅保留最近 N 份快照
 
 # ── 后续阶段占位（阶段2起填）──────────────────────────────────────
 # llm:
