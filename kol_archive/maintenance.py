@@ -177,7 +177,7 @@ def _is_sensitive_key(key: str) -> bool:
     return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
 
 
-def _redact_text(value: str) -> str:
+def redact_text(value: str) -> str:
     redacted = _COOKIE_TEXT_RE.sub("cookie=[REDACTED]", value)
     redacted = _BEARER_RE.sub("Bearer [REDACTED]", redacted)
     return _SECRET_ASSIGNMENT_RE.sub(r"\1=[REDACTED]", redacted)
@@ -192,7 +192,7 @@ def _sanitize_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_value(item) for item in value]
     if isinstance(value, str):
-        return _redact_text(value)
+        return redact_text(value)
     return value
 
 
@@ -202,7 +202,7 @@ def _export_value(relation: str, column: str, value: Any) -> Any:
     if (relation, column) in JSON_COLUMNS:
         return _sanitize_value(json.loads(str(value)))
     if column in TEXT_REDACTION_COLUMNS:
-        return _redact_text(str(value))
+        return redact_text(str(value))
     return value
 
 

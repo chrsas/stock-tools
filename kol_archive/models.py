@@ -181,3 +181,10 @@ class ProbeTarget:
     post_id: int
     author_id: int
     platform_post_id: str
+
+
+@dataclass(frozen=True)
+class RewriteSource:
+    post_id: int
+    version_id: int
+    original_text: str
