@@ -31,6 +31,7 @@ from kol_archive.models import ArchiveSettings, QueueReason
 from kol_archive.presentation import build_evidence_card, list_timeline
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
 from kol_archive.service import Archive
+from kol_archive.time import parse_utc_timestamp
 from kol_archive.web import load_web_settings, serve_archive
 
 LOGGER = logging.getLogger(__name__)
@@ -67,6 +68,25 @@ def _browser_section(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("browser must be a mapping")
     return value
+
+
+def _backfill_section(config: dict[str, Any]) -> dict[str, Any]:
+    value = config.get("backfill") or {}
+    if not isinstance(value, dict):
+        raise ValueError("backfill must be a mapping")
+    return value
+
+
+def _build_collector(archive: Archive, client: Any, polling: dict[str, Any]) -> XueqiuCollector:
+    return XueqiuCollector(
+        archive,
+        client,
+        CollectorSettings(
+            request_min_interval_seconds=float(polling.get("request_min_interval_seconds") or 2.5),
+            request_jitter_seconds=float(polling.get("request_jitter_seconds") or 1.5),
+            max_feed_pages=int(polling.get("max_feed_pages", 20)),
+        ),
+    )
 
 
 def _build_collector_client(config: dict[str, Any]) -> Any:
@@ -128,20 +148,18 @@ def run_once(conf_dir: Path) -> None:
             recent_feed_absent_ttl_days=int(monitoring.get("recent_feed_absent_ttl_days") or 7),
         ),
     )
+    backfill = _backfill_section(config)
+    backfill_on_add = bool(backfill.get("on_add_enabled", True))
+    on_add_pages_value = backfill.get("on_add_pages")
+    on_add_pages = 5 if on_add_pages_value is None else int(on_add_pages_value)
+    # 0 explicitly disables auto-backfill; a negative count is a misconfiguration, not a
+    # silent off switch (mirrors backfill_feed's max_pages validation).
+    if on_add_pages < 0:
+        raise ValueError("backfill.on_add_pages must not be negative (use 0 to disable)")
     client = None
     try:
         client = _build_collector_client(config)
-        collector = XueqiuCollector(
-            archive,
-            client,
-            CollectorSettings(
-                request_min_interval_seconds=float(
-                    polling.get("request_min_interval_seconds") or 2.5
-                ),
-                request_jitter_seconds=float(polling.get("request_jitter_seconds") or 1.5),
-                max_feed_pages=int(polling.get("max_feed_pages", 20)),
-            ),
-        )
+        collector = _build_collector(archive, client, polling)
         now = datetime.now(tz=UTC)
         archive.expire_rechecks(now.isoformat())
         window_started_at = (
@@ -150,14 +168,55 @@ def run_once(conf_dir: Path) -> None:
         accounts = config.get("accounts") or []
         if not accounts:
             raise ValueError("at least one account must be configured")
+        want_backfill = backfill_on_add and on_add_pages > 0
+        feed_blocked = False
         for account in accounts:
             uid = str(account.get("uid") or "").strip()
             if not uid:
                 continue
             note = str(account.get("note") or "") or None
             author_id = archive.ensure_author("xueqiu", uid, now.isoformat(), note)
-            collector.poll_feed(author_id, uid, window_started_at)
-        collector.probe_due_posts()
+            previous_covered_to = archive.last_live_covered_to(author_id)
+            live_run_id = collector.poll_feed(
+                author_id, uid, window_started_at, previous_covered_to=previous_covered_to
+            )
+            # If the live poll hit rate limiting / login expiry / transport errors, the
+            # session as a whole has hit a wall — every later request shares the same
+            # cookies and endpoint host, so stop the account loop (and, below, skip the
+            # shared probe pass) instead of marching on to the next account.
+            if archive.feed_run_blocked(live_run_id):
+                feed_blocked = True
+                break
+            # Pull a few pages of history beyond the live window so the archive has a
+            # baseline (recorded as ingest_mode=backfill). Page past the live run's last
+            # page so we reach genuinely older posts instead of re-requesting the recent
+            # window, and keep retrying on later runs until the baseline reaches its
+            # planned depth — a rate-limited or failed first attempt must not leave the
+            # account un-backfilled.
+            #
+            # Only resume from a parse-clean live run: a degraded last page may not be the
+            # real end of the timeline, so its page count would start the backfill on an
+            # out-of-range page. Skip and leave the baseline pending for a later clean run.
+            if (
+                want_backfill
+                and archive.baseline_backfill_pending(author_id)
+                and archive.feed_run_parse_clean(live_run_id)
+            ):
+                backfill_run_id = collector.backfill_feed(
+                    author_id,
+                    uid,
+                    max_pages=on_add_pages,
+                    start_page=archive.feed_run_pages(live_run_id) + 1,
+                )
+                # The backfill hits the same endpoint; if it tripped the wall, treat the
+                # session as blocked too — stop the loop and skip the probe pass.
+                if archive.feed_run_blocked(backfill_run_id):
+                    feed_blocked = True
+                    break
+        # Direct-link probes hit the same host and session as the feed; if any feed poll
+        # was blocked this run, skip the probe pass too (same rule as the backfill gate).
+        if not feed_blocked:
+            collector.probe_due_posts()
     finally:
         if client is not None:
             client.close()
@@ -173,6 +232,56 @@ def run_once(conf_dir: Path) -> None:
             result.snapshot_path,
             len(result.removed_snapshots),
         )
+
+
+def run_backfill(
+    conf_dir: Path,
+    *,
+    uid: str,
+    pages: int | None,
+    until: str | None,
+) -> None:
+    """Manually pull deeper history for one account (ingest_mode=backfill)."""
+    if not uid.strip():
+        raise ValueError("uid must not be empty")
+    config = load_config(conf_dir)
+    storage = _section(config, "storage")
+    polling = _section(config, "polling")
+    monitoring = _section(config, "monitoring")
+    backfill = _backfill_section(config)
+    command_pages_value = backfill.get("command_pages")
+    command_pages = 10 if command_pages_value is None else int(command_pages_value)
+    max_pages = pages if pages is not None else command_pages
+    # Validate inputs before any side effects (DB creation, client build, author insert).
+    # backfill_feed re-checks these, but only after we have already touched the filesystem.
+    if max_pages < 1:
+        raise ValueError("max_pages must be positive")
+    if until is not None:
+        parse_utc_timestamp(until)
+    db_path = Path(str(storage.get("db_path") or "data/kol.sqlite3"))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = connect_database(db_path)
+    initialize_database(connection)
+    archive = Archive(
+        connection,
+        ArchiveSettings(
+            absent_threshold_n=int(monitoring.get("absent_threshold_n") or 3),
+            recent_feed_absent_ttl_days=int(monitoring.get("recent_feed_absent_ttl_days") or 7),
+        ),
+    )
+    client = None
+    try:
+        client = _build_collector_client(config)
+        collector = _build_collector(archive, client, polling)
+        author_id = archive.ensure_author("xueqiu", uid.strip(), datetime.now(tz=UTC).isoformat())
+        run_id = collector.backfill_feed(author_id, uid.strip(), max_pages=max_pages, until=until)
+    finally:
+        if client is not None:
+            client.close()
+        connection.close()
+    LOGGER.info(
+        "backfill complete uid=%s run_id=%s max_pages=%s until=%s", uid, run_id, max_pages, until
+    )
 
 
 def run_login(conf_dir: Path, *, uid: str | None, minimized: bool) -> None:
@@ -223,6 +332,10 @@ def _login_command(args: argparse.Namespace) -> None:
 
 def _run_once_command(args: argparse.Namespace) -> None:
     run_once(args.config_dir)
+
+
+def _backfill_command(args: argparse.Namespace) -> None:
+    run_backfill(args.config_dir, uid=args.uid, pages=args.pages, until=args.until)
 
 
 def _backup_command(args: argparse.Namespace) -> None:
@@ -398,6 +511,18 @@ def main() -> None:
     run_parser = subparsers.add_parser("run-once", help="poll feeds and probe due posts")
     run_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     run_parser.set_defaults(handler=_run_once_command)
+    backfill_parser = subparsers.add_parser(
+        "backfill", help="pull deeper history for one account (ingest_mode=backfill)"
+    )
+    backfill_parser.add_argument("--uid", required=True, help="account uid to backfill")
+    backfill_parser.add_argument(
+        "--pages", type=int, help="max pages to page back (default from config)"
+    )
+    backfill_parser.add_argument(
+        "--until", help="page back until reaching posts at or before this ISO timestamp"
+    )
+    backfill_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    backfill_parser.set_defaults(handler=_backfill_command)
     backup_parser = subparsers.add_parser("backup", help="create and verify a SQLite snapshot")
     backup_parser.add_argument("--path", type=Path)
     backup_parser.add_argument("--config-dir", type=Path, default=Path("config"))

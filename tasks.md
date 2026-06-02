@@ -70,8 +70,11 @@ fetch_runs                       [append-only]
   status(ok|partial|failed), login_state(valid|expired|unknown),
   pages_fetched, pagination_complete(bool), covered_from, covered_to,
   rate_limited(bool), http_error_count, ingest_mode(live|backfill),
-  adapter_version, notes
+  adapter_version, parse_failure_count, reached_timeline_end(bool), notes
   -- 完整健康 = status=ok AND login_state=valid AND pagination_complete AND NOT rate_limited
+  -- reached_timeline_end：本轮翻到时间线尽头（page>=maxPage），区别于「仅覆盖近窗/到 until」；
+  --   短时间线账号据此直接判定基线已建立，避免自动回填反复请求越界页。
+  -- parse_failure_count：本轮降级/无法解析的条目数；>0 视为不干净，基线判定不计入、留待重试。
 
 probe_runs                       [append-only]
   id, post_id, started_at, finished_at, observed_at,

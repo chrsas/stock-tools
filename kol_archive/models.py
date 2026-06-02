@@ -58,6 +58,19 @@ class ProbeResult(StrEnum):
     UNKNOWN = "unknown"
 
 
+# fetch_runs.notes sentinel: a backfill stopped because it hit its page budget.
+# This is a *planned* stop (the baseline reached its configured depth), distinct
+# from a collection failure (rate limiting / HTTP / parse errors). The archive
+# uses it to tell "baseline established" from "retry needed". Shared here so the
+# collector (writer) and the service (reader) agree without a circular import.
+BACKFILL_PAGES_NOTE = "backfill_pages_reached"
+
+# A page that could not be parsed at all (the adapter raised), as opposed to a
+# page that parsed with some un-parseable entries (counted in parse_failure_count).
+# Shared so the collector (writer) and the service (reader) agree on the note text.
+TIMELINE_PARSE_FAILED_NOTE = "timeline_parse_failed"
+
+
 class EventDimension(StrEnum):
     FEED_STATE = "feed_state"
     SOURCE_STATE = "source_state"
@@ -119,6 +132,7 @@ class FeedRun:
     ingest_mode: IngestMode
     adapter_version: str
     parse_failure_count: int = 0
+    reached_timeline_end: bool = False
     notes: str | None = None
 
     def with_effective_status(self, posts: list[NormalizedPost]) -> FeedRun:

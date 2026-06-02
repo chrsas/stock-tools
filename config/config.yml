@@ -29,6 +29,12 @@ polling:
   max_feed_pages: 20                  # 单轮翻页硬上限，命中后按 partial 留痕
   bootstrap_per_run: true             # 每轮仅 1 次首页引导铸 cookie
 
+# ── 历史回填（与实时监控分离，宪章第9条；回填版本不进事件研究）──────────
+backfill:
+  on_add_enabled: true   # 首次加入某账号时，自动回填一段历史作为基线
+  on_add_pages: 5        # 首次加入时，在实时轮询覆盖范围之后再多回填 N 页历史；0=关闭，负值报错
+  command_pages: 10      # `backfill` 命令未指定 --pages 时的默认页数
+
 # ── 监控与状态机参数（findings §10/§11）──────────────────────────
 monitoring:
   window_days: 30                     # recent_window 默认窗口

@@ -11,11 +11,14 @@ from datetime import timedelta
 from typing import cast
 
 from kol_archive.models import (
+    BACKFILL_PAGES_NOTE,
+    TIMELINE_PARSE_FAILED_NOTE,
     ArchiveSettings,
     ContentFidelity,
     EventDimension,
     FeedRun,
     FeedState,
+    IngestMode,
     LoginState,
     NormalizedPost,
     PendingPositive,
@@ -118,6 +121,102 @@ class Archive:
             return int(row["id"])
         return self.add_author(platform, platform_uid, live_monitoring_started_at, notes)
 
+    def get_author_id(self, platform: str, platform_uid: str) -> int | None:
+        row = self.connection.execute(
+            "SELECT id FROM authors WHERE platform = ? AND platform_uid = ?",
+            (platform, platform_uid),
+        ).fetchone()
+        return None if row is None else int(row["id"])
+
+    def last_live_covered_to(self, author_id: int) -> str | None:
+        """Newest feed-observed post time from prior live runs, for continuity checks."""
+        row = self.connection.execute(
+            """
+            SELECT MAX(covered_to) AS covered_to FROM fetch_runs
+            WHERE author_id = ? AND ingest_mode = ? AND covered_to IS NOT NULL
+            """,
+            (author_id, IngestMode.LIVE),
+        ).fetchone()
+        return None if row is None or row["covered_to"] is None else str(row["covered_to"])
+
+    def feed_run_pages(self, fetch_run_id: int) -> int:
+        """Pages fetched by one recorded feed run (used to resume backfill past it)."""
+        row = self.connection.execute(
+            "SELECT pages_fetched FROM fetch_runs WHERE id = ?",
+            (fetch_run_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown fetch run id: {fetch_run_id}")
+        return int(row["pages_fetched"])
+
+    def feed_run_parse_clean(self, fetch_run_id: int) -> bool:
+        """True if a feed run parsed every page cleanly (no degraded/un-parseable pages).
+
+        A live run whose last page is degraded — some entries un-parseable
+        (``parse_failure_count > 0``) or the whole page un-parseable
+        (``notes = TIMELINE_PARSE_FAILED_NOTE``) — cannot be trusted to have located
+        the real end of the timeline, so its page count must not seed an auto-backfill's
+        start page. Such a run leaves the baseline pending for a later clean retry.
+        """
+        row = self.connection.execute(
+            "SELECT parse_failure_count, notes FROM fetch_runs WHERE id = ?",
+            (fetch_run_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown fetch run id: {fetch_run_id}")
+        return int(row["parse_failure_count"]) == 0 and row["notes"] != TIMELINE_PARSE_FAILED_NOTE
+
+    def feed_run_blocked(self, fetch_run_id: int) -> bool:
+        """True if a feed run hit rate limiting, login expiry, or transport errors.
+
+        These mean the session/endpoint pushed back; a clean coverage gap or a
+        page-budget cap (``status=partial`` with no errors) is *not* blocked. Used
+        to decide whether to pile more requests (auto-backfill, direct-link probes)
+        onto the same wall this run.
+        """
+        row = self.connection.execute(
+            "SELECT rate_limited, http_error_count, login_state FROM fetch_runs WHERE id = ?",
+            (fetch_run_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown fetch run id: {fetch_run_id}")
+        return bool(
+            row["rate_limited"]
+            or int(row["http_error_count"]) > 0
+            or str(row["login_state"]) != LoginState.VALID
+        )
+
+    def baseline_backfill_pending(self, author_id: int) -> bool:
+        """True until the history baseline is established for this author.
+
+        The baseline counts as established by a clean run (no parse failures) that is
+        one of:
+
+        * a backfill that made a planned stop — paged to the end of the timeline or
+          stopped at its configured page budget (``notes = BACKFILL_PAGES_NOTE``); or
+        * any feed run (live or backfill) that paged to the actual end of the
+          timeline (``reached_timeline_end``). A short-timeline account whose live
+          poll already reaches the end has no older history to backfill, so we must
+          not keep requesting out-of-range pages forever.
+
+        Runs that ended on a collection failure — rate limiting, HTTP/network errors,
+        login expiry — or that returned degraded (un-parseable) pages leave the
+        baseline pending so a later run retries instead of skipping on partial data.
+        """
+        row = self.connection.execute(
+            """
+            SELECT 1 FROM fetch_runs
+            WHERE author_id = ? AND parse_failure_count = 0
+              AND (
+                  reached_timeline_end = 1
+                  OR (ingest_mode = ? AND (pagination_complete = 1 OR notes = ?))
+              )
+            LIMIT 1
+            """,
+            (author_id, IngestMode.BACKFILL, BACKFILL_PAGES_NOTE),
+        ).fetchone()
+        return row is None
+
     def probe_targets(self) -> list[ProbeTarget]:
         rows = self.connection.execute(
             """
@@ -163,7 +262,17 @@ class Archive:
                 self._insert_positive_events(fetch_run_id, positive)
 
             projections: list[PendingProjection] = []
-            if is_healthy_feed_run(effective_run):
+            # Backfill is historical archival only: it never drives absence/out_of_scope
+            # inference (charter rule 9 separates backfill from live monitoring). An empty
+            # timeline (a brand-new or fully-cleared account) is a healthy round but covers
+            # no time range, so there is nothing to infer absence over — skip inference
+            # rather than treating the missing coverage as an error.
+            if (
+                effective_run.ingest_mode is IngestMode.LIVE
+                and is_healthy_feed_run(effective_run)
+                and effective_run.covered_from is not None
+                and effective_run.covered_to is not None
+            ):
                 projections = self._prepare_negative_inferences(
                     fetch_run_id, effective_run, set(post_ids.values())
                 )
@@ -447,8 +556,9 @@ class Archive:
             INSERT INTO fetch_runs(
                 author_id, platform, started_at, finished_at, status, login_state,
                 pages_fetched, pagination_complete, covered_from, covered_to,
-                rate_limited, http_error_count, ingest_mode, adapter_version, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rate_limited, http_error_count, ingest_mode, adapter_version,
+                parse_failure_count, reached_timeline_end, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run.author_id,
@@ -465,6 +575,8 @@ class Archive:
                 run.http_error_count,
                 run.ingest_mode,
                 run.adapter_version,
+                run.parse_failure_count,
+                run.reached_timeline_end,
                 run.notes,
             ),
         )

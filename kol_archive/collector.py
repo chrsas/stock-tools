@@ -6,7 +6,7 @@ import logging
 import random
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -21,6 +21,8 @@ from kol_archive.adapters.xueqiu import (
     response_failure_note,
 )
 from kol_archive.models import (
+    BACKFILL_PAGES_NOTE,
+    TIMELINE_PARSE_FAILED_NOTE,
     FeedRun,
     IngestMode,
     LoginState,
@@ -29,6 +31,7 @@ from kol_archive.models import (
     RunStatus,
 )
 from kol_archive.service import Archive
+from kol_archive.time import parse_utc_timestamp, timestamp_at_or_before
 
 LOGGER = logging.getLogger(__name__)
 BASE_URL = "https://xueqiu.com"
@@ -56,6 +59,26 @@ class CollectorSettings:
             raise ValueError("request_jitter_seconds must not be negative")
         if self.max_feed_pages < 1:
             raise ValueError("max_feed_pages must be positive")
+
+
+@dataclass(frozen=True)
+class _FeedFetch:
+    """Raw outcome of paging a feed, before ingest-mode-specific run assembly."""
+
+    started_at: str
+    finished_at: str
+    status: RunStatus
+    login_state: LoginState
+    rate_limited: bool
+    http_error_count: int
+    parse_failure_count: int
+    pages_fetched: int
+    pagination_complete: bool
+    covered_from: str | None
+    covered_to: str | None
+    notes: str | None
+    reached_timeline_end: bool = False
+    posts: list[NormalizedPost] = field(default_factory=list)
 
 
 def utc_now() -> str:
@@ -104,7 +127,108 @@ class XueqiuCollector:
         self.sleep = sleep
         self.clock = clock
 
-    def poll_feed(self, author_id: int, platform_uid: str, window_started_at: str) -> int:
+    def poll_feed(
+        self,
+        author_id: int,
+        platform_uid: str,
+        window_started_at: str,
+        *,
+        previous_covered_to: str | None = None,
+    ) -> int:
+        """Live feed poll: page back until the recent window is covered.
+
+        ``previous_covered_to`` is the newest post observed by the prior live run.
+        If this run's coverage does not page back far enough to reconnect with it
+        (a gap left by a long interval or a prolific author), the run is downgraded
+        to ``partial`` so the health gate suppresses any negative inference over the
+        hole — we must not read a not-yet-reached post as a confirmed absence.
+        """
+        fetch = self._fetch_feed(
+            author_id,
+            platform_uid,
+            ingest_mode=IngestMode.LIVE,
+            page_budget=self.settings.max_feed_pages,
+            target_reached=lambda page: page.covers_window(window_started_at),
+            cap_note="max_feed_pages_reached",
+        )
+        status = fetch.status
+        pagination_complete = fetch.pagination_complete
+        notes = fetch.notes
+        if (
+            previous_covered_to is not None
+            and fetch.covered_from is not None
+            and not timestamp_at_or_before(fetch.covered_from, previous_covered_to)
+        ):
+            status = RunStatus.PARTIAL
+            pagination_complete = False
+            notes = notes or "coverage_gap"
+        return self._record_feed_run(
+            author_id, fetch, IngestMode.LIVE, status, pagination_complete, notes
+        )
+
+    def backfill_feed(
+        self,
+        author_id: int,
+        platform_uid: str,
+        *,
+        max_pages: int,
+        until: str | None = None,
+        start_page: int = 1,
+    ) -> int:
+        """Historical backfill: archive up to ``max_pages`` (or back to ``until``).
+
+        Paging begins at ``start_page`` so an auto-backfill can resume *past* the
+        pages a live poll already covered, reaching genuinely older posts instead
+        of re-requesting the recent window. Runs as ``ingest_mode=backfill`` so the
+        archive records only the positive history and never infers
+        absence/out_of_scope from it (charter rule 9).
+        """
+        if max_pages < 1:
+            raise ValueError("max_pages must be positive")
+        if start_page < 1:
+            raise ValueError("start_page must be positive")
+        # Validate ``until`` here, not lazily inside target_reached: a short timeline that
+        # ends via ``page >= max_page`` never compares against it, so a malformed bound
+        # would otherwise be silently accepted.
+        if until is not None:
+            parse_utc_timestamp(until)
+
+        def target_reached(page: FeedPage) -> bool:
+            if page.page >= page.max_page:
+                return True
+            if until is not None and page.covered_from is not None:
+                return timestamp_at_or_before(page.covered_from, until)
+            return False
+
+        fetch = self._fetch_feed(
+            author_id,
+            platform_uid,
+            ingest_mode=IngestMode.BACKFILL,
+            page_budget=max_pages,
+            target_reached=target_reached,
+            cap_note=BACKFILL_PAGES_NOTE,
+            start_page=start_page,
+        )
+        return self._record_feed_run(
+            author_id,
+            fetch,
+            IngestMode.BACKFILL,
+            fetch.status,
+            fetch.pagination_complete,
+            fetch.notes,
+        )
+
+    def _fetch_feed(
+        self,
+        author_id: int,
+        platform_uid: str,
+        *,
+        ingest_mode: IngestMode,
+        page_budget: int,
+        target_reached: Callable[[FeedPage], bool],
+        cap_note: str,
+        start_page: int = 1,
+    ) -> _FeedFetch:
         started_at = self.clock()
         observed_at = started_at
         posts_by_id: dict[str, NormalizedPost] = {}
@@ -115,8 +239,9 @@ class XueqiuCollector:
         rate_limited = False
         http_error_count = 0
         notes: str | None = None
-        page_number = 1
+        page_number = start_page
         pagination_complete = False
+        reached_timeline_end = False
         while True:
             try:
                 response = self.client.get(
@@ -155,20 +280,25 @@ class XueqiuCollector:
                     payload,
                     author_id=author_id,
                     observed_at=observed_at,
+                    ingest_mode=ingest_mode,
                 )
             except ValueError:
                 status = RunStatus.PARTIAL
-                notes = "timeline_parse_failed"
+                notes = TIMELINE_PARSE_FAILED_NOTE
                 break
             parsed_pages.append(parsed)
             posts_by_id.update((post.platform_post_id, post) for post in parsed.posts)
             parse_failure_count += parsed.parse_failure_count
-            if parsed.covers_window(window_started_at):
+            if target_reached(parsed):
                 pagination_complete = True
+                # Distinguish "paged to the actual end of the timeline" from "covered the
+                # recent window / hit the until bound": only the former means there is no
+                # older history left to backfill.
+                reached_timeline_end = parsed.page >= parsed.max_page
                 break
-            if page_number >= self.settings.max_feed_pages:
+            if len(parsed_pages) >= page_budget:
                 status = RunStatus.PARTIAL
-                notes = "max_feed_pages_reached"
+                notes = cap_note
                 break
             page_number += 1
             self._wait()
@@ -182,26 +312,53 @@ class XueqiuCollector:
             (page.covered_to for page in parsed_pages if page.covered_to is not None),
             default=None,
         )
+        return _FeedFetch(
+            started_at=started_at,
+            finished_at=finished_at,
+            status=status,
+            login_state=login_state,
+            rate_limited=rate_limited,
+            http_error_count=http_error_count,
+            parse_failure_count=parse_failure_count,
+            pages_fetched=len(parsed_pages),
+            pagination_complete=pagination_complete,
+            reached_timeline_end=reached_timeline_end,
+            covered_from=covered_from,
+            covered_to=covered_to,
+            notes=notes,
+            posts=list(posts_by_id.values()),
+        )
+
+    def _record_feed_run(
+        self,
+        author_id: int,
+        fetch: _FeedFetch,
+        ingest_mode: IngestMode,
+        status: RunStatus,
+        pagination_complete: bool,
+        notes: str | None,
+    ) -> int:
         return self.archive.record_feed_run(
             FeedRun(
                 author_id=author_id,
                 platform="xueqiu",
-                started_at=started_at,
-                finished_at=finished_at,
+                started_at=fetch.started_at,
+                finished_at=fetch.finished_at,
                 status=status,
-                login_state=login_state,
-                pages_fetched=len(parsed_pages),
+                login_state=fetch.login_state,
+                pages_fetched=fetch.pages_fetched,
                 pagination_complete=pagination_complete,
-                covered_from=covered_from,
-                covered_to=covered_to,
-                rate_limited=rate_limited,
-                http_error_count=http_error_count,
-                ingest_mode=IngestMode.LIVE,
+                covered_from=fetch.covered_from,
+                covered_to=fetch.covered_to,
+                rate_limited=fetch.rate_limited,
+                http_error_count=fetch.http_error_count,
+                ingest_mode=ingest_mode,
                 adapter_version=ADAPTER_VERSION,
-                parse_failure_count=parse_failure_count,
+                parse_failure_count=fetch.parse_failure_count,
+                reached_timeline_end=fetch.reached_timeline_end,
                 notes=notes,
             ),
-            list(posts_by_id.values()),
+            fetch.posts,
         )
 
     def probe_due_posts(self) -> list[int]:

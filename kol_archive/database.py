@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS fetch_runs (
     http_error_count INTEGER NOT NULL CHECK(http_error_count >= 0),
     ingest_mode TEXT NOT NULL CHECK(ingest_mode IN ('live', 'backfill')),
     adapter_version TEXT NOT NULL,
+    parse_failure_count INTEGER NOT NULL DEFAULT 0 CHECK(parse_failure_count >= 0),
+    reached_timeline_end INTEGER NOT NULL DEFAULT 0 CHECK(reached_timeline_end IN (0, 1)),
     notes TEXT
 );
 
@@ -237,8 +239,34 @@ def connect_database(path: str | Path) -> sqlite3.Connection:
     return connection
 
 
+def _ensure_column(
+    connection: sqlite3.Connection, table: str, column: str, definition: str
+) -> None:
+    """Add a column to an existing table if a prior schema lacked it (idempotent).
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so archives
+    created before a column was added need this back-fill. ADD COLUMN is DDL, so
+    the append-only UPDATE triggers do not block it.
+    """
+    existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+
 def initialize_database(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
+    _ensure_column(
+        connection,
+        "fetch_runs",
+        "parse_failure_count",
+        "parse_failure_count INTEGER NOT NULL DEFAULT 0 CHECK(parse_failure_count >= 0)",
+    )
+    _ensure_column(
+        connection,
+        "fetch_runs",
+        "reached_timeline_end",
+        "reached_timeline_end INTEGER NOT NULL DEFAULT 0 CHECK(reached_timeline_end IN (0, 1))",
+    )
     for table in EVIDENCE_TABLES:
         connection.executescript(
             f"""
