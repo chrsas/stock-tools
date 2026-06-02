@@ -1,0 +1,15 @@
+<!-- 脱敏样本：雪球 user_timeline.json 在 WAF 拦截时返回的 HTTP 200 挑战页骨架。
+     真实 token / renderData / 外链脚本路径已抹去，仅保留供解析判定用的标记子串。
+     用途：离线复跑「WAF 挑战 = 非 JSON = response_not_json = failed」这一保守路径。-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="aliyun_waf_aa" content="REDACTED">
+<title>滑块验证页面</title>
+</head>
+<body>
+<script>window._waf_REDACTED = { renderData: "REDACTED" };</script>
+<div id="aliyun_waf">请按住滑块，拖动到最右边完成验证后继续访问</div>
+<script src="/REDACTED/REDACTED.js"></script>
+</body>
+</html>

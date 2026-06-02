@@ -11,6 +11,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from kol_archive.browser import (
+    DEFAULT_CDP_URL,
+    DEFAULT_LANDING_URL,
+    DEFAULT_PROFILE_DIR,
+    create_xueqiu_browser_client,
+    start_dedicated_browser,
+)
 from kol_archive.collector import CollectorSettings, XueqiuCollector, create_xueqiu_client
 from kol_archive.config import load_config, resolve_cookie
 from kol_archive.database import connect_database, initialize_database
@@ -53,6 +60,26 @@ def _backup_retention_count(storage: dict[str, Any]) -> int:
 def _db_path_from_config(config: dict[str, Any]) -> Path:
     storage = _section(config, "storage")
     return Path(str(storage.get("db_path") or "data/kol.sqlite3"))
+
+
+def _browser_section(config: dict[str, Any]) -> dict[str, Any]:
+    value = config.get("browser") or {}
+    if not isinstance(value, dict):
+        raise ValueError("browser must be a mapping")
+    return value
+
+
+def _build_collector_client(config: dict[str, Any]) -> Any:
+    """Pick the data path per config: dedicated browser (CDP) or httpx direct."""
+    browser = _browser_section(config)
+    if bool(browser.get("enabled", True)):
+        cdp_url = str(browser.get("cdp_url") or DEFAULT_CDP_URL)
+        landing_url = str(browser.get("landing_url") or DEFAULT_LANDING_URL)
+        LOGGER.info("data path=browser cdp_url=%s", cdp_url)
+        return create_xueqiu_browser_client(cdp_url, landing_url=landing_url)
+    cookie, cookie_source = resolve_cookie(config)
+    LOGGER.info("data path=httpx credential source=%s present=%s", cookie_source, bool(cookie))
+    return create_xueqiu_client(cookie)
 
 
 def _resolve_db_path(path: Path | None, config: dict[str, Any]) -> Path:
@@ -101,11 +128,9 @@ def run_once(conf_dir: Path) -> None:
             recent_feed_absent_ttl_days=int(monitoring.get("recent_feed_absent_ttl_days") or 7),
         ),
     )
-    cookie, cookie_source = resolve_cookie(config)
-    logging.getLogger(__name__).info("credential source=%s present=%s", cookie_source, bool(cookie))
     client = None
     try:
-        client = create_xueqiu_client(cookie)
+        client = _build_collector_client(config)
         collector = XueqiuCollector(
             archive,
             client,
@@ -150,8 +175,50 @@ def run_once(conf_dir: Path) -> None:
         )
 
 
+def run_login(conf_dir: Path, *, uid: str | None, minimized: bool) -> None:
+    """Launch the dedicated browser so the user can clear the slider / log in once."""
+    config = load_config(conf_dir)
+    browser = _browser_section(config)
+    cdp_url = str(browser.get("cdp_url") or DEFAULT_CDP_URL)
+    profile_dir = Path(str(browser.get("profile_dir") or DEFAULT_PROFILE_DIR))
+    edge_path = str(browser.get("edge_path") or "") or None
+    target_uid = uid or next(
+        (str(a.get("uid")).strip() for a in (config.get("accounts") or []) if a.get("uid")),
+        None,
+    )
+    landing = (
+        f"https://xueqiu.com/u/{target_uid}"
+        if target_uid
+        else str(browser.get("landing_url") or DEFAULT_LANDING_URL)
+    )
+    process = start_dedicated_browser(
+        profile_dir=profile_dir,
+        cdp_url=cdp_url,
+        url=landing,
+        edge_path=edge_path,
+        minimized=minimized,
+    )
+    LOGGER.info(
+        "dedicated browser launched pid=%s cdp_url=%s profile_dir=%s url=%s",
+        process.pid,
+        cdp_url,
+        profile_dir,
+        landing,
+    )
+    print("# 专用雪球浏览器已启动")
+    print(f"- CDP: {cdp_url}")
+    print(f"- Profile: {profile_dir}")
+    print(f"- 打开页面: {landing}")
+    print("- 请在弹出的浏览器窗口里完成登录并手动拖动滑块，直到能看到时间线。")
+    print("- 之后保持该窗口开着，运行 `python -m kol_archive run-once` 即可采集。")
+
+
 def _init_db_command(args: argparse.Namespace) -> None:
     init_db(args.path)
+
+
+def _login_command(args: argparse.Namespace) -> None:
+    run_login(args.config_dir, uid=args.uid, minimized=args.minimized)
 
 
 def _run_once_command(args: argparse.Namespace) -> None:
@@ -319,6 +386,15 @@ def main() -> None:
     init_parser = subparsers.add_parser("init-db", help="initialize a SQLite archive")
     init_parser.add_argument("path", type=Path)
     init_parser.set_defaults(handler=_init_db_command)
+    login_parser = subparsers.add_parser(
+        "login", help="launch the dedicated browser to clear the slider / log in once"
+    )
+    login_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    login_parser.add_argument(
+        "--uid", help="open this account's page (defaults to first configured)"
+    )
+    login_parser.add_argument("--minimized", action="store_true", help="start the window minimized")
+    login_parser.set_defaults(handler=_login_command)
     run_parser = subparsers.add_parser("run-once", help="poll feeds and probe due posts")
     run_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     run_parser.set_defaults(handler=_run_once_command)

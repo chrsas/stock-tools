@@ -237,6 +237,35 @@ def test_feed_records_rate_limit_and_http_error(
     assert tuple(row) == expected
 
 
+def test_waf_challenge_fixture_recorded_as_failed_non_json(archive: Archive) -> None:
+    # Reproducible offline check that the live WAF challenge page (probe_findings §14) lands
+    # as failed/response_not_json — the conservative path that blocks any negative inference.
+    from kol_archive.browser import body_looks_like_challenge
+
+    challenge = (FIXTURES / "xueqiu_waf_challenge.html").read_text(encoding="utf-8")
+    assert body_looks_like_challenge(challenge)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=challenge, request=request)
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        collector = XueqiuCollector(
+            archive,
+            client,
+            CollectorSettings(0, 0),
+            sleep=lambda _: None,
+            clock=lambda: NOW,
+        )
+        run_id = collector.poll_feed(1, "100", "2026-05-01T00:00:00+00:00")
+
+    row = archive.connection.execute(
+        "SELECT status, login_state, http_error_count, notes FROM fetch_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    assert row is not None
+    assert tuple(row) == (RunStatus.FAILED, LoginState.UNKNOWN, 1, "response_not_json")
+
+
 def test_feed_records_non_json_200_response(archive: Archive) -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="<html></html>", request=request)

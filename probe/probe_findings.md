@@ -187,3 +187,32 @@
 - 真实**受限/私密/付费**帖的错误码（确认 `restricted` 判定）。
 - `is_column`/超长文的截断阈值与 feed 预览字段精确边界。
 - 登录 cookie 的实际有效期与续期表现。
+
+---
+
+## 14. 平台变更：阿里云 WAF / 滑块（2026-06-01 确认拦截，2026-06-02 落地绕过方案）
+
+**现象（2026-06-01）**：雪球 timeline 数据路径前置了**阿里云 WAF JS 挑战 + 滑块人机验证**。
+
+- `GET /` 引导只下发 `acw_tc`（WAF 第一段 cookie），不再下发第 3 节所述 guest `xq_a_token / xqat / u` 等。
+- `user_timeline.json`（page1/page2）、`statuses/hot/listV2.json` 均返回 **HTTP 200 + 阿里云 WAF JS 挑战页**（含 `aliyun_waf`、`_waf_*` renderData、混淆 JS、外链脚本）。**该响应属于反爬挑战，和登录降级无关**。挑战页是 200+HTML，`raise_for_status` 不报错、`.json()` 抛错。
+- 机制：服务器返回混淆 JS，浏览器执行后算出放行 token（写入 `acw_sc__v2` 等 cookie）才能拿真 JSON。纯 httpx 无法执行 JS。
+
+**已排除的试法（均失败）**：① 仅注入登录 cookie 走 httpx；② playwright 取**完整** cookie 再喂 httpx；③ playwright `context.request` / 页面内 `fetch`（自带 Chromium）；④ `page.goto` 直达 API → 触发滑块；⑤ 登录 cookie + headless 导航主页拦 XHR → 被重定向到滑块页。**硬事实：WAF 认客户端指纹（TLS/JA3、HTTP2、头序），cookie 不可移植到 httpx；headless / 数据中心指纹会话直接弹滑块。**
+
+**落地的绕过方案（2026-06-02 实测通过）**：参考 `E:\Bmw\tools\xueqiu_monitoring` 的成功做法，改用**本机已装的真实 Edge + CDP**，而非 Playwright 自带 Chromium：
+
+1. `subprocess.Popen` 启动真实 `msedge.exe`，带持久化 `--user-data-dir`（被 gitignore）+ `--remote-debugging-port`。
+2. 用户在该窗口首次人工登录、必要时过一次滑块，信任 cookie 落盘复用。
+3. Playwright `connect_over_cdp` 连到已开的真实 Edge，页面内同源 `fetch(url, {credentials:'include'})` 取数。真实指纹 + profile 信任 cookie ⇒ WAF 放行。
+
+实现：[kol_archive/browser.py](kol_archive/browser.py)（`BrowserClient` 伪装成 httpx.Client 的 `.get()`，对采集器与离线测试零改动；fetch 带 `AbortController` 超时，绝不永久挂起）；CLI `login` 命令；`run-once` 按 config `browser.enabled` 选数据通道。
+
+**实测结果（2026-06-02，3 个配置账号）**：feed 全部 `status=ok / login_state=valid / 完整健康`，分页通到 page≥2（解除第 3 节「guest 仅 page1」限制），共采集 337 帖、零限频；一次直链复查得 `restricted`。证明真实浏览器登录态完整生效。
+
+**可复跑验证步骤**：
+
+- 人工链路：`python -m kol_archive login` → 窗口内登录/过滑块 → `python -m kol_archive run-once`（须保持窗口开着；Edge 首次建 profile 后约 10 余秒才绑定 CDP 端口）。
+- 离线回归（不打真实平台）：脱敏挑战页 fixture [probe/fixtures/xueqiu_waf_challenge.html](probe/fixtures/xueqiu_waf_challenge.html) + 测试 `tests/test_collector.py::test_waf_challenge_fixture_recorded_as_failed_non_json`，断言「WAF 挑战 = 非 JSON ⇒ `fetch_run.status=failed` / `notes=response_not_json`」这一保守路径（不做负面推断，符合宪章 6/7）。`tests/test_browser.py` 覆盖 CDP 客户端的请求封装、超时与挑战判定。
+
+**保留的开放项**：滑块出现频率与 profile 信任 cookie 有效期（实测本轮主页导航即自动过 WAF、未弹滑块，但平台挑战时仍需人工）；无人值守 cron 需专用浏览器常驻、不能纯 headless。**不考虑自动破解滑块（属规避检测，违反温和采集硬约束与平台条款）。**

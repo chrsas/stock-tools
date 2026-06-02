@@ -51,6 +51,15 @@ storage:
   backup_after_run: true               # 每轮采集完成后生成经恢复验证的快照
   backup_retention_count: 30           # 仅保留最近 N 份快照
 
+# ── 采集通道（findings §14：雪球 WAF/滑块，httpx 直连已被封死）─────────
+# 数据路径二选一：专用真实浏览器(CDP) 或 httpx 直连。
+browser:
+  enabled: true                        # true=run-once 走专用 Edge(CDP)；false=用 httpx 直连(已被 WAF 拦，仅留作离线/历史)
+  cdp_url: http://127.0.0.1:9224       # 专用浏览器的远程调试端口
+  profile_dir: data/browser_profile    # 持久化 profile（被 gitignore），首次人工过一次滑块后复用
+  landing_url: https://xueqiu.com      # 连上后落地页，同源 fetch 复用其 cookie 与指纹
+  edge_path: ""                        # 留空自动探测 msedge.exe；可手动指向 msedge.exe 或 chrome.exe
+
 # ── 本地网页（阶段 2b）──────────────────────────────────────────
 web:
   bind_host: 127.0.0.1                 # 手机访问时仅在 local 配置覆盖为 Tailscale 地址

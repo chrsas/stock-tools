@@ -1,2 +1,5 @@
 httpx>=0.28,<1
 PyYAML>=6,<7
+# 默认采集走专用浏览器(CDP)，仅需 playwright 这个 Python 包；不需要 `playwright install`
+# 的捆绑浏览器，因为我们连接的是本机已装的真实 Edge（见 README「浏览器登录」）。
+playwright>=1.50,<2
