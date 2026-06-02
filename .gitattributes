@@ -1,0 +1,3 @@
+# 统一行尾，避免 Windows 上 core.autocrlf=true 触发 LF↔CRLF 转换警告。
+# 仓库内所有文本文件以 LF 存储并检出；二进制由 text=auto 自动识别后不处理。
+* text=auto eol=lf
