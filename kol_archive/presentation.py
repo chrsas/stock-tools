@@ -210,28 +210,11 @@ def list_filtered_timeline(
     return [_post_projection(row) for row in rows]
 
 
-def list_attention_queue(
-    connection: sqlite3.Connection, prompt_version: str, *, limit: int = 50
-) -> list[dict[str, object]]:
-    """The pending-attention queue: enriched current versions that hit at least
-    one label and have not yet been dispositioned.
-
-    A version is *dispositioned* (and so leaves the queue) once its post is
-    pinned or it has an ``attention_log`` entry, i.e. after the user pins it or
-    writes a关注理由. This is pure derivation over existing tables, so there is
-    no separate "reviewed" store: nothing here is hidden, only ordered.
-
-    Ordered by tier (number of labels hit) then most recent observation
-    (``current_version_last_observed_at``, not first-seen), so the densest
-    signals float to the top and a version seen again recently resurfaces.
-    """
-    if limit < 1:
-        raise ValueError("timeline limit must be positive")
-    if not prompt_version.strip():
-        raise ValueError("prompt_version must not be empty")
-    rows = connection.execute(
-        """
-        SELECT
+# Shared card columns for the attention queue and the pinned list. Both render
+# the same `_queue_card`, so they project identical fields; only the FROM/WHERE
+# differ (queue inner-joins enrichments and excludes dispositioned posts, the
+# pinned list left-joins so a post pinned without an enrichment still shows).
+_QUEUE_CARD_COLUMNS = """
             p.id AS post_id,
             a.platform_uid AS author_platform_uid,
             a.notes AS author_name,
@@ -283,7 +266,37 @@ def list_attention_queue(
                 SELECT MAX(s.observed_at)
                 FROM version_sightings s
                 WHERE s.version_id = p.current_version_id
-            ) AS current_version_last_observed_at
+            ) AS current_version_last_observed_at,
+            (
+                SELECT COUNT(*)
+                FROM version_sightings s
+                WHERE s.version_id = p.current_version_id
+            ) AS current_version_observation_count
+"""
+
+
+def list_attention_queue(
+    connection: sqlite3.Connection, prompt_version: str, *, limit: int = 50
+) -> list[dict[str, object]]:
+    """The pending-attention queue: enriched current versions that hit at least
+    one label and have not yet been dispositioned.
+
+    A version is *dispositioned* (and so leaves the queue) once its post is
+    pinned or it has an ``attention_log`` entry, i.e. after the user pins it or
+    writes a关注理由. This is pure derivation over existing tables, so there is
+    no separate "reviewed" store: nothing here is hidden, only ordered.
+
+    Ordered by tier (number of labels hit) then most recent observation
+    (``current_version_last_observed_at``, not first-seen), so the densest
+    signals float to the top and a version seen again recently resurfaces.
+    """
+    if limit < 1:
+        raise ValueError("timeline limit must be positive")
+    if not prompt_version.strip():
+        raise ValueError("prompt_version must not be empty")
+    rows = connection.execute(
+        f"""
+        SELECT{_QUEUE_CARD_COLUMNS}
         FROM posts p
         JOIN authors a ON a.id = p.author_id
         JOIN post_versions v ON v.id = p.current_version_id
@@ -300,6 +313,41 @@ def list_attention_queue(
           )
         ORDER BY tier DESC,
             COALESCE(current_version_last_observed_at, v.first_observed_at) DESC, p.id DESC
+        LIMIT ?
+        """,
+        (prompt_version.strip(), WatchMode.PINNED.value, limit),
+    ).fetchall()
+    return [_post_projection(row) for row in rows]
+
+
+def list_pinned_versions(
+    connection: sqlite3.Connection, prompt_version: str, *, limit: int = 50
+) -> list[dict[str, object]]:
+    """The pinned list: the counterpart to the attention queue, showing the
+    posts the user has pinned for long-term watching.
+
+    These are exactly the posts that left the queue via a pin (``watch_mode =
+    pinned``). Both the current version and its enrichment are left-joined, not
+    required: a post can be pinned straight from its evidence card or the CLI
+    before it has a full-fidelity version (e.g. a preview-only sighting) or any
+    enrichment, and it must still appear here so the list matches the toolbar
+    ``已钉住`` count one-for-one. Ordered newest-observation first so a pinned
+    post that just changed resurfaces to the top.
+    """
+    if limit < 1:
+        raise ValueError("timeline limit must be positive")
+    if not prompt_version.strip():
+        raise ValueError("prompt_version must not be empty")
+    rows = connection.execute(
+        f"""
+        SELECT{_QUEUE_CARD_COLUMNS}
+        FROM posts p
+        JOIN authors a ON a.id = p.author_id
+        LEFT JOIN post_versions v ON v.id = p.current_version_id
+        LEFT JOIN enrichments e
+            ON e.version_id = p.current_version_id AND e.prompt_version = ?
+        WHERE p.watch_mode = ?
+        ORDER BY COALESCE(current_version_last_observed_at, v.first_observed_at) DESC, p.id DESC
         LIMIT ?
         """,
         (prompt_version.strip(), WatchMode.PINNED.value, limit),

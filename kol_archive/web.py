@@ -24,6 +24,7 @@ from kol_archive.presentation import (
     build_evidence_card,
     list_attention_queue,
     list_filtered_timeline,
+    list_pinned_versions,
     list_timeline,
 )
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
@@ -128,6 +129,20 @@ def _cell(value: object) -> str:
     if isinstance(value, dict):
         value = value.get("human_label", "")
     return escape(_text(value))
+
+
+def _fmt_ts(value: object) -> str:
+    """Render an ISO timestamp as local-time `YYYY-MM-DD HH:MM`; pass through on failure."""
+    raw = _text(value)
+    if not raw:
+        return ""
+    try:
+        moment = datetime.fromisoformat(raw)
+    except ValueError:
+        return escape(raw)
+    if moment.tzinfo is not None:
+        moment = moment.astimezone()
+    return escape(moment.strftime("%Y-%m-%d %H:%M"))
 
 
 def _csrf_input(token: str) -> str:
@@ -336,6 +351,37 @@ _AUDIT_ROWS = (
     ("队列", "纯推导，无新表；钉住或写关注理由后自然离队"),
 )
 
+# Persistent, in-page explanation of what each action does, so the operating
+# vocabulary lives in the UI rather than only in the code.
+_ACTION_GUIDE = (
+    (
+        "钉住",
+        "把这条版本长期留观：移出待处理队列，并豁免它随时间被自动判为「停止持续监控」。"
+        "认定重要、想继续盯它后续编辑时用。",
+    ),
+    (
+        "关注理由",
+        "写下你为何在意与预期后再钉住：同样离队，但额外留一条可回溯的判断记录"
+        "（比纯钉住多了理由与预期）。",
+    ),
+    (
+        "取消钉住",
+        "恢复为按时间窗口观察；若它已滑出近期窗口，会回到「停止持续监控」。",
+    ),
+    (
+        "改写训练",
+        "让 LLM 把原文压成一句可证伪命题，供你校验后标 verdict，不改动原始证据。",
+    ),
+)
+
+# Hover hints for the toolbar chips, so each count's meaning is one mouseover away.
+_TOOLBAR_HINTS = {
+    "pending": "命中标签、未钉住、未写关注理由的版本",
+    "tier3": "第一手 / 可迁移框架 / 有据非共识 三个标签全部命中的强信号版本",
+    "pinned": "已长期留观的版本，点开查看与取消钉住",
+    "absent": "feed 连续健康轮次中确认缺席的帖子",
+}
+
 
 def _label_guide_panel() -> str:
     cards = "".join(
@@ -345,6 +391,17 @@ def _label_guide_panel() -> str:
     return (
         '<section class="panel"><div class="sectit"><h2>标签说明</h2>'
         '<span class="muted">给标签加上下文</span></div>' + cards + "</section>"
+    )
+
+
+def _action_guide_panel() -> str:
+    cards = "".join(
+        f'<div class="label-card"><b>{escape(name)}</b><p>{escape(desc)}</p></div>'
+        for name, desc in _ACTION_GUIDE
+    )
+    return (
+        '<section class="panel"><div class="sectit"><h2>操作说明</h2>'
+        '<span class="muted">按钮各自做什么</span></div>' + cards + "</section>"
     )
 
 
@@ -417,7 +474,7 @@ def _queue_status_badge(item: dict[str, object]) -> str:
     return _badge(f"{label} · {fidelity}", warn=source_state == SourceState.UNAVAILABLE.value)
 
 
-def _queue_card(item: dict[str, object], csrf_token: str) -> str:
+def _queue_card(item: dict[str, object], csrf_token: str, *, pinned: bool = False) -> str:
     post_id = item["post_id"]
     pills = "".join(
         f'<span class="pill">{escape(label)}</span>' for key, label in _LABEL_CHIPS if item.get(key)
@@ -425,16 +482,20 @@ def _queue_card(item: dict[str, object], csrf_token: str) -> str:
     pills += f'<span class="pill gray">{_cell(item.get("post_type"))}</span>'
     snippet = escape(_text(item.get("enrichment_evidence_snippet"))) or "（本条无依据片段）"
     version_count = int(cast(int, item.get("version_count") or 1))
+    changed = version_count > 1
+    obs_count = int(cast(int, item.get("current_version_observation_count") or 1))
     change = (
         f"检出编辑 · 共 {version_count} 个观察版本"
-        if version_count > 1
-        else "暂无变动 · 当前为首个入库版本"
+        if changed
+        else f"暂无变动 · 首个入库版本 · 已观察 {obs_count} 次"
     )
-    current_text = escape(_text(item.get("current_text")))
+    # A pinned post can lack a full version (e.g. preview-only); keep it visible
+    # with an explicit placeholder rather than an empty body.
+    current_text = escape(_text(item.get("current_text"))) or "（暂无完整正文版本）"
     uid = _cell(item.get("author_platform_uid"))
     vid = _cell(item.get("current_version_id"))
-    first_obs = _cell(item.get("current_version_first_observed_at"))
-    last_obs = _cell(item.get("current_version_last_observed_at"))
+    first_obs = _fmt_ts(item.get("current_version_first_observed_at"))
+    last_obs = _fmt_ts(item.get("current_version_last_observed_at"))
     channel = _text(item.get("latest_evidence_channel"))
     channel_label = {"feed": "feed 轮询", "direct": "直链复查"}.get(channel, "未知来源")
     run_id = _cell(item.get("latest_evidence_run_id"))
@@ -443,17 +504,24 @@ def _queue_card(item: dict[str, object], csrf_token: str) -> str:
         f'<div class="who"><span class="name">{_cell(item.get("author_name"))}</span>'
         f'<span class="uid">uid {uid} · post {post_id} · version {vid}</span></div>'
     )
+    obs_span = f"首次 {first_obs}<br>最后 {last_obs}" if changed else (first_obs or last_obs)
     facts = (
         f'<div class="fact"><b>当前版本观察</b>'
-        f"<span>首次 {first_obs}<br>最后 {last_obs}</span></div>"
+        f"<span>{obs_span}</span></div>"
         f'<div class="fact"><b>内容变动</b><span>{escape(change)}</span></div>'
         f'<div class="fact"><b>证据来源</b>'
         f"<span>{escape(channel_label)} run {run_id}<br>fidelity {fidelity}</span></div>"
     )
-    pin_form = (
-        f'<form method="post" action="/posts/{post_id}/pin">{_csrf_input(csrf_token)}'
-        f'<button class="primary" type="submit">钉住当前版本</button></form>'
-    )
+    if pinned:
+        action_form = (
+            f'<form method="post" action="/posts/{post_id}/unpin">{_csrf_input(csrf_token)}'
+            f'<button class="secondary" type="submit">取消钉住</button></form>'
+        )
+    else:
+        action_form = (
+            f'<form method="post" action="/posts/{post_id}/pin">{_csrf_input(csrf_token)}'
+            f'<button class="primary" type="submit">钉住当前版本</button></form>'
+        )
     return f"""<article class="candidate">
   <div class="chead">
     <div>{who}<div class="meta-row">{pills}</div></div>
@@ -461,7 +529,7 @@ def _queue_card(item: dict[str, object], csrf_token: str) -> str:
   </div>
   <p class="snippet">依据片段「{snippet}」</p>
   <div class="evidence-grid">{facts}</div>
-  <div class="qactions">{pin_form}
+  <div class="qactions">{action_form}
     <a class="secondary" href="/posts/{post_id}">打开证据卡</a>
   </div>
   <details><summary>展开原文</summary><pre>{current_text}</pre></details>
@@ -503,6 +571,43 @@ def _queue_counts(connection: sqlite3.Connection, prompt_version: str) -> dict[s
     return {"pending": pending, "three": three, "pinned": pinned, "absent": absent}
 
 
+_HOME_NAV = (
+    '<nav class="nav"><a href="/?view=raw">原始时间线</a>'
+    '<a href="/?view=filtered">全部过滤流</a>'
+    '<a href="/?view=authors">按账号</a></nav>'
+)
+
+
+def _queue_toolbar(counts: dict[str, int], *, active: str) -> str:
+    """The shared filter row for the queue and the pinned list.
+
+    ``active`` is one of ``pending`` / ``tier3`` / ``pinned``; ``近期缺席`` is a
+    plain count with no view of its own. Each chip carries a ``title`` hint so
+    its meaning is one mouseover away.
+    """
+
+    def chip(name: str, href: str, label: str) -> str:
+        cls = "filter" + (" active" if active == name else "")
+        return (
+            f'<a class="{cls}" href="{href}" title="{escape(_TOOLBAR_HINTS[name])}">'
+            f"{escape(label)}</a>"
+        )
+
+    return (
+        chip("pending", "/", f"待处理 {counts['pending']}")
+        + chip("tier3", "/?tier=3", f"只看三标签命中 {counts['three']}")
+        + chip("pinned", "/?view=pinned", f"已钉住 {counts['pinned']}")
+        + f'<span class="toolcount" title="{escape(_TOOLBAR_HINTS["absent"])}">'
+        f"近期缺席 {counts['absent']}</span>"
+    )
+
+
+def _home_aside() -> str:
+    # The per-author composition lens stays one click away (?view=authors); the
+    # default home carries no per-author hit-rate metric (charter §0.11).
+    return _label_guide_panel() + _action_guide_panel() + _audit_panel()
+
+
 def _queue_html(
     connection: sqlite3.Connection,
     prompt_version: str,
@@ -519,34 +624,47 @@ def _queue_html(
         "<p>队列为空：当前 prompt 版本下没有未处置的命中标签版本。先运行 "
         "<code>python -m kol_archive enrich</code> 富化，或所有命中都已钉住/写过关注理由。</p>"
     )
-    all_cls = "filter" + ("" if tier3_only else " active")
-    three_cls = "filter" + (" active" if tier3_only else "")
-    toolbar = (
-        f'<a class="{all_cls}" href="/">待处理 {counts["pending"]}</a>'
-        f'<a class="{three_cls}" href="/?tier=3">只看三标签命中 {counts["three"]}</a>'
-        f'<span class="toolcount">已钉住 {counts["pinned"]} · 近期缺席 {counts["absent"]}</span>'
-    )
-    nav = (
-        '<nav class="nav"><a href="/?view=raw">原始时间线</a>'
-        '<a href="/?view=filtered">全部过滤流</a>'
-        '<a href="/?view=authors">按账号</a></nav>'
-    )
+    toolbar = _queue_toolbar(counts, active="tier3" if tier3_only else "pending")
     header = (
         '<div class="topbar"><div><h1>KOL 照妖镜 · 待处理注意力</h1>'
         '<p class="muted">命中标签、未钉住、未写关注理由的版本，按 tier（命中标签数）与新观察排序；'
         "不做跨账号排行。原始时间线与全部过滤流一键可达。</p></div>"
-        f"{nav}</div>"
+        f"{_HOME_NAV}</div>"
     )
-    # The per-author composition lens stays one click away (?view=authors); the
-    # default home carries no per-author hit-rate metric (charter §0.11).
-    aside = _label_guide_panel() + _audit_panel()
     body = (
         f'{header}<div class="toolbar">{toolbar}</div>'
         f'<div class="layout"><section class="panel"><div class="sectit">'
         f"<h2>待处理的高信号版本</h2></div>{cards}</section>"
-        f"<aside>{aside}</aside></div>"
+        f"<aside>{_home_aside()}</aside></div>"
     )
     return _layout("KOL 照妖镜 · 待处理注意力", body)
+
+
+def _pinned_html(
+    connection: sqlite3.Connection,
+    prompt_version: str,
+    limit: int,
+    csrf_token: str,
+) -> str:
+    items = list_pinned_versions(connection, prompt_version, limit=limit)
+    counts = _queue_counts(connection, prompt_version)
+    cards = "".join(_queue_card(item, csrf_token, pinned=True) for item in items) or (
+        "<p>还没有钉住任何版本。在待处理卡片或证据卡里「钉住」后，会出现在这里长期留观。</p>"
+    )
+    toolbar = _queue_toolbar(counts, active="pinned")
+    header = (
+        '<div class="topbar"><div><h1>KOL 照妖镜 · 已钉住</h1>'
+        '<p class="muted">已长期留观的版本：它们已离开待处理队列，并豁免随时间被判为停止监控。'
+        "在这里复查或「取消钉住」。</p></div>"
+        f"{_HOME_NAV}</div>"
+    )
+    body = (
+        f'{header}<div class="toolbar">{toolbar}</div>'
+        f'<div class="layout"><section class="panel"><div class="sectit">'
+        f"<h2>已钉住的版本</h2></div>{cards}</section>"
+        f"<aside>{_home_aside()}</aside></div>"
+    )
+    return _layout("KOL 照妖镜 · 已钉住", body)
 
 
 def _scorecards_html(connection: sqlite3.Connection, prompt_version: str) -> str:
@@ -686,6 +804,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             return _filtered_timeline_html(connection, prompt_version, limit)
         if view == "authors":
             return _scorecards_html(connection, prompt_version)
+        if view == "pinned":
+            return _pinned_html(connection, prompt_version, limit, self.server.csrf_token)
         return _queue_html(
             connection,
             prompt_version,

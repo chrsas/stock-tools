@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import threading
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -186,6 +187,83 @@ def test_queue_dequeues_after_pin(web_server: ArchiveHttpServer) -> None:
     assert status == 303
     _, _, after = _request(web_server, "GET", "/")
     assert "post 1" not in after  # pinned → dispositioned → out of the queue
+
+
+def test_pinned_view_lists_pinned_versions_and_offers_unpin(
+    web_server: ArchiveHttpServer,
+) -> None:
+    _enrich_post_one(web_server, non_consensus=True)
+    # Before pinning: nothing pinned, toolbar count is zero, list is empty.
+    _, _, before = _request(web_server, "GET", "/?view=pinned")
+    assert "已钉住 0" in before
+    assert "还没有钉住任何版本" in before
+    assert "post 1" not in before
+
+    status, _, _ = _request(web_server, "POST", "/posts/1/pin", {"csrf_token": CSRF_TOKEN})
+    assert status == 303
+
+    # The home toolbar now exposes a clickable 已钉住 filter, and the count rose.
+    _, _, home = _request(web_server, "GET", "/")
+    assert 'href="/?view=pinned"' in home
+    assert "已钉住 1" in home
+    assert "操作说明" in home  # the persistent action guide stays in the aside
+
+    # The pinned view surfaces the dispositioned post with an unpin action.
+    status, _, pinned = _request(web_server, "GET", "/?view=pinned")
+    assert status == 200
+    assert "post 1" in pinned
+    assert "取消钉住" in pinned
+    assert "钉住当前版本" not in pinned  # already pinned: no re-pin button
+    assert f'name="csrf_token" value="{CSRF_TOKEN}"' in pinned  # unpin form CSRF
+
+
+def test_pinned_list_includes_preview_only_post_matching_toolbar_count(
+    web_server: ArchiveHttpServer,
+) -> None:
+    # A preview-only sighting never creates a full version (current_version_id
+    # stays NULL), yet it can still be pinned from the evidence card. The list
+    # must not silently drop it, or it would disagree with the 已钉住 count.
+    connection = connect_database(web_server.db_path)
+    try:
+        archive = Archive(connection)
+        archive.record_feed_run(
+            replace(
+                _make_feed_run(),
+                started_at="2026-06-01T02:00:00+00:00",
+                finished_at="2026-06-01T02:00:00+00:00",
+            ),
+            [
+                NormalizedPost(
+                    platform_post_id="post-preview",
+                    author_id=1,
+                    observed_at="2026-06-01T02:00:00+00:00",
+                    content_fidelity=ContentFidelity.PREVIEW,
+                    content_text=None,
+                    content_hash=None,
+                    posted_at_claimed=datetime.now(tz=UTC).isoformat(),
+                    url="https://xueqiu.com/100/post-preview",
+                    raw_payload={"text": "preview"},
+                )
+            ],
+        )
+        row = connection.execute(
+            "SELECT id, current_version_id FROM posts WHERE platform_post_id = 'post-preview'"
+        ).fetchone()
+        assert row is not None
+        assert row["current_version_id"] is None  # preview created no version
+        preview_id = int(row["id"])
+    finally:
+        connection.close()
+
+    status, _, _ = _request(
+        web_server, "POST", f"/posts/{preview_id}/pin", {"csrf_token": CSRF_TOKEN}
+    )
+    assert status == 303
+
+    _, _, pinned = _request(web_server, "GET", "/?view=pinned")
+    assert "已钉住 1" in pinned  # toolbar count
+    assert f"post {preview_id}" in pinned  # and the list agrees, one-for-one
+    assert "暂无完整正文版本" in pinned  # placeholder instead of an empty body
 
 
 def test_authors_view_renders_unranked_composition_without_hit_rate(
