@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import io
 import json
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -22,10 +24,14 @@ from kol_archive.models import (
     IngestMode,
     LoginState,
     NormalizedPost,
+    ProbeResult,
+    ProbeRun,
     RunStatus,
 )
 from kol_archive.presentation import (
+    author_scorecards,
     build_evidence_card,
+    list_attention_queue,
     list_filtered_timeline,
     list_timeline,
 )
@@ -371,6 +377,164 @@ def test_evidence_card_exposes_enrichments(archive: Archive) -> None:
     assert enrichment["post_type"] == "研究"
     assert enrichment["label_first_hand_info"] == 1
     assert enrichment["prompt_version"] == "enrich-v1"
+
+
+# ── presentation: attention queue (pure-derivation) ──────────────────────
+
+
+def _enrich(
+    archive: Archive,
+    platform_post_id: str,
+    result: EnrichmentResult,
+    prompt_version: str = "enrich-v1",
+) -> None:
+    target = next(
+        t
+        for t in archive.enrichment_targets(prompt_version)
+        if t.post_id == post_id(archive, platform_post_id)
+    )
+    archive.add_enrichment(target, result, "test-model", prompt_version, BASE_TIME)
+
+
+def test_attention_queue_orders_by_tier_and_excludes_label_misses(archive: Archive) -> None:
+    archive.record_feed_run(
+        make_feed_run(),
+        [make_post("t1", text="T1"), make_post("t3", text="T3"), make_post("miss", text="MISS")],
+    )
+    _enrich(archive, "t1", make_result(first_hand=True, snippet="片段"))
+    _enrich(
+        archive,
+        "t3",
+        make_result(first_hand=True, framework=True, non_consensus=True, snippet="片段"),
+    )
+    _enrich(archive, "miss", make_result(snippet="片段"))
+
+    queue = list_attention_queue(archive.connection, "enrich-v1")
+    # Densest signal (3 labels) floats above the single-label hit; the miss is absent.
+    assert [item["post_id"] for item in queue] == [
+        post_id(archive, "t3"),
+        post_id(archive, "t1"),
+    ]
+    assert queue[0]["tier"] == 3
+    assert queue[0]["version_count"] == 1
+
+
+def test_attention_queue_evidence_source_covers_direct_probe_versions(archive: Archive) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post("p", text="A")])
+    pid = post_id(archive, "p")
+    # A healthy reachable full probe observes changed content → it creates the new
+    # current version via Track B, which has NO feed observation of its own.
+    observed = make_post("p", text="B", observed_at="2026-06-02T00:00:00+00:00")
+    probe_id = archive.record_probe_run(
+        ProbeRun(
+            post_id=pid,
+            started_at=observed.observed_at,
+            finished_at=observed.observed_at,
+            observed_at=observed.observed_at,
+            status=RunStatus.OK,
+            http_status=200,
+            login_state=LoginState.VALID,
+            rate_limited=False,
+            result=ProbeResult.REACHABLE,
+            content_fidelity=ContentFidelity.FULL,
+            ingest_mode=IngestMode.LIVE,
+            adapter_version="xueqiu-2",
+        ),
+        observed,
+    )
+    current_vid = archive.current_version_id(pid)
+    target = next(t for t in archive.enrichment_targets("enrich-v1") if t.version_id == current_vid)
+    archive.add_enrichment(
+        target, make_result(first_hand=True, snippet="片段"), "test-model", "enrich-v1", BASE_TIME
+    )
+
+    [item] = list_attention_queue(archive.connection, "enrich-v1")
+    # Evidence source resolves to the direct-link probe, not an empty fetch_run.
+    assert item["latest_evidence_channel"] == "direct"
+    assert item["latest_evidence_run_id"] == probe_id
+    assert item["current_content_fidelity"] == "full"
+    assert item["version_count"] == 2
+
+
+def test_attention_queue_dequeues_after_pin(archive: Archive) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post("hit", text="H")])
+    _enrich(archive, "hit", make_result(non_consensus=True, snippet="片段"))
+    pid = post_id(archive, "hit")
+    assert [item["post_id"] for item in list_attention_queue(archive.connection, "enrich-v1")] == [
+        pid
+    ]
+
+    archive.pin_post(pid, BASE_TIME)
+    assert list_attention_queue(archive.connection, "enrich-v1") == []
+
+
+def test_attention_queue_floats_recently_reobserved_version(archive: Archive) -> None:
+    archive.record_feed_run(
+        make_feed_run("2026-06-01T00:00:00+00:00"),
+        [
+            make_post("A", text="A", observed_at="2026-06-01T00:00:00+00:00"),
+            make_post("B", text="B", observed_at="2026-06-01T00:00:00+00:00"),
+        ],
+    )
+    _enrich(archive, "A", make_result(first_hand=True, snippet="片段"))
+    _enrich(archive, "B", make_result(first_hand=True, snippet="片段"))
+    pa, pb = post_id(archive, "A"), post_id(archive, "B")
+    # Same tier, same first/last observation → tie broken by post id desc.
+    before = [item["post_id"] for item in list_attention_queue(archive.connection, "enrich-v1")]
+    assert before == [pb, pa]
+
+    # Re-observe A in a later healthy live run (B is absent this round but its streak
+    # stays below the threshold, so it remains present and in the queue).
+    archive.record_feed_run(
+        make_feed_run("2026-06-05T00:00:00+00:00"),
+        [make_post("A", text="A", observed_at="2026-06-05T00:00:00+00:00")],
+    )
+    after = [item["post_id"] for item in list_attention_queue(archive.connection, "enrich-v1")]
+    assert after == [pa, pb]  # A's newer observation floats it above B
+
+
+def test_attention_queue_stays_out_after_attention_even_when_unpinned(archive: Archive) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post("hit", text="H")])
+    _enrich(archive, "hit", make_result(framework=True, snippet="片段"))
+    pid = post_id(archive, "hit")
+
+    archive.add_attention(pid, archive.current_version_id(pid), BASE_TIME, "值得跟踪")
+    assert list_attention_queue(archive.connection, "enrich-v1") == []
+
+    # Unpinning drops watch_mode back to recent_window; the attention_log entry is
+    # what must keep an already-dispositioned version out of the queue.
+    archive.unpin_post(pid, BASE_TIME, within_recent_window=True)
+    assert list_attention_queue(archive.connection, "enrich-v1") == []
+
+
+def test_author_scorecards_are_unranked_counts_without_hit_rate(archive: Archive) -> None:
+    archive.add_author("xueqiu", "200", BASE_TIME)
+    # author 1 (uid 100, id 1): 2 enriched, 0 hits
+    archive.record_feed_run(
+        make_feed_run(), [make_post("a1p1", text="A1"), make_post("a1p2", text="A2")]
+    )
+    run2 = dataclasses.replace(make_feed_run(), author_id=2)
+    posts2 = [
+        dataclasses.replace(make_post("a2p1", text="B1"), author_id=2),
+        dataclasses.replace(make_post("a2p2", text="B2"), author_id=2),
+    ]
+    archive.record_feed_run(run2, posts2)  # author 2 (uid 200, id 2): 2 enriched, 1 hit
+
+    _enrich(archive, "a1p1", make_result(snippet="片段"))
+    _enrich(archive, "a1p2", make_result(snippet="片段"))
+    _enrich(archive, "a2p1", make_result(first_hand=True, framework=True, snippet="片段"))
+    _enrich(archive, "a2p2", make_result(snippet="片段"))
+
+    result = author_scorecards(archive.connection, "enrich-v1")
+    cards = cast(list[dict[str, object]], result["scorecards"])
+    # Charter §0.11: neutral author-id order, NOT ranked by hit rate; the denser
+    # author (200) must NOT be floated above the sparser one (100).
+    assert [card["author_platform_uid"] for card in cards] == ["100", "200"]
+    assert all("density_pct" not in card for card in cards)
+    assert (cards[0]["enriched"], cards[0]["hit"]) == (2, 0)
+    assert (cards[1]["enriched"], cards[1]["hit"]) == (2, 1)
+    assert (cards[1]["first_hand"], cards[1]["framework"]) == (1, 1)
+    assert result["label_scale"] == 1
 
 
 # ── CLI: batch enrich ────────────────────────────────────────────────────

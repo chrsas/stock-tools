@@ -10,7 +10,7 @@ import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -32,7 +32,13 @@ from kol_archive.maintenance import (
     verify_backup,
 )
 from kol_archive.models import ArchiveSettings, QueueReason
-from kol_archive.presentation import build_evidence_card, list_filtered_timeline, list_timeline
+from kol_archive.presentation import (
+    author_scorecards,
+    build_evidence_card,
+    list_attention_queue,
+    list_filtered_timeline,
+    list_timeline,
+)
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
 from kol_archive.service import Archive
 from kol_archive.time import parse_utc_timestamp
@@ -401,6 +407,29 @@ def _timeline_command(args: argparse.Namespace) -> None:
         connection.close()
 
 
+def _queue_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    connection, _ = _connect_existing_archive(_resolve_db_path(args.path, config))
+    try:
+        prompt_version = _enrich_prompt_version(config, args.prompt_version)
+        queue = list_attention_queue(connection, prompt_version, limit=args.limit)
+        if args.tier3_only:
+            queue = [item for item in queue if int(cast(int, item.get("tier") or 0)) >= 3]
+        _print_json(queue)
+    finally:
+        connection.close()
+
+
+def _scorecards_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    connection, _ = _connect_existing_archive(_resolve_db_path(args.path, config))
+    try:
+        prompt_version = _enrich_prompt_version(config, args.prompt_version)
+        _print_json(author_scorecards(connection, prompt_version))
+    finally:
+        connection.close()
+
+
 def _show_post_command(args: argparse.Namespace) -> None:
     connection, _ = _connect_existing_archive(_configured_db_path(args.path, args.config_dir))
     try:
@@ -622,6 +651,29 @@ def main() -> None:
         "--prompt-version", help="enrichment prompt version for --filtered (default from config)"
     )
     timeline_parser.set_defaults(handler=_timeline_command)
+    queue_parser = subparsers.add_parser(
+        "queue", help="show the pending-attention queue (label hits not yet pinned/reasoned)"
+    )
+    queue_parser.add_argument("--path", type=Path)
+    queue_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    queue_parser.add_argument("--limit", type=int, default=50)
+    queue_parser.add_argument(
+        "--tier3-only", action="store_true", help="only versions hitting all three labels"
+    )
+    queue_parser.add_argument(
+        "--prompt-version", help="enrichment prompt version (default from config)"
+    )
+    queue_parser.set_defaults(handler=_queue_command)
+    scorecards_parser = subparsers.add_parser(
+        "scorecards",
+        help="per-author label counts + genre mix (diagnostic summary; no hit-rate, no ranking)",
+    )
+    scorecards_parser.add_argument("--path", type=Path)
+    scorecards_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    scorecards_parser.add_argument(
+        "--prompt-version", help="enrichment prompt version (default from config)"
+    )
+    scorecards_parser.set_defaults(handler=_scorecards_command)
     show_parser = subparsers.add_parser("show-post", help="show one post evidence card")
     show_parser.add_argument("post_id", type=int)
     show_parser.add_argument("--path", type=Path)

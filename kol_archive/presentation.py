@@ -210,6 +210,177 @@ def list_filtered_timeline(
     return [_post_projection(row) for row in rows]
 
 
+def list_attention_queue(
+    connection: sqlite3.Connection, prompt_version: str, *, limit: int = 50
+) -> list[dict[str, object]]:
+    """The pending-attention queue: enriched current versions that hit at least
+    one label and have not yet been dispositioned.
+
+    A version is *dispositioned* (and so leaves the queue) once its post is
+    pinned or it has an ``attention_log`` entry, i.e. after the user pins it or
+    writes a关注理由. This is pure derivation over existing tables, so there is
+    no separate "reviewed" store: nothing here is hidden, only ordered.
+
+    Ordered by tier (number of labels hit) then most recent observation
+    (``current_version_last_observed_at``, not first-seen), so the densest
+    signals float to the top and a version seen again recently resurfaces.
+    """
+    if limit < 1:
+        raise ValueError("timeline limit must be positive")
+    if not prompt_version.strip():
+        raise ValueError("prompt_version must not be empty")
+    rows = connection.execute(
+        """
+        SELECT
+            p.id AS post_id,
+            a.platform_uid AS author_platform_uid,
+            a.notes AS author_name,
+            p.url,
+            p.feed_state,
+            p.source_state,
+            p.watch_mode,
+            p.source_checked_at,
+            p.current_version_id,
+            v.content_text AS current_text,
+            v.first_observed_at AS current_version_first_observed_at,
+            e.post_type,
+            e.label_first_hand_info,
+            e.label_transferable_framework,
+            e.label_reasoned_non_consensus,
+            e.rationale AS enrichment_rationale,
+            e.evidence_snippet AS enrichment_evidence_snippet,
+            e.prompt_version AS enrichment_prompt_version,
+            (
+                e.label_first_hand_info + e.label_transferable_framework
+                + e.label_reasoned_non_consensus
+            ) AS tier,
+            (SELECT COUNT(*) FROM post_versions pv WHERE pv.post_id = p.id) AS version_count,
+            -- Latest evidence may come from either channel: a healthy direct-link
+            -- probe can create the current version (probe_runs.observed_version_id)
+            -- with no feed observation of its own, so source channel/run_id from the
+            -- version_sightings view (which unions both) rather than post_observations.
+            (
+                SELECT s.channel FROM version_sightings s
+                WHERE s.version_id = p.current_version_id
+                ORDER BY s.observed_at DESC LIMIT 1
+            ) AS latest_evidence_channel,
+            (
+                SELECT s.run_id FROM version_sightings s
+                WHERE s.version_id = p.current_version_id
+                ORDER BY s.observed_at DESC LIMIT 1
+            ) AS latest_evidence_run_id,
+            (
+                SELECT fid FROM (
+                    SELECT observed_at, content_fidelity AS fid FROM post_observations
+                    WHERE version_id = p.current_version_id
+                    UNION ALL
+                    SELECT observed_at, content_fidelity AS fid FROM probe_runs
+                    WHERE observed_version_id = p.current_version_id
+                    ORDER BY observed_at DESC LIMIT 1
+                )
+            ) AS current_content_fidelity,
+            (
+                SELECT MAX(s.observed_at)
+                FROM version_sightings s
+                WHERE s.version_id = p.current_version_id
+            ) AS current_version_last_observed_at
+        FROM posts p
+        JOIN authors a ON a.id = p.author_id
+        JOIN post_versions v ON v.id = p.current_version_id
+        JOIN enrichments e
+            ON e.version_id = p.current_version_id AND e.prompt_version = ?
+        WHERE p.watch_mode != ?
+          AND (
+              e.label_first_hand_info = 1
+              OR e.label_transferable_framework = 1
+              OR e.label_reasoned_non_consensus = 1
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM attention_log al WHERE al.version_id = p.current_version_id
+          )
+        ORDER BY tier DESC,
+            COALESCE(current_version_last_observed_at, v.first_observed_at) DESC, p.id DESC
+        LIMIT ?
+        """,
+        (prompt_version.strip(), WatchMode.PINNED.value, limit),
+    ).fetchall()
+    return [_post_projection(row) for row in rows]
+
+
+def author_scorecards(connection: sqlite3.Connection, prompt_version: str) -> dict[str, object]:
+    """Per-author label *composition*: a diagnostic summary, never a ranking.
+
+    Charter §0.11 forbids cross-person leaderboards and prominent hit-rate
+    metrics, so this returns only the raw counts (enriched total, per-label
+    counts, genre mix) in a stable author-id order, with **no hit-rate percentage
+    and no density sort**. A reader sees what each author tends to produce; the
+    tool does not compute or rank a "who is best" verdict. ``label_scale`` (the
+    global max label count) lets bar lengths stay comparable as composition, not
+    as a score.
+    """
+    if not prompt_version.strip():
+        raise ValueError("prompt_version must not be empty")
+    rows = connection.execute(
+        """
+        SELECT
+            a.id AS author_id,
+            a.platform_uid AS author_platform_uid,
+            a.notes AS author_name,
+            COUNT(*) AS enriched,
+            SUM(e.label_first_hand_info) AS first_hand,
+            SUM(e.label_transferable_framework) AS framework,
+            SUM(e.label_reasoned_non_consensus) AS non_consensus,
+            SUM(
+                CASE WHEN e.label_first_hand_info = 1
+                      OR e.label_transferable_framework = 1
+                      OR e.label_reasoned_non_consensus = 1 THEN 1 ELSE 0 END
+            ) AS hit
+        FROM enrichments e
+        JOIN posts p ON p.id = e.post_id
+        JOIN authors a ON a.id = p.author_id
+        WHERE e.prompt_version = ?
+        GROUP BY a.id
+        ORDER BY a.id
+        """,
+        (prompt_version.strip(),),
+    ).fetchall()
+    cards: list[dict[str, object]] = []
+    label_scale = 1
+    for row in rows:
+        enriched = int(row["enriched"])
+        hit = int(row["hit"] or 0)
+        first_hand = int(row["first_hand"] or 0)
+        framework = int(row["framework"] or 0)
+        non_consensus = int(row["non_consensus"] or 0)
+        label_scale = max(label_scale, first_hand, framework, non_consensus)
+        genres = [
+            {"post_type": genre["post_type"], "count": int(genre["count"])}
+            for genre in connection.execute(
+                """
+                SELECT e.post_type, COUNT(*) AS count
+                FROM enrichments e
+                JOIN posts p ON p.id = e.post_id
+                WHERE p.author_id = ? AND e.prompt_version = ?
+                GROUP BY e.post_type ORDER BY count DESC, e.post_type
+                """,
+                (int(row["author_id"]), prompt_version.strip()),
+            ).fetchall()
+        ]
+        cards.append(
+            {
+                "author_platform_uid": row["author_platform_uid"],
+                "author_name": row["author_name"],
+                "enriched": enriched,
+                "hit": hit,
+                "first_hand": first_hand,
+                "framework": framework,
+                "non_consensus": non_consensus,
+                "genres": genres,
+            }
+        )
+    return {"scorecards": cards, "label_scale": label_scale}
+
+
 def _version_history(connection: sqlite3.Connection, post_id: int) -> list[dict[str, object]]:
     rows = connection.execute(
         """

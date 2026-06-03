@@ -13,6 +13,7 @@ import pytest
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.models import (
     ContentFidelity,
+    EnrichmentResult,
     FeedRun,
     IngestMode,
     LoginState,
@@ -136,6 +137,66 @@ def _read_post_row(server: ArchiveHttpServer) -> tuple[str, int]:
         return str(row["watch_mode"]), int(row["current_version_id"])
     finally:
         connection.close()
+
+
+def _enrich_post_one(server: ArchiveHttpServer, **labels: bool) -> None:
+    connection = connect_database(server.db_path)
+    try:
+        archive = Archive(connection)
+        [target] = archive.enrichment_targets("enrich-v1")
+        archive.add_enrichment(
+            target,
+            EnrichmentResult(
+                post_type="观点",
+                label_first_hand_info=labels.get("first_hand", False),
+                label_transferable_framework=labels.get("framework", False),
+                label_reasoned_non_consensus=labels.get("non_consensus", False),
+                rationale="理由",
+                evidence_snippet="可证伪片段",
+            ),
+            "test-model",
+            "enrich-v1",
+            BASE_TIME,
+        )
+    finally:
+        connection.close()
+
+
+def test_queue_is_default_view_and_keeps_label_guide(web_server: ArchiveHttpServer) -> None:
+    _enrich_post_one(web_server, non_consensus=True)
+    status, _, html = _request(web_server, "GET", "/")
+    assert status == 200
+    assert "待处理注意力" in html
+    assert "标签说明" in html  # label guide must stay (explicit requirement)
+    assert "有据非共识" in html  # the fired label pill
+    assert "可证伪片段" in html  # evidence snippet surfaced
+    assert "post 1" in html  # the queued post card
+    assert f'name="csrf_token" value="{CSRF_TOKEN}"' in html  # pin form CSRF
+    # Charter §0.11: the default home carries no per-author hit-rate / ranking.
+    assert "账号标签构成" not in html
+    assert "密度" not in html
+
+
+def test_queue_dequeues_after_pin(web_server: ArchiveHttpServer) -> None:
+    _enrich_post_one(web_server, non_consensus=True)
+    _, _, before = _request(web_server, "GET", "/")
+    assert "post 1" in before
+
+    status, _, _ = _request(web_server, "POST", "/posts/1/pin", {"csrf_token": CSRF_TOKEN})
+    assert status == 303
+    _, _, after = _request(web_server, "GET", "/")
+    assert "post 1" not in after  # pinned → dispositioned → out of the queue
+
+
+def test_authors_view_renders_unranked_composition_without_hit_rate(
+    web_server: ArchiveHttpServer,
+) -> None:
+    _enrich_post_one(web_server, non_consensus=True)
+    status, _, html = _request(web_server, "GET", "/?view=authors")
+    assert status == 200
+    assert "账号标签构成" in html
+    assert "1 富化 · 1 命中" in html  # raw counts, not a rate
+    assert "密度" not in html  # no hit-rate metric / ranking label
 
 
 def test_web_settings_default_to_loopback_and_reject_wildcard_addresses() -> None:

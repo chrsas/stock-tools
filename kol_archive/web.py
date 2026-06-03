@@ -18,8 +18,11 @@ from urllib.parse import parse_qs, quote, urlparse
 from kol_archive.config import load_config
 from kol_archive.database import connect_database
 from kol_archive.maintenance import redact_text
+from kol_archive.models import FeedState, SourceState, WatchMode
 from kol_archive.presentation import (
+    author_scorecards,
     build_evidence_card,
+    list_attention_queue,
     list_filtered_timeline,
     list_timeline,
 )
@@ -181,10 +184,77 @@ def _layout(title: str, body: str) -> str:
     button {{ cursor: pointer; width: fit-content; }}
     .actions {{ display: flex; flex-wrap: wrap; gap: 10px; }}
     .actions form {{ display: inline; margin: 0; }}
+    .topbar {{ display: flex; justify-content: space-between; align-items: baseline;
+      flex-wrap: wrap; gap: 10px; }}
+    .nav {{ display: flex; flex-wrap: wrap; gap: 12px; font-size: .9rem; }}
+    .toolbar {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }}
+    .filter {{ border: 1px solid #cbd5e1; background: #fff; color: #334155;
+      border-radius: 999px; padding: 6px 12px; font-size: .85rem; }}
+    .filter.active {{ background: #075985; border-color: #075985; color: #fff; }}
+    .filter.active:hover {{ text-decoration: none; }}
+    .toolcount {{ color: #5d6878; font-size: .82rem; }}
+    .layout {{ display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px;
+      align-items: start; }}
+    .panel {{ background: #fff; border: 1px solid #d8dee8; border-radius: 10px;
+      padding: 14px; margin: 0 0 12px; }}
+    .sectit {{ display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
+      flex-wrap: wrap; margin-bottom: 8px; }}
+    .candidate {{ border: 1px solid #d8dee8; border-radius: 9px; padding: 13px; margin: 10px 0; }}
+    .chead {{ display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+      align-items: start; }}
+    .who {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; min-width: 0; }}
+    .who .name {{ font-weight: 700; font-size: 1rem; }}
+    .who .uid {{ color: #8190a4; font-size: .8rem; }}
+    .status {{ display: inline-flex; align-items: center; gap: 6px; border-radius: 999px;
+      background: #e6f6ee; color: #15803d; padding: 4px 10px; font-weight: 700; font-size: .8rem;
+      white-space: nowrap; }}
+    .status.warn {{ background: #fff3d6; color: #9a5b00; }}
+    .dot {{ width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }}
+    .meta-row {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }}
+    .pill {{ display: inline-flex; align-items: center; border-radius: 999px; background: #e4f4fb;
+      color: #075985; padding: 3px 9px; font-size: .8rem; }}
+    .pill.gray {{ background: #edf1f5; color: #566273; }}
+    .snippet {{ margin: 9px 0; padding: 9px 12px; border-left: 3px solid #b8c7d8;
+      border-radius: 0 6px 6px 0; background: #f7f9fb; color: #26384d; font-size: .9rem; }}
+    .evidence-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
+      margin: 10px 0; }}
+    .fact {{ border: 1px solid #e2e8f0; background: #fbfcfe; border-radius: 7px; padding: 8px;
+      min-width: 0; }}
+    .fact b {{ display: block; font-size: .8rem; margin-bottom: 4px; }}
+    .fact span {{ display: block; color: #5d6878; font-size: .8rem; line-height: 1.4;
+      overflow-wrap: anywhere; }}
+    .qactions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; align-items: stretch; }}
+    .qactions form {{ display: inline; margin: 0; }}
+    .primary {{ background: #075985; border: 1px solid #075985; color: #fff; border-radius: 7px;
+      padding: 7px 11px; font-size: .85rem; min-height: 36px; }}
+    .secondary {{ background: #fff; border: 1px solid #cbd5e1; color: #075985; border-radius: 7px;
+      padding: 7px 11px; font-size: .85rem; }}
+    .side-item {{ border: 1px solid #e0e7ef; border-radius: 7px; padding: 9px;
+      margin-bottom: 8px; }}
+    .side-item b {{ display: block; font-size: .92rem; }}
+    .side-item .who-line {{ color: #5d6878; font-size: .8rem; margin: 2px 0 6px; }}
+    .bars {{ display: grid; gap: 5px; }}
+    .barrow {{ display: grid; grid-template-columns: 72px minmax(0, 1fr) 28px; gap: 7px;
+      align-items: center; font-size: .78rem; }}
+    .bartrack {{ height: 11px; border-radius: 999px; background: #eef3f7; overflow: hidden;
+      min-width: 0; }}
+    .barfill {{ display: block; height: 100%; min-width: 3px; border-radius: 999px; }}
+    .f0 {{ background: #0ea5e9; }} .f1 {{ background: #6366f1; }} .f2 {{ background: #d97706; }}
+    .label-card {{ border: 1px solid #e0e7ef; background: #fbfcfe; border-radius: 7px; padding: 9px;
+      margin-bottom: 8px; }}
+    .label-card b {{ display: block; font-size: .88rem; margin-bottom: 4px; }}
+    .label-card p {{ margin: 0; color: #5d6878; font-size: .8rem; line-height: 1.45; }}
+    .audit-row {{ display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px;
+      font-size: .82rem; line-height: 1.45; margin-bottom: 6px; }}
+    .audit-row span {{ color: #5d6878; }}
+    @media (max-width: 860px) {{ .layout {{ grid-template-columns: 1fr; }} }}
     @media (max-width: 640px) {{
       main {{ padding: 10px; }} article, section {{ padding: 11px; }}
       th, td {{ min-width: 128px; }} button {{ width: 100%; }}
       .actions, .actions form {{ display: grid; width: 100%; }}
+      .evidence-grid {{ grid-template-columns: 1fr; }}
+      .chead {{ flex-direction: column; }}
+      .barrow {{ grid-template-columns: 64px minmax(0, 1fr) 26px; }}
     }}
   </style>
 </head>
@@ -219,7 +289,10 @@ def _timeline_html(connection: sqlite3.Connection, limit: int) -> str:
     items = list_timeline(connection, limit=limit)
     articles = [_timeline_article(item) for item in items]
     content = "".join(articles) or "<p>归档中暂无帖子。</p>"
-    nav = '<p><a href="/?view=filtered">查看标签过滤流</a></p>'
+    nav = (
+        '<p><a href="/">待处理队列</a> · <a href="/?view=filtered">标签过滤流</a>'
+        ' · <a href="/?view=authors">按账号</a></p>'
+    )
     return _layout("KOL 原始时间线", f"<h1>KOL 原始时间线</h1>{nav}{content}")
 
 
@@ -242,9 +315,259 @@ def _filtered_timeline_html(connection: sqlite3.Connection, prompt_version: str,
         "<p>当前 prompt 版本下还没有命中标签的帖子。先运行 "
         "<code>python -m kol_archive enrich</code> 富化，再回来查看。</p>"
     )
-    nav = '<p><a href="/?view=raw">查看原始时间线</a></p>'
+    nav = (
+        '<p><a href="/">待处理队列</a> · <a href="/?view=raw">原始时间线</a>'
+        ' · <a href="/?view=authors">按账号</a></p>'
+    )
     heading = f'<h1>KOL 标签过滤流</h1><p class="muted">prompt 版本：{escape(prompt_version)}</p>'
     return _layout("KOL 标签过滤流", f"{heading}{nav}{content}")
+
+
+_LABEL_GUIDE = (
+    ("第一手信息", "来自作者自身观察、调研、交易复盘或可追溯经历，优先看原文是否给出具体场景。"),
+    ("可迁移框架", "表达了可复用的判断方法、约束条件或推理结构，适合沉淀到关注理由里。"),
+    ("有据非共识", "提出和常见叙事有差异的判断，并给出至少一段支撑证据或可验证线索。"),
+)
+
+_AUDIT_ROWS = (
+    ("时间", "统一「首次观察 / 最后观察 / 检测到缺失」语义"),
+    ("删除信号", "只展示 source_state，不推断移除主体"),
+    ("版本", "队列行绑定 version_id，证据卡展示版本 diff"),
+    ("队列", "纯推导，无新表；钉住或写关注理由后自然离队"),
+)
+
+
+def _label_guide_panel() -> str:
+    cards = "".join(
+        f'<div class="label-card"><b>{escape(name)}</b><p>{escape(desc)}</p></div>'
+        for name, desc in _LABEL_GUIDE
+    )
+    return (
+        '<section class="panel"><div class="sectit"><h2>标签说明</h2>'
+        '<span class="muted">给标签加上下文</span></div>' + cards + "</section>"
+    )
+
+
+def _audit_panel() -> str:
+    rows = "".join(
+        f'<div class="audit-row"><span>{escape(label)}</span><strong>{escape(text)}</strong></div>'
+        for label, text in _AUDIT_ROWS
+    )
+    return (
+        '<section class="panel"><div class="sectit"><h2>证据口径</h2></div>' + rows + "</section>"
+    )
+
+
+def _scorecard_bars(card: dict[str, object], scale: int) -> str:
+    counts = (
+        ("f0", "第一手", int(cast(int, card["first_hand"]))),
+        ("f1", "框架", int(cast(int, card["framework"]))),
+        ("f2", "非共识", int(cast(int, card["non_consensus"]))),
+    )
+    rows = []
+    for klass, label, count in counts:
+        width = (100 * count / scale) if scale else 0
+        rows.append(
+            f'<div class="barrow"><span>{label}</span><span class="bartrack">'
+            f'<span class="barfill {klass}" style="width:{width:.0f}%"></span></span>'
+            f"<span>{count}</span></div>"
+        )
+    return '<div class="bars">' + "".join(rows) + "</div>"
+
+
+def _scorecards_panel(data: dict[str, object], *, hint: str) -> str:
+    # Charter §0.11: no cross-author ranking, no prominent hit-rate metric. This
+    # shows raw label counts + genre composition only, never a density % and
+    # never sorted by a score (presentation orders neutrally by author id).
+    cards = cast(list[dict[str, object]], data["scorecards"])
+    scale = int(cast(int, data["label_scale"]))
+    items = []
+    for card in cards:
+        genres = cast(list[dict[str, object]], card["genres"])[:5]
+        genre = " · ".join(f"{escape(_text(g['post_type']))}{g['count']}" for g in genres)
+        items.append(
+            f'<div class="side-item"><b>{escape(_text(card["author_name"]))}</b>'
+            f'<div class="who-line">uid {escape(_text(card["author_platform_uid"]))} · '
+            f"{card['enriched']} 富化 · {card['hit']} 命中</div>"
+            f"{_scorecard_bars(card, scale)}"
+            f'<div class="muted" style="font-size:.8rem;margin-top:6px">体裁 {genre}</div></div>'
+        )
+    body = "".join(items) or "<p>暂无富化样本。</p>"
+    return (
+        '<section class="panel"><div class="sectit"><h2>账号标签构成</h2>'
+        f'<span class="muted">{escape(hint)}</span></div>{body}</section>'
+    )
+
+
+def _badge(text: str, *, warn: bool) -> str:
+    cls = "status warn" if warn else "status"
+    return f'<span class="{cls}"><span class="dot"></span>{escape(text)}</span>'
+
+
+def _queue_status_badge(item: dict[str, object]) -> str:
+    source_state = _text(item.get("source_state"))
+    fidelity = _text(item.get("current_content_fidelity")) or "na"
+    if source_state == SourceState.UNKNOWN.value:
+        return _badge(f"未复查 · Track B 待跑 · {fidelity}", warn=True)
+    label = {
+        SourceState.REACHABLE.value: "直链可访问",
+        SourceState.GONE_CONFIRMED.value: "来源已移除",
+        SourceState.UNAVAILABLE.value: "直链不可访问",
+    }.get(source_state, "未复查")
+    return _badge(f"{label} · {fidelity}", warn=source_state == SourceState.UNAVAILABLE.value)
+
+
+def _queue_card(item: dict[str, object], csrf_token: str) -> str:
+    post_id = item["post_id"]
+    pills = "".join(
+        f'<span class="pill">{escape(label)}</span>' for key, label in _LABEL_CHIPS if item.get(key)
+    )
+    pills += f'<span class="pill gray">{_cell(item.get("post_type"))}</span>'
+    snippet = escape(_text(item.get("enrichment_evidence_snippet"))) or "（本条无依据片段）"
+    version_count = int(cast(int, item.get("version_count") or 1))
+    change = (
+        f"检出编辑 · 共 {version_count} 个观察版本"
+        if version_count > 1
+        else "暂无变动 · 当前为首个入库版本"
+    )
+    current_text = escape(_text(item.get("current_text")))
+    uid = _cell(item.get("author_platform_uid"))
+    vid = _cell(item.get("current_version_id"))
+    first_obs = _cell(item.get("current_version_first_observed_at"))
+    last_obs = _cell(item.get("current_version_last_observed_at"))
+    channel = _text(item.get("latest_evidence_channel"))
+    channel_label = {"feed": "feed 轮询", "direct": "直链复查"}.get(channel, "未知来源")
+    run_id = _cell(item.get("latest_evidence_run_id"))
+    fidelity = _cell(item.get("current_content_fidelity"))
+    who = (
+        f'<div class="who"><span class="name">{_cell(item.get("author_name"))}</span>'
+        f'<span class="uid">uid {uid} · post {post_id} · version {vid}</span></div>'
+    )
+    facts = (
+        f'<div class="fact"><b>当前版本观察</b>'
+        f"<span>首次 {first_obs}<br>最后 {last_obs}</span></div>"
+        f'<div class="fact"><b>内容变动</b><span>{escape(change)}</span></div>'
+        f'<div class="fact"><b>证据来源</b>'
+        f"<span>{escape(channel_label)} run {run_id}<br>fidelity {fidelity}</span></div>"
+    )
+    pin_form = (
+        f'<form method="post" action="/posts/{post_id}/pin">{_csrf_input(csrf_token)}'
+        f'<button class="primary" type="submit">钉住当前版本</button></form>'
+    )
+    return f"""<article class="candidate">
+  <div class="chead">
+    <div>{who}<div class="meta-row">{pills}</div></div>
+    {_queue_status_badge(item)}
+  </div>
+  <p class="snippet">依据片段「{snippet}」</p>
+  <div class="evidence-grid">{facts}</div>
+  <div class="qactions">{pin_form}
+    <a class="secondary" href="/posts/{post_id}">打开证据卡</a>
+  </div>
+  <details><summary>展开原文</summary><pre>{current_text}</pre></details>
+</article>"""
+
+
+def _queue_counts(connection: sqlite3.Connection, prompt_version: str) -> dict[str, int]:
+    def scalar(query: str, *params: object) -> int:
+        return int(connection.execute(query, params).fetchone()[0])
+
+    pending = scalar(
+        """
+        SELECT COUNT(*) FROM posts p
+        JOIN enrichments e ON e.version_id = p.current_version_id AND e.prompt_version = ?
+        WHERE p.watch_mode != ?
+          AND (e.label_first_hand_info = 1 OR e.label_transferable_framework = 1
+               OR e.label_reasoned_non_consensus = 1)
+          AND NOT EXISTS (SELECT 1 FROM attention_log al WHERE al.version_id = p.current_version_id)
+        """,
+        prompt_version,
+        WatchMode.PINNED.value,
+    )
+    three = scalar(
+        """
+        SELECT COUNT(*) FROM posts p
+        JOIN enrichments e ON e.version_id = p.current_version_id AND e.prompt_version = ?
+        WHERE p.watch_mode != ?
+          AND e.label_first_hand_info = 1 AND e.label_transferable_framework = 1
+          AND e.label_reasoned_non_consensus = 1
+          AND NOT EXISTS (SELECT 1 FROM attention_log al WHERE al.version_id = p.current_version_id)
+        """,
+        prompt_version,
+        WatchMode.PINNED.value,
+    )
+    pinned = scalar("SELECT COUNT(*) FROM posts WHERE watch_mode = ?", WatchMode.PINNED.value)
+    absent = scalar(
+        "SELECT COUNT(*) FROM posts WHERE feed_state = ?", FeedState.ABSENT_CONFIRMED.value
+    )
+    return {"pending": pending, "three": three, "pinned": pinned, "absent": absent}
+
+
+def _queue_html(
+    connection: sqlite3.Connection,
+    prompt_version: str,
+    limit: int,
+    csrf_token: str,
+    *,
+    tier3_only: bool,
+) -> str:
+    items = list_attention_queue(connection, prompt_version, limit=limit)
+    if tier3_only:
+        items = [item for item in items if int(cast(int, item.get("tier") or 0)) >= 3]
+    counts = _queue_counts(connection, prompt_version)
+    cards = "".join(_queue_card(item, csrf_token) for item in items) or (
+        "<p>队列为空：当前 prompt 版本下没有未处置的命中标签版本。先运行 "
+        "<code>python -m kol_archive enrich</code> 富化，或所有命中都已钉住/写过关注理由。</p>"
+    )
+    all_cls = "filter" + ("" if tier3_only else " active")
+    three_cls = "filter" + (" active" if tier3_only else "")
+    toolbar = (
+        f'<a class="{all_cls}" href="/">待处理 {counts["pending"]}</a>'
+        f'<a class="{three_cls}" href="/?tier=3">只看三标签命中 {counts["three"]}</a>'
+        f'<span class="toolcount">已钉住 {counts["pinned"]} · 近期缺席 {counts["absent"]}</span>'
+    )
+    nav = (
+        '<nav class="nav"><a href="/?view=raw">原始时间线</a>'
+        '<a href="/?view=filtered">全部过滤流</a>'
+        '<a href="/?view=authors">按账号</a></nav>'
+    )
+    header = (
+        '<div class="topbar"><div><h1>KOL 照妖镜 · 待处理注意力</h1>'
+        '<p class="muted">命中标签、未钉住、未写关注理由的版本，按 tier（命中标签数）与新观察排序；'
+        "不做跨账号排行。原始时间线与全部过滤流一键可达。</p></div>"
+        f"{nav}</div>"
+    )
+    # The per-author composition lens stays one click away (?view=authors); the
+    # default home carries no per-author hit-rate metric (charter §0.11).
+    aside = _label_guide_panel() + _audit_panel()
+    body = (
+        f'{header}<div class="toolbar">{toolbar}</div>'
+        f'<div class="layout"><section class="panel"><div class="sectit">'
+        f"<h2>待处理的高信号版本</h2></div>{cards}</section>"
+        f"<aside>{aside}</aside></div>"
+    )
+    return _layout("KOL 照妖镜 · 待处理注意力", body)
+
+
+def _scorecards_html(connection: sqlite3.Connection, prompt_version: str) -> str:
+    scorecards = author_scorecards(connection, prompt_version)
+    nav = (
+        '<nav class="nav"><a href="/">待处理队列</a>'
+        '<a href="/?view=raw">原始时间线</a>'
+        '<a href="/?view=filtered">全部过滤流</a></nav>'
+    )
+    header = (
+        '<div class="topbar"><div><h1>KOL 照妖镜 · 账号标签构成</h1>'
+        '<p class="muted">每账号产出的标签计数与体裁构成（诊断汇总，非跨人排行榜，'
+        "不计算命中率、不按分数排序）。条长按全局最大计数归一，仅作构成对照，不是评分。</p></div>"
+        f"{nav}</div>"
+    )
+    panel = _scorecards_panel(scorecards, hint="按账号 id 排列，条长=标签计数")
+    body = (
+        f'{header}<div class="layout"><div>{panel}</div>'
+        f"<aside>{_label_guide_panel()}{_audit_panel()}</aside></div>"
+    )
+    return _layout("KOL 照妖镜 · 账号标签构成", body)
 
 
 def _version_sections(versions: list[dict[str, object]]) -> str:
@@ -311,7 +634,7 @@ def _post_html(card: dict[str, Any], csrf_token: str) -> str:
     attention_log = cast(list[dict[str, object]], card["attention_log"])
     rewrite_exercises = cast(list[dict[str, object]], card["rewrite_exercises"])
     enrichments = cast(list[dict[str, object]], card["enrichments"])
-    body = f"""<p><a href="/">返回时间线</a></p>
+    body = f"""<p><a href="/">返回待处理队列</a></p>
 <h1>证据卡片：帖子 {post_id}</h1>
 <section>
   <p>{escape(status["human_label"])}</p>
@@ -351,26 +674,35 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format_string: str, *args: object) -> None:
         LOGGER.info("web request " + format_string, *args)
 
+    def _render_home(self, connection: sqlite3.Connection, query: str) -> str:
+        # The pending-attention queue is the default view; the raw timeline,
+        # full filter stream, and per-author lens all stay one click away.
+        view = self._query_value(query, "view")
+        prompt_version = self.server.enrich_prompt_version
+        limit = self.server.timeline_limit
+        if view == "raw":
+            return _timeline_html(connection, limit)
+        if view == "filtered":
+            return _filtered_timeline_html(connection, prompt_version, limit)
+        if view == "authors":
+            return _scorecards_html(connection, prompt_version)
+        return _queue_html(
+            connection,
+            prompt_version,
+            limit,
+            self.server.csrf_token,
+            tier3_only=self._query_value(query, "tier") == "3",
+        )
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
         try:
             if path == "/":
-                view = self._query_value(parsed.query, "view")
-                if view == "raw":
-                    render = lambda connection: _timeline_html(  # noqa: E731
-                        connection, self.server.timeline_limit
-                    )
-                else:
-                    # Filter is the default view (charter §11); the raw stream
-                    # stays one click away via "?view=raw".
-                    render = lambda connection: _filtered_timeline_html(  # noqa: E731
-                        connection,
-                        self.server.enrich_prompt_version,
-                        self.server.timeline_limit,
-                    )
                 self._with_connection(
-                    lambda connection: self._send_html(HTTPStatus.OK, render(connection))
+                    lambda connection: self._send_html(
+                        HTTPStatus.OK, self._render_home(connection, parsed.query)
+                    )
                 )
                 return
             post_id = self._post_id(path, suffix="")

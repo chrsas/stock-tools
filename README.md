@@ -142,8 +142,24 @@ $env:LLM_API_KEY = "<本地密钥>"
 .\.venv\Scripts\python.exe -m kol_archive serve --config-dir config
 ```
 
-默认地址为 `http://127.0.0.1:8765/`。页面提供原始时间线、证据卡片、钉住、取消钉住、关注理由、
-单条改写训练和人工 verdict。所有写操作都使用 `POST` 并校验 CSRF token。
+默认地址为 `http://127.0.0.1:8765/`，首页是**待处理注意力队列**：当前版本命中富化标签、尚未钉住、
+也没写过关注理由的帖子，按 tier（命中标签数）与最后观察时间排序（再次复见会上浮），钉住或写关注理由后
+自然离队（纯推导，不新增表）。首页右侧只放标签说明和证据口径，**不展示任何按账号的命中率或排名**
+（宪章「无跨人排行榜；命中率类指标禁止头部展示」）。证据格诚实显示稀疏态（如「未复查 · Track B 待跑」
+「暂无变动」），不假装繁荣。其余视图一键可达：`/?view=raw` 原始时间线、`/?view=filtered` 全部过滤流、
+`/?view=authors` 账号标签构成（诊断汇总，见下）、`/?tier=3` 只看三标签命中。证据卡片、钉住、取消钉住、
+关注理由、单条改写训练和人工 verdict 均保留。所有写操作都使用 `POST` 并校验 CSRF token。
+
+`/?view=authors` 与 `scorecards` 命令是**账号标签构成诊断汇总**：只列每账号的标签计数与体裁构成，
+按账号 id 排列，**不计算命中率百分比、不按分数排序、不构成排行榜**，给读者看「这个账号大致产出什么」，
+不替其下评分结论。
+
+命令行也能直接看队列与账号构成（JSON 输出）：
+
+```powershell
+.\.venv\Scripts\python.exe -m kol_archive queue            # 待处理队列（--tier3-only 只看三标签命中）
+.\.venv\Scripts\python.exe -m kol_archive scorecards       # 每账号标签计数与体裁构成（诊断，不排序、无命中率）
+```
 
 手机访问只走 Tailscale 私网。在被 Git 忽略的 `config/config.local.yml` 中将
 `web.bind_host` 显式覆盖为部署机器的 Tailscale 地址，可按需覆盖 `web.port`。服务拒绝

@@ -103,9 +103,10 @@ $RECYCLE.BIN/
 *.lnk
 
 ### VS Code
-# VSCode settings (keep shared configuration)
+# Ignore VS Code config by default; share only project task/launch/extension
+# files. settings.json stays local; it tends to hold personal editor prefs
+# (fonts, themes), not team configuration.
 .vscode/*
-!.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
