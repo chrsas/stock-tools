@@ -15,6 +15,8 @@ from kol_archive.models import (
     TIMELINE_PARSE_FAILED_NOTE,
     ArchiveSettings,
     ContentFidelity,
+    EnrichmentResult,
+    EnrichmentTarget,
     EventDimension,
     FeedRun,
     FeedState,
@@ -539,6 +541,91 @@ class Archive:
             version_id=version_id,
             original_text=str(version["content_text"]),
         )
+
+    def enrichment_targets(
+        self, prompt_version: str, *, post_id: int | None = None, limit: int | None = None
+    ) -> list[EnrichmentTarget]:
+        """Observed versions still missing an enrichment for ``prompt_version``.
+
+        Excluding already-enriched versions makes the batch idempotent and
+        resumable: a run that dies (or whose LLM call fails on some versions)
+        leaves the rest pending so a later run picks them up. Ordered oldest
+        first so reruns make steady forward progress. Pass ``post_id`` to scope
+        to one post's versions.
+        """
+        if not prompt_version.strip():
+            raise ValueError("prompt_version must not be empty")
+        query = """
+            SELECT v.post_id, v.id AS version_id, v.content_text
+            FROM post_versions v
+            LEFT JOIN enrichments e
+                ON e.version_id = v.id AND e.prompt_version = ?
+            WHERE e.id IS NULL
+        """
+        params: list[object] = [prompt_version.strip()]
+        if post_id is not None:
+            query += " AND v.post_id = ?"
+            params.append(post_id)
+        query += " ORDER BY v.first_observed_at, v.id"
+        if limit is not None:
+            if limit <= 0:
+                raise ValueError("limit must be positive")
+            query += " LIMIT ?"
+            params.append(limit)
+        rows = self.connection.execute(query, params).fetchall()
+        return [
+            EnrichmentTarget(
+                post_id=int(row["post_id"]),
+                version_id=int(row["version_id"]),
+                original_text=str(row["content_text"]),
+            )
+            for row in rows
+        ]
+
+    def add_enrichment(
+        self,
+        target: EnrichmentTarget,
+        result: EnrichmentResult,
+        model: str,
+        prompt_version: str,
+        created_at: str,
+    ) -> int | None:
+        """Persist one enrichment; returns its id, or ``None`` if one already
+        existed for ``UNIQUE(version_id, prompt_version)`` (idempotent rerun)."""
+        for label, value in {"post_type": result.post_type, "rationale": result.rationale}.items():
+            if not value.strip():
+                raise ValueError(f"{label} must not be empty")
+        if not model.strip():
+            raise ValueError("model must not be empty")
+        if not prompt_version.strip():
+            raise ValueError("prompt_version must not be empty")
+        with self._transaction():
+            cursor = self.connection.execute(
+                """
+                INSERT OR IGNORE INTO enrichments(
+                    post_id, version_id, post_type,
+                    label_first_hand_info, label_transferable_framework,
+                    label_reasoned_non_consensus,
+                    rationale, evidence_snippet, model, prompt_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    target.post_id,
+                    target.version_id,
+                    result.post_type.strip(),
+                    int(result.label_first_hand_info),
+                    int(result.label_transferable_framework),
+                    int(result.label_reasoned_non_consensus),
+                    result.rationale.strip(),
+                    result.evidence_snippet.strip(),
+                    model.strip(),
+                    prompt_version.strip(),
+                    created_at,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return _required_lastrowid(cursor)
 
     def _validate_feed_posts(self, run: FeedRun, posts: list[NormalizedPost]) -> None:
         post_ids: set[str] = set()

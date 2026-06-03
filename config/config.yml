@@ -72,13 +72,14 @@ web:
   port: 8765
   timeline_limit: 50
 
-# ── 单条改写训练（阶段 2，按需调用）────────────────────────────────
+# ── LLM（阶段 2 单条改写训练 / 阶段 3 批量富化，按需调用）──────────────
 llm:
   provider: openai_compatible
   base_url: https://api.openai.com/v1
   model: ""                    # 在 config.local.yml 中填写
   api_key_env: LLM_API_KEY     # API Key 仅从环境变量读取
-  prompt_version: rewrite-v1
+  prompt_version: rewrite-v1   # 阶段 2 改写训练 prompt 版本
+  enrich_prompt_version: enrich-v1   # 阶段 3 批量富化 prompt 版本（按版本隔离 enrichments）
 
 # ── 后续阶段占位 ──────────────────────────────────────────────────
 # prices:                # 阶段4 行情数据源

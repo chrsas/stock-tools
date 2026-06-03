@@ -18,7 +18,11 @@ from urllib.parse import parse_qs, quote, urlparse
 from kol_archive.config import load_config
 from kol_archive.database import connect_database
 from kol_archive.maintenance import redact_text
-from kol_archive.presentation import build_evidence_card, list_timeline
+from kol_archive.presentation import (
+    build_evidence_card,
+    list_filtered_timeline,
+    list_timeline,
+)
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
 from kol_archive.service import Archive
 
@@ -33,6 +37,7 @@ class WebSettings:
     port: int = 8765
     timeline_limit: int = 50
     window_days: int = 30
+    enrich_prompt_version: str = "enrich-v1"
 
 
 class ArchiveHttpServer(ThreadingHTTPServer):
@@ -41,6 +46,7 @@ class ArchiveHttpServer(ThreadingHTTPServer):
     csrf_token: str
     timeline_limit: int
     window_days: int
+    enrich_prompt_version: str
 
 
 def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
@@ -58,11 +64,14 @@ def load_web_settings(
 ) -> WebSettings:
     web = _section(config, "web")
     monitoring = _section(config, "monitoring")
+    llm = _section(config, "llm")
     settings = WebSettings(
         bind_host=str(bind_host or web.get("bind_host") or "127.0.0.1").strip(),
         port=int(port if port is not None else web.get("port") or 8765),
         timeline_limit=int(web.get("timeline_limit") or 50),
         window_days=int(monitoring.get("window_days") or 30),
+        enrich_prompt_version=str(llm.get("enrich_prompt_version") or "enrich-v1").strip()
+        or "enrich-v1",
     )
     if not settings.bind_host or settings.bind_host in {"0.0.0.0", "::", "[::]"}:
         raise ValueError("web.bind_host must be a loopback or explicit tailnet address")
@@ -90,6 +99,7 @@ def create_server(
     server.csrf_token = csrf_token or secrets.token_urlsafe(32)
     server.timeline_limit = settings.timeline_limit
     server.window_days = settings.window_days
+    server.enrich_prompt_version = settings.enrich_prompt_version
     return server
 
 
@@ -154,6 +164,8 @@ def _layout(title: str, body: str) -> str:
     h1 {{ font-size: 1.5rem; }} h2 {{ font-size: 1.2rem; }} h3 {{ font-size: 1rem; }}
     p {{ margin: 8px 0; overflow-wrap: anywhere; }}
     .muted {{ color: #5d6878; word-break: break-all; }}
+    .chip {{ display: inline-block; background: #e0f2fe; color: #075985; border-radius: 999px;
+      padding: 2px 10px; margin-right: 6px; font-size: .82rem; }}
     .table-wrap {{ overflow-x: auto; }}
     table {{ border-collapse: collapse; width: 100%; font-size: .88rem; }}
     th, td {{ border-bottom: 1px solid #e4e8ef; padding: 8px; text-align: left;
@@ -180,17 +192,20 @@ def _layout(title: str, body: str) -> str:
 </html>"""
 
 
-def _timeline_html(connection: sqlite3.Connection, limit: int) -> str:
-    items = list_timeline(connection, limit=limit)
-    articles = []
-    for item in items:
-        status = cast(dict[str, str], item["status"])
-        current_text = escape(_text(item.get("current_text")))
-        articles.append(
-            f"""<article>
+_LABEL_CHIPS = (
+    ("label_first_hand_info", "第一手信息"),
+    ("label_transferable_framework", "可迁移框架"),
+    ("label_reasoned_non_consensus", "有据非共识"),
+)
+
+
+def _timeline_article(item: dict[str, object], *, extra: str = "") -> str:
+    status = cast(dict[str, str], item["status"])
+    current_text = escape(_text(item.get("current_text")))
+    return f"""<article>
   <h2><a href="/posts/{item["post_id"]}">帖子 {item["post_id"]}</a></h2>
   <p>{escape(status["human_label"])}</p>
-  <p>{escape(status["deletion_signal_label"])}</p>
+  <p>{escape(status["deletion_signal_label"])}</p>{extra}
   <p class="muted">首次观察：{_cell(item.get("first_seen_at"))}<br>
   最后在场观察：{_cell(item.get("last_present_at"))}<br>
   当前版本首次观察：{_cell(item.get("current_version_first_observed_at"))}<br>
@@ -198,9 +213,38 @@ def _timeline_html(connection: sqlite3.Connection, limit: int) -> str:
   检测到缺失：{_cell(item.get("last_feed_absence_detected_at"))}</p>
   <pre>{current_text}</pre>
 </article>"""
-        )
+
+
+def _timeline_html(connection: sqlite3.Connection, limit: int) -> str:
+    items = list_timeline(connection, limit=limit)
+    articles = [_timeline_article(item) for item in items]
     content = "".join(articles) or "<p>归档中暂无帖子。</p>"
-    return _layout("KOL 原始时间线", f"<h1>KOL 原始时间线</h1>{content}")
+    nav = '<p><a href="/?view=filtered">查看标签过滤流</a></p>'
+    return _layout("KOL 原始时间线", f"<h1>KOL 原始时间线</h1>{nav}{content}")
+
+
+def _filtered_timeline_html(connection: sqlite3.Connection, prompt_version: str, limit: int) -> str:
+    items = list_filtered_timeline(connection, prompt_version, limit=limit)
+    articles = []
+    for item in items:
+        chips = " ".join(
+            f'<span class="chip">{escape(label)}</span>'
+            for key, label in _LABEL_CHIPS
+            if item.get(key)
+        )
+        snippet = escape(_text(item.get("enrichment_evidence_snippet")))
+        extra = (
+            f"\n  <p>体裁：{_cell(item.get('post_type'))}　{chips}</p>"
+            f'\n  <p class="muted">依据片段：{snippet}</p>'
+        )
+        articles.append(_timeline_article(item, extra=extra))
+    content = "".join(articles) or (
+        "<p>当前 prompt 版本下还没有命中标签的帖子。先运行 "
+        "<code>python -m kol_archive enrich</code> 富化，再回来查看。</p>"
+    )
+    nav = '<p><a href="/?view=raw">查看原始时间线</a></p>'
+    heading = f'<h1>KOL 标签过滤流</h1><p class="muted">prompt 版本：{escape(prompt_version)}</p>'
+    return _layout("KOL 标签过滤流", f"{heading}{nav}{content}")
 
 
 def _version_sections(versions: list[dict[str, object]]) -> str:
@@ -266,7 +310,8 @@ def _post_html(card: dict[str, Any], csrf_token: str) -> str:
     events = cast(list[dict[str, object]], card["events"])
     attention_log = cast(list[dict[str, object]], card["attention_log"])
     rewrite_exercises = cast(list[dict[str, object]], card["rewrite_exercises"])
-    body = f"""<p><a href="/">返回原始时间线</a></p>
+    enrichments = cast(list[dict[str, object]], card["enrichments"])
+    body = f"""<p><a href="/">返回时间线</a></p>
 <h1>证据卡片：帖子 {post_id}</h1>
 <section>
   <p>{escape(status["human_label"])}</p>
@@ -295,7 +340,8 @@ def _post_html(card: dict[str, Any], csrf_token: str) -> str:
 <section><h2>直链复查</h2>{_table(direct_probes)}</section>
 <section><h2>状态变迁</h2>{_table(events)}</section>
 <section><h2>关注理由</h2>{_table(attention_log)}</section>
-<section><h2>改写训练</h2>{_table(rewrite_exercises)}{verdict_forms}</section>"""
+<section><h2>改写训练</h2>{_table(rewrite_exercises)}{verdict_forms}</section>
+<section><h2>LLM 富化标签</h2>{_table(enrichments)}</section>"""
     return _layout(f"证据卡片 {post_id}", body)
 
 
@@ -306,14 +352,25 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         LOGGER.info("web request " + format_string, *args)
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         try:
             if path == "/":
-                self._with_connection(
-                    lambda connection: self._send_html(
-                        HTTPStatus.OK,
-                        _timeline_html(connection, self.server.timeline_limit),
+                view = self._query_value(parsed.query, "view")
+                if view == "raw":
+                    render = lambda connection: _timeline_html(  # noqa: E731
+                        connection, self.server.timeline_limit
                     )
+                else:
+                    # Filter is the default view (charter §11); the raw stream
+                    # stays one click away via "?view=raw".
+                    render = lambda connection: _filtered_timeline_html(  # noqa: E731
+                        connection,
+                        self.server.enrich_prompt_version,
+                        self.server.timeline_limit,
+                    )
+                self._with_connection(
+                    lambda connection: self._send_html(HTTPStatus.OK, render(connection))
                 )
                 return
             post_id = self._post_id(path, suffix="")
@@ -467,6 +524,11 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             and self.server.csrf_token.isascii()
             and secrets.compare_digest(token, self.server.csrf_token)
         )
+
+    @staticmethod
+    def _query_value(query: str, key: str) -> str | None:
+        values = parse_qs(query).get(key)
+        return None if not values else values[0].strip() or None
 
     @staticmethod
     def _form_value(form: dict[str, list[str]], key: str) -> str | None:

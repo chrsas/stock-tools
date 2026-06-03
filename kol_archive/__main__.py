@@ -7,9 +7,12 @@ import json
 import logging
 import sqlite3
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from kol_archive.browser import (
     DEFAULT_CDP_URL,
@@ -21,6 +24,7 @@ from kol_archive.browser import (
 from kol_archive.collector import CollectorSettings, XueqiuCollector, create_xueqiu_client
 from kol_archive.config import load_config, resolve_cookie
 from kol_archive.database import connect_database, initialize_database
+from kol_archive.enrich import load_enrich_settings, request_enrichment
 from kol_archive.maintenance import (
     create_verified_backup,
     export_archive,
@@ -28,7 +32,7 @@ from kol_archive.maintenance import (
     verify_backup,
 )
 from kol_archive.models import ArchiveSettings, QueueReason
-from kol_archive.presentation import build_evidence_card, list_timeline
+from kol_archive.presentation import build_evidence_card, list_filtered_timeline, list_timeline
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
 from kol_archive.service import Archive
 from kol_archive.time import parse_utc_timestamp
@@ -372,10 +376,27 @@ def _export_command(args: argparse.Namespace) -> None:
     LOGGER.info("credential-safe export created path=%s", result.bundle_dir)
 
 
+def _enrich_prompt_version(config: dict[str, Any], override: str | None) -> str:
+    if override:
+        return override
+    llm = config.get("llm") or {}
+    if isinstance(llm, dict):
+        configured = str(llm.get("enrich_prompt_version") or "").strip()
+        if configured:
+            return configured
+    return "enrich-v1"
+
+
 def _timeline_command(args: argparse.Namespace) -> None:
-    connection, _ = _connect_existing_archive(_configured_db_path(args.path, args.config_dir))
+    config = load_config(args.config_dir)
+    connection, _ = _connect_existing_archive(_resolve_db_path(args.path, config))
     try:
-        _print_json(list_timeline(connection, limit=args.limit))
+        if args.filtered:
+            prompt_version = _enrich_prompt_version(config, args.prompt_version)
+            timeline = list_filtered_timeline(connection, prompt_version, limit=args.limit)
+        else:
+            timeline = list_timeline(connection, limit=args.limit)
+        _print_json(timeline)
     finally:
         connection.close()
 
@@ -473,6 +494,51 @@ def _rewrite_command(args: argparse.Namespace) -> None:
         connection.close()
 
 
+def _enrich_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    settings = load_enrich_settings(config)
+    if args.prompt_version:
+        settings = replace(settings, prompt_version=args.prompt_version)
+    connection, archive = _connect_existing_archive(_resolve_db_path(args.path, config))
+    try:
+        targets = archive.enrichment_targets(
+            settings.prompt_version, post_id=args.post_id, limit=args.limit
+        )
+        enriched = skipped = failed = 0
+        for target in targets:
+            try:
+                result = request_enrichment(settings, target.original_text)
+            except (httpx.HTTPError, ValueError) as error:
+                # One bad version (LLM/network/parse failure) must not abort the
+                # batch; it stays pending so a later run retries it.
+                failed += 1
+                LOGGER.warning("enrichment failed for version %s: %s", target.version_id, error)
+                continue
+            enrichment_id = archive.add_enrichment(
+                target,
+                result,
+                settings.model,
+                settings.prompt_version,
+                datetime.now(tz=UTC).isoformat(),
+            )
+            if enrichment_id is None:
+                skipped += 1
+            else:
+                enriched += 1
+        _print_json(
+            {
+                "prompt_version": settings.prompt_version,
+                "model": settings.model,
+                "candidates": len(targets),
+                "enriched": enriched,
+                "skipped": skipped,
+                "failed": failed,
+            }
+        )
+    finally:
+        connection.close()
+
+
 def _review_rewrite_command(args: argparse.Namespace) -> None:
     connection, archive = _connect_existing_archive(_configured_db_path(args.path, args.config_dir))
     try:
@@ -547,6 +613,14 @@ def main() -> None:
     timeline_parser.add_argument("--path", type=Path)
     timeline_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     timeline_parser.add_argument("--limit", type=int, default=50)
+    timeline_parser.add_argument(
+        "--filtered",
+        action="store_true",
+        help="show only posts whose current version hit an enrichment label",
+    )
+    timeline_parser.add_argument(
+        "--prompt-version", help="enrichment prompt version for --filtered (default from config)"
+    )
     timeline_parser.set_defaults(handler=_timeline_command)
     show_parser = subparsers.add_parser("show-post", help="show one post evidence card")
     show_parser.add_argument("post_id", type=int)
@@ -583,6 +657,17 @@ def main() -> None:
     rewrite_parser.add_argument("--path", type=Path)
     rewrite_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     rewrite_parser.set_defaults(handler=_rewrite_command)
+    enrich_parser = subparsers.add_parser(
+        "enrich", help="batch-label observed versions with the LLM (post_type + labels)"
+    )
+    enrich_parser.add_argument("--post-id", type=int, help="restrict to one post's versions")
+    enrich_parser.add_argument("--limit", type=int, help="cap versions labelled this run")
+    enrich_parser.add_argument(
+        "--prompt-version", help="override llm.enrich_prompt_version for this run"
+    )
+    enrich_parser.add_argument("--path", type=Path)
+    enrich_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    enrich_parser.set_defaults(handler=_enrich_command)
     review_parser = subparsers.add_parser(
         "review-rewrite", help="record a rewrite exercise verdict"
     )

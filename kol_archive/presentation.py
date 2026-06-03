@@ -144,6 +144,72 @@ def list_timeline(connection: sqlite3.Connection, *, limit: int = 50) -> list[di
     return [_post_projection(row) for row in rows]
 
 
+def list_filtered_timeline(
+    connection: sqlite3.Connection, prompt_version: str, *, limit: int = 50
+) -> list[dict[str, object]]:
+    """The label-gate stream: posts whose current version was enriched (for
+    ``prompt_version``) and hit at least one label, newest first.
+
+    This is a filtered *view* of the raw timeline, not a replacement — the raw
+    stream stays one call away via :func:`list_timeline`. Posts without an
+    enrichment for this prompt version are simply absent here, never hidden.
+    """
+    if limit < 1:
+        raise ValueError("timeline limit must be positive")
+    if not prompt_version.strip():
+        raise ValueError("prompt_version must not be empty")
+    rows = connection.execute(
+        """
+        SELECT
+            p.id AS post_id,
+            p.platform,
+            p.platform_post_id,
+            a.platform_uid AS author_platform_uid,
+            p.url,
+            p.posted_at_claimed,
+            p.first_seen_at,
+            p.last_present_at,
+            p.source_checked_at,
+            p.feed_state,
+            p.source_state,
+            p.watch_mode,
+            p.absent_healthy_streak,
+            p.current_version_id,
+            v.content_text AS current_text,
+            v.first_observed_at AS current_version_first_observed_at,
+            e.post_type,
+            e.label_first_hand_info,
+            e.label_transferable_framework,
+            e.label_reasoned_non_consensus,
+            e.rationale AS enrichment_rationale,
+            e.evidence_snippet AS enrichment_evidence_snippet,
+            e.prompt_version AS enrichment_prompt_version,
+            (
+                SELECT MAX(s.observed_at)
+                FROM version_sightings s
+                WHERE s.version_id = p.current_version_id
+            ) AS current_version_last_observed_at,
+            (
+                SELECT MAX(o.observed_at)
+                FROM post_observations o
+                WHERE o.post_id = p.id AND o.present = 0
+            ) AS last_feed_absence_detected_at
+        FROM posts p
+        JOIN authors a ON a.id = p.author_id
+        JOIN post_versions v ON v.id = p.current_version_id
+        JOIN enrichments e
+            ON e.version_id = p.current_version_id AND e.prompt_version = ?
+        WHERE e.label_first_hand_info = 1
+           OR e.label_transferable_framework = 1
+           OR e.label_reasoned_non_consensus = 1
+        ORDER BY COALESCE(p.last_present_at, p.first_seen_at) DESC, p.id DESC
+        LIMIT ?
+        """,
+        (prompt_version.strip(), limit),
+    ).fetchall()
+    return [_post_projection(row) for row in rows]
+
+
 def _version_history(connection: sqlite3.Connection, post_id: int) -> list[dict[str, object]]:
     rows = connection.execute(
         """
@@ -338,6 +404,27 @@ def build_evidence_card(connection: sqlite3.Connection, post_id: int) -> dict[st
                 my_verdict,
                 created_at
             FROM rewrite_exercises
+            WHERE post_id = ?
+            ORDER BY id
+            """,
+            post_id,
+        ),
+        "enrichments": _query_rows(
+            connection,
+            """
+            SELECT
+                id AS enrichment_id,
+                version_id,
+                post_type,
+                label_first_hand_info,
+                label_transferable_framework,
+                label_reasoned_non_consensus,
+                rationale,
+                evidence_snippet,
+                model,
+                prompt_version,
+                created_at
+            FROM enrichments
             WHERE post_id = ?
             ORDER BY id
             """,

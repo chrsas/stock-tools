@@ -202,3 +202,24 @@ class RewriteSource:
     post_id: int
     version_id: int
     original_text: str
+
+
+@dataclass(frozen=True)
+class EnrichmentTarget:
+    """A full-content version still lacking an enrichment for a prompt version."""
+
+    post_id: int
+    version_id: int
+    original_text: str
+
+
+@dataclass(frozen=True)
+class EnrichmentResult:
+    """Structured labels for one version; the persisted shape of an LLM verdict."""
+
+    post_type: str
+    label_first_hand_info: bool
+    label_transferable_framework: bool
+    label_reasoned_non_consensus: bool
+    rationale: str
+    evidence_snippet: str

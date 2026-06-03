@@ -153,7 +153,7 @@ def test_web_settings_default_to_loopback_and_reject_wildcard_addresses() -> Non
 def test_read_routes_render_redacted_timeline_and_evidence_card(
     web_server: ArchiveHttpServer,
 ) -> None:
-    status, _, timeline = _request(web_server, "GET", "/")
+    status, _, timeline = _request(web_server, "GET", "/?view=raw")
     assert status == 200
     assert "KOL 原始时间线" in timeline
     assert "原始正文 A" in timeline
