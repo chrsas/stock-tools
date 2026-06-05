@@ -13,13 +13,14 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from kol_archive.config import load_config
 from kol_archive.database import connect_database
 from kol_archive.maintenance import redact_text
 from kol_archive.models import FeedState, SourceState, WatchMode
 from kol_archive.presentation import (
+    author_profile,
     author_scorecards,
     build_evidence_card,
     list_attention_queue,
@@ -131,18 +132,153 @@ def _cell(value: object) -> str:
     return escape(_text(value))
 
 
-def _fmt_ts(value: object) -> str:
-    """Render an ISO timestamp as local-time `YYYY-MM-DD HH:MM`; pass through on failure."""
+def _original_post_link(value: object) -> str:
+    url = _text(value).strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    href = escape(url, quote=True)
+    return (
+        f'<a class="secondary" href="{href}" target="_blank" '
+        'rel="noopener noreferrer">打开雪球原帖</a>'
+    )
+
+
+def _snowball_user_url(uid: object) -> str:
+    raw = _text(uid).strip()
+    if not raw:
+        return ""
+    return f"https://xueqiu.com/u/{quote(raw, safe='')}"
+
+
+def _snowball_user_link(uid: object) -> str:
+    href = _snowball_user_url(uid)
+    if not href:
+        return ""
+    return (
+        f'<a class="secondary" href="{escape(href, quote=True)}" target="_blank" '
+        'rel="noopener noreferrer">雪球主页</a>'
+    )
+
+
+def _local_author_link(uid: object) -> str:
+    raw = _text(uid).strip()
+    if not raw:
+        return ""
+    return f'<a class="secondary" href="/authors/{quote(raw, safe="")}">本地作者页</a>'
+
+
+def _author_name(item: dict[str, object]) -> str:
+    return (
+        _text(item.get("author_display_name")).strip()
+        or _text(item.get("author_name")).strip()
+        or _text(item.get("author_platform_uid")).strip()
+        or "未知作者"
+    )
+
+
+def _avatar_url(value: object) -> str:
+    candidates = [part.strip() for part in _text(value).split(",") if part.strip()]
+    if not candidates:
+        return ""
+    raw = next((part for part in candidates if "50x50" in part), candidates[0])
+    parsed = urlparse(raw)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return raw
+    if parsed.scheme:
+        return ""
+    if raw.startswith("//"):
+        return f"https:{raw}"
+    if any(char.isspace() for char in raw):
+        return ""
+    key = raw.lstrip("/")
+    if not key.startswith(("community/", "avatar/", "cube/", "users/")):
+        return ""
+    return f"https://xqimg.imedao.com/{key}"
+
+
+def _avatar_img(item: dict[str, object]) -> str:
+    src = _avatar_url(item.get("author_avatar_url"))
+    name = _author_name(item)
+    if not src:
+        return '<span class="avatar placeholder"></span>'
+    return f'<img class="avatar" src="{escape(src, quote=True)}" alt="{escape(name, quote=True)}">'
+
+
+def _author_badge(item: dict[str, object]) -> str:
+    uid = _cell(item.get("author_platform_uid"))
+    return (
+        '<div class="author-badge">'
+        f"{_avatar_img(item)}"
+        "<div>"
+        f'<div class="author-name">{escape(_author_name(item))}</div>'
+        f'<div class="muted small">uid {uid}</div>'
+        "</div></div>"
+    )
+
+
+def _post_title(item: dict[str, object]) -> str:
+    platform_post_id = _text(item.get("platform_post_id")).strip()
+    if platform_post_id:
+        return f"雪球 {platform_post_id}"
+    return f"本地记录 {item['post_id']}"
+
+
+def _post_identity(item: dict[str, object]) -> str:
+    parts = [
+        f"原帖 {_cell(item.get('platform_post_id'))}",
+        f"发布 {_fmt_ts_text(item.get('posted_at_claimed'))}",
+        f"本地记录 {_cell(item.get('post_id'))}",
+    ]
+    return " · ".join(part for part in parts if not part.endswith(" "))
+
+
+def _fmt_ts_text(value: object) -> str:
     raw = _text(value)
     if not raw:
         return ""
     try:
         moment = datetime.fromisoformat(raw)
     except ValueError:
-        return escape(raw)
+        return raw
     if moment.tzinfo is not None:
         moment = moment.astimezone()
-    return escape(moment.strftime("%Y-%m-%d %H:%M"))
+    return moment.strftime("%Y-%m-%d %H:%M")
+
+
+def _relative_ts_text(value: object) -> str:
+    raw = _text(value)
+    if not raw:
+        return ""
+    try:
+        moment = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw
+    if moment.tzinfo is None:
+        now = datetime.now()
+    else:
+        now = datetime.now(tz=moment.tzinfo)
+    delta = now - moment
+    seconds = int(delta.total_seconds())
+    if 0 <= seconds < 60:
+        return "刚刚"
+    if 60 <= seconds < 3600:
+        return f"{seconds // 60} 分钟前"
+    if 3600 <= seconds < 86400:
+        return f"{seconds // 3600} 小时前"
+    return _fmt_ts_text(value)
+
+
+def _fmt_ts(value: object) -> str:
+    raw = _text(value)
+    if not raw:
+        return ""
+    label = _relative_ts_text(value)
+    absolute = _fmt_ts_text(value)
+    return (
+        f'<time datetime="{escape(raw, quote=True)}" title="{escape(absolute, quote=True)}">'
+        f"{escape(label)}</time>"
+    )
 
 
 def _csrf_input(token: str) -> str:
@@ -217,6 +353,13 @@ def _layout(title: str, body: str) -> str:
     .candidate {{ border: 1px solid #d8dee8; border-radius: 9px; padding: 13px; margin: 10px 0; }}
     .chead {{ display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
       align-items: start; }}
+    .author-badge {{ display: flex; align-items: center; gap: 9px; min-width: 0; }}
+    .avatar {{ width: 34px; height: 34px; border-radius: 50%; object-fit: cover; flex: none;
+      background: #dbe4ee; border: 1px solid #cbd5e1; }}
+    .avatar.placeholder::after {{ content: ""; display: block; width: 100%; height: 100%; }}
+    .author-name {{ font-weight: 700; line-height: 1.25; }}
+    .small {{ font-size: .8rem; }}
+    .link-row {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }}
     .who {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; min-width: 0; }}
     .who .name {{ font-weight: 700; font-size: 1rem; }}
     .who .uid {{ color: #8190a4; font-size: .8rem; }}
@@ -287,8 +430,21 @@ _LABEL_CHIPS = (
 def _timeline_article(item: dict[str, object], *, extra: str = "") -> str:
     status = cast(dict[str, str], item["status"])
     current_text = escape(_text(item.get("current_text")))
+    original_link = _original_post_link(item.get("url"))
+    links = "".join(
+        [
+            original_link,
+            _snowball_user_link(item.get("author_platform_uid")),
+            _local_author_link(item.get("author_platform_uid")),
+        ]
+    )
+    links_html = f'\n  <div class="link-row">{links}</div>' if links else ""
+    title = escape(_post_title(item))
+    identity = escape(_post_identity(item))
     return f"""<article>
-  <h2><a href="/posts/{item["post_id"]}">帖子 {item["post_id"]}</a></h2>
+  {_author_badge(item)}
+  <h2><a href="/posts/{item["post_id"]}">{title}</a></h2>
+  <p class="muted">{identity}</p>{links_html}
   <p>{escape(status["human_label"])}</p>
   <p>{escape(status["deletion_signal_label"])}</p>{extra}
   <p class="muted">首次观察：{_cell(item.get("first_seen_at"))}<br>
@@ -442,10 +598,13 @@ def _scorecards_panel(data: dict[str, object], *, hint: str) -> str:
     for card in cards:
         genres = cast(list[dict[str, object]], card["genres"])[:5]
         genre = " · ".join(f"{escape(_text(g['post_type']))}{g['count']}" for g in genres)
+        uid = card["author_platform_uid"]
+        name = _text(card.get("author_name")).strip() or _text(uid)
         items.append(
-            f'<div class="side-item"><b>{escape(_text(card["author_name"]))}</b>'
-            f'<div class="who-line">uid {escape(_text(card["author_platform_uid"]))} · '
+            f'<div class="side-item"><b>{escape(name)}</b>'
+            f'<div class="who-line">uid {escape(_text(uid))} · '
             f"{card['enriched']} 富化 · {card['hit']} 命中</div>"
+            f'<div class="link-row">{_local_author_link(uid)}{_snowball_user_link(uid)}</div>'
             f"{_scorecard_bars(card, scale)}"
             f'<div class="muted" style="font-size:.8rem;margin-top:6px">体裁 {genre}</div></div>'
         )
@@ -492,8 +651,10 @@ def _queue_card(item: dict[str, object], csrf_token: str, *, pinned: bool = Fals
     # A pinned post can lack a full version (e.g. preview-only); keep it visible
     # with an explicit placeholder rather than an empty body.
     current_text = escape(_text(item.get("current_text"))) or "（暂无完整正文版本）"
-    uid = _cell(item.get("author_platform_uid"))
+    title = _cell(_post_title(item))
     vid = _cell(item.get("current_version_id"))
+    platform_post_id = _cell(item.get("platform_post_id"))
+    posted_at = _fmt_ts(item.get("posted_at_claimed"))
     first_obs = _fmt_ts(item.get("current_version_first_observed_at"))
     last_obs = _fmt_ts(item.get("current_version_last_observed_at"))
     channel = _text(item.get("latest_evidence_channel"))
@@ -501,8 +662,9 @@ def _queue_card(item: dict[str, object], csrf_token: str, *, pinned: bool = Fals
     run_id = _cell(item.get("latest_evidence_run_id"))
     fidelity = _cell(item.get("current_content_fidelity"))
     who = (
-        f'<div class="who"><span class="name">{_cell(item.get("author_name"))}</span>'
-        f'<span class="uid">uid {uid} · post {post_id} · version {vid}</span></div>'
+        f'<div class="who">{_author_badge(item)}<span class="name">{title}</span>'
+        f'<span class="uid">原帖 {platform_post_id} · 发布 {posted_at} · '
+        f"本地记录 {post_id} · 版本 {vid}</span></div>"
     )
     obs_span = f"首次 {first_obs}<br>最后 {last_obs}" if changed else (first_obs or last_obs)
     facts = (
@@ -531,6 +693,8 @@ def _queue_card(item: dict[str, object], csrf_token: str, *, pinned: bool = Fals
   <div class="evidence-grid">{facts}</div>
   <div class="qactions">{action_form}
     <a class="secondary" href="/posts/{post_id}">打开证据卡</a>
+    {_snowball_user_link(item.get("author_platform_uid"))}
+    {_local_author_link(item.get("author_platform_uid"))}
   </div>
   <details><summary>展开原文</summary><pre>{current_text}</pre></details>
 </article>"""
@@ -688,6 +852,36 @@ def _scorecards_html(connection: sqlite3.Connection, prompt_version: str) -> str
     return _layout("KOL 照妖镜 · 账号标签构成", body)
 
 
+def _author_html(profile: dict[str, object]) -> str:
+    author = cast(dict[str, object], profile["author"])
+    posts = cast(list[dict[str, object]], profile["posts"])
+    uid = _cell(author.get("author_platform_uid"))
+    title = _author_name(author)
+    description = escape(_text(author.get("author_description")))
+    counts = (
+        f"归档 {int(cast(int, author.get('post_count') or 0))} · "
+        f"实时 {int(cast(int, author.get('live_post_count') or 0))} · "
+        f"钉住 {int(cast(int, author.get('pinned_count') or 0))}"
+    )
+    posts_html = "".join(_timeline_article(item) for item in posts) or "<p>暂无帖子。</p>"
+    snowball_link = _snowball_user_link(author.get("author_platform_uid"))
+    body = f"""<p><a href="/">返回待处理队列</a> · <a href="/?view=raw">原始时间线</a></p>
+<section>
+  {_author_badge(author)}
+  <h1>{escape(title)}</h1>
+  <p class="muted">
+    uid {uid} · 监控开始 {_fmt_ts(author.get("live_monitoring_started_at"))} · {escape(counts)}
+  </p>
+  <div class="link-row">{snowball_link}</div>
+  <p>{description}</p>
+</section>
+<section>
+  <h2>最近帖子</h2>
+  {posts_html}
+</section>"""
+    return _layout(f"作者 {title}", body)
+
+
 def _version_sections(versions: list[dict[str, object]]) -> str:
     blocks = []
     for version in versions:
@@ -709,6 +903,17 @@ def _post_html(card: dict[str, Any], csrf_token: str) -> str:
     post = cast(dict[str, object], card["post"])
     status = cast(dict[str, str], post["status"])
     post_id = int(str(post["id"]))
+    original_link = _original_post_link(post.get("url"))
+    links = "".join(
+        [
+            original_link,
+            _snowball_user_link(post.get("author_platform_uid")),
+            _local_author_link(post.get("author_platform_uid")),
+        ]
+    )
+    links_html = f'\n  <div class="link-row">{links}</div>' if links else ""
+    title = _post_title(cast(dict[str, object], {**post, "post_id": post_id}))
+    identity = escape(_post_identity(cast(dict[str, object], {**post, "post_id": post_id})))
     version_id = post.get("current_version_id")
     version_input = (
         f'<input type="hidden" name="version_id" value="{escape(str(version_id))}">'
@@ -753,9 +958,11 @@ def _post_html(card: dict[str, Any], csrf_token: str) -> str:
     rewrite_exercises = cast(list[dict[str, object]], card["rewrite_exercises"])
     enrichments = cast(list[dict[str, object]], card["enrichments"])
     body = f"""<p><a href="/">返回待处理队列</a></p>
-<h1>证据卡片：帖子 {post_id}</h1>
+<h1>证据卡片：{escape(title)}</h1>
 <section>
-  <p>{escape(status["human_label"])}</p>
+  {_author_badge(post)}
+  <p class="muted">{identity}</p>
+  <p>{escape(status["human_label"])}</p>{links_html}
   <p>{escape(status["deletion_signal_label"])}</p>
   <p class="muted">首次观察：{_cell(post.get("first_seen_at"))}<br>
   最后在场观察：{_cell(post.get("last_present_at"))}<br>
@@ -783,7 +990,7 @@ def _post_html(card: dict[str, Any], csrf_token: str) -> str:
 <section><h2>关注理由</h2>{_table(attention_log)}</section>
 <section><h2>改写训练</h2>{_table(rewrite_exercises)}{verdict_forms}</section>
 <section><h2>LLM 富化标签</h2>{_table(enrichments)}</section>"""
-    return _layout(f"证据卡片 {post_id}", body)
+    return _layout(f"证据卡片 {title}", body)
 
 
 class ArchiveRequestHandler(BaseHTTPRequestHandler):
@@ -822,6 +1029,15 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._with_connection(
                     lambda connection: self._send_html(
                         HTTPStatus.OK, self._render_home(connection, parsed.query)
+                    )
+                )
+                return
+            author_uid = self._author_uid(path)
+            if author_uid is not None:
+                self._with_connection(
+                    lambda connection: self._send_html(
+                        HTTPStatus.OK,
+                        _author_html(author_profile(connection, author_uid)),
                     )
                 )
                 return
@@ -995,6 +1211,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
 
     def _version_id(self, form: dict[str, list[str]]) -> int:
         return int(self._required_form_value(form, "version_id"))
+
+    @staticmethod
+    def _author_uid(path: str) -> str | None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 2 or parts[0] != "authors" or not parts[1]:
+            return None
+        return unquote(parts[1])
 
     @staticmethod
     def _post_id(path: str, *, suffix: str) -> int | None:

@@ -96,7 +96,7 @@ API Key 和授权头执行启发式脱敏。帖子正文等证据字段保持原
 
 ## 原始时间线与证据卡片
 
-查看按最近在场观察排序的原始时间线：
+查看按原帖发布时间排序的原始时间线：
 
 ```powershell
 .\.venv\Scripts\python.exe -m kol_archive timeline

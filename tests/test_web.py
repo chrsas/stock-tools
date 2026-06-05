@@ -25,7 +25,14 @@ from kol_archive.models import (
 )
 from kol_archive.rewrite import RewriteSuggestion
 from kol_archive.service import Archive
-from kol_archive.web import ArchiveHttpServer, WebSettings, create_server, load_web_settings
+from kol_archive.web import (
+    ArchiveHttpServer,
+    ArchiveRequestHandler,
+    WebSettings,
+    _avatar_url,
+    create_server,
+    load_web_settings,
+)
 
 CSRF_TOKEN = "test-csrf-token"
 BASE_TIME = "2026-06-01T00:00:00+00:00"
@@ -53,7 +60,7 @@ def _make_feed_run() -> FeedRun:
 
 def _make_post() -> NormalizedPost:
     return NormalizedPost(
-        platform_post_id="post-1",
+        platform_post_id="post-1 & qa",
         author_id=1,
         observed_at=BASE_TIME,
         content_fidelity=ContentFidelity.FULL,
@@ -62,7 +69,14 @@ def _make_post() -> NormalizedPost:
         posted_at_claimed=datetime.now(tz=UTC).isoformat(),
         url="https://xueqiu.com/100/post-1",
         raw_meta={"cookie": "meta-secret"},
-        raw_payload={"token": "payload-secret"},
+        raw_payload={
+            "token": "payload-secret",
+            "user": {
+                "screen_name": "测试作者 & QA",
+                "profile_image_url": "community/avatar.jpg!50x50.png",
+                "description": "作者简介",
+            },
+        },
     )
 
 
@@ -171,7 +185,8 @@ def test_queue_is_default_view_and_keeps_label_guide(web_server: ArchiveHttpServ
     assert "标签说明" in html  # label guide must stay (explicit requirement)
     assert "有据非共识" in html  # the fired label pill
     assert "可证伪片段" in html  # evidence snippet surfaced
-    assert "post 1" in html  # the queued post card
+    assert "雪球 post-1" in html  # the queued post card uses the platform post id
+    assert "本地记录 1" in html  # internal id is clearly labeled as local-only
     assert f'name="csrf_token" value="{CSRF_TOKEN}"' in html  # pin form CSRF
     # Charter §0.11: the default home carries no per-author hit-rate / ranking.
     assert "账号标签构成" not in html
@@ -181,12 +196,12 @@ def test_queue_is_default_view_and_keeps_label_guide(web_server: ArchiveHttpServ
 def test_queue_dequeues_after_pin(web_server: ArchiveHttpServer) -> None:
     _enrich_post_one(web_server, non_consensus=True)
     _, _, before = _request(web_server, "GET", "/")
-    assert "post 1" in before
+    assert "雪球 post-1" in before
 
     status, _, _ = _request(web_server, "POST", "/posts/1/pin", {"csrf_token": CSRF_TOKEN})
     assert status == 303
     _, _, after = _request(web_server, "GET", "/")
-    assert "post 1" not in after  # pinned → dispositioned → out of the queue
+    assert "雪球 post-1" not in after  # pinned -> dispositioned -> out of the queue
 
 
 def test_pinned_view_lists_pinned_versions_and_offers_unpin(
@@ -197,7 +212,7 @@ def test_pinned_view_lists_pinned_versions_and_offers_unpin(
     _, _, before = _request(web_server, "GET", "/?view=pinned")
     assert "已钉住 0" in before
     assert "还没有钉住任何版本" in before
-    assert "post 1" not in before
+    assert "雪球 post-1" not in before
 
     status, _, _ = _request(web_server, "POST", "/posts/1/pin", {"csrf_token": CSRF_TOKEN})
     assert status == 303
@@ -211,7 +226,7 @@ def test_pinned_view_lists_pinned_versions_and_offers_unpin(
     # The pinned view surfaces the dispositioned post with an unpin action.
     status, _, pinned = _request(web_server, "GET", "/?view=pinned")
     assert status == 200
-    assert "post 1" in pinned
+    assert "雪球 post-1" in pinned
     assert "取消钉住" in pinned
     assert "钉住当前版本" not in pinned  # already pinned: no re-pin button
     assert f'name="csrf_token" value="{CSRF_TOKEN}"' in pinned  # unpin form CSRF
@@ -262,7 +277,8 @@ def test_pinned_list_includes_preview_only_post_matching_toolbar_count(
 
     _, _, pinned = _request(web_server, "GET", "/?view=pinned")
     assert "已钉住 1" in pinned  # toolbar count
-    assert f"post {preview_id}" in pinned  # and the list agrees, one-for-one
+    assert "雪球 post-preview" in pinned  # and the list agrees, one-for-one
+    assert f"本地记录 {preview_id}" in pinned
     assert "暂无完整正文版本" in pinned  # placeholder instead of an empty body
 
 
@@ -295,12 +311,24 @@ def test_read_routes_render_redacted_timeline_and_evidence_card(
     status, _, timeline = _request(web_server, "GET", "/?view=raw")
     assert status == 200
     assert "KOL 原始时间线" in timeline
+    assert "测试作者" in timeline
+    assert 'src="https://xqimg.imedao.com/community/avatar.jpg!50x50.png"' in timeline
     assert "原始正文 A" in timeline
     assert "feed：在场；来源：未复查；监控：近期窗口" in timeline
+    assert 'href="https://xueqiu.com/100/post-1"' in timeline
+    assert 'href="https://xueqiu.com/u/100"' in timeline
+    assert 'href="/authors/100"' in timeline
+    assert 'target="_blank"' in timeline
 
     status, _, card = _request(web_server, "GET", "/posts/1")
     assert status == 200
-    assert "证据卡片：帖子 1" in card
+    assert "<title>证据卡片 雪球 post-1 &amp; qa</title>" in card
+    assert "&amp;amp; qa</title>" not in card
+    assert "证据卡片：雪球 post-1" in card
+    assert "测试作者" in card
+    assert "本地记录 1" in card
+    assert 'href="https://xueqiu.com/100/post-1"' in card
+    assert "打开雪球原帖" in card
     assert "cookie=[REDACTED]" in card
     assert f'name="csrf_token" value="{CSRF_TOKEN}"' in card
     for secret in ("feed-secret", "meta-secret", "payload-secret", "raw_meta", "raw_payload"):
@@ -308,6 +336,27 @@ def test_read_routes_render_redacted_timeline_and_evidence_card(
 
     status, _, _ = _request(web_server, "GET", "/posts/999")
     assert status == 404
+
+    status, _, author = _request(web_server, "GET", "/authors/100")
+    assert status == 200
+    assert "<title>作者 测试作者 &amp; QA</title>" in author
+    assert "&amp;amp; QA</title>" not in author
+    assert "作者 测试作者" in author
+    assert "作者简介" in author
+    assert "雪球 post-1" in author
+    assert 'href="https://xueqiu.com/u/100"' in author
+
+
+def test_avatar_url_only_mints_known_xqimg_relative_keys() -> None:
+    assert _avatar_url("community/avatar.jpg!50x50.png") == (
+        "https://xqimg.imedao.com/community/avatar.jpg!50x50.png"
+    )
+    assert _avatar_url("javascript:alert(1)") == ""
+    assert _avatar_url("other-cdn/avatar.jpg") == ""
+
+
+def test_author_route_decodes_encoded_uid_segment() -> None:
+    assert ArchiveRequestHandler._author_uid("/authors/user%2Fname%20A") == "user/name A"
 
 
 def test_mutations_only_accept_post_with_valid_csrf(web_server: ArchiveHttpServer) -> None:

@@ -128,6 +128,35 @@ def test_timeline_exposes_observation_times_and_deletion_signal_levels(archive: 
     )
 
 
+def test_timeline_orders_by_claimed_post_time_before_observation_time(
+    archive: Archive,
+) -> None:
+    archive.record_feed_run(
+        make_feed_run("2026-06-03T00:00:00+00:00"),
+        [
+            make_post(
+                "new-live",
+                observed_at="2026-06-03T00:00:00+00:00",
+                posted_at_claimed="2026-06-03T00:00:00+00:00",
+            )
+        ],
+    )
+    archive.record_feed_run(
+        make_feed_run("2026-06-03T01:00:00+00:00"),
+        [
+            make_post(
+                "old-backfill",
+                observed_at="2026-06-03T01:00:00+00:00",
+                posted_at_claimed="2026-03-01T00:00:00+00:00",
+            )
+        ],
+    )
+
+    timeline = list_timeline(archive.connection)
+
+    assert [item["platform_post_id"] for item in timeline] == ["new-live", "old-backfill"]
+
+
 def test_timeline_keeps_feed_presence_visible_when_direct_link_is_unavailable(
     archive: Archive,
 ) -> None:

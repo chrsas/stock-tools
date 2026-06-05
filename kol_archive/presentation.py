@@ -111,6 +111,11 @@ def list_timeline(connection: sqlite3.Connection, *, limit: int = 50) -> list[di
             p.platform,
             p.platform_post_id,
             a.platform_uid AS author_platform_uid,
+            COALESCE(
+                json_extract(v.raw_payload, '$.user.screen_name'), a.notes
+            ) AS author_display_name,
+            json_extract(v.raw_payload, '$.user.profile_image_url') AS author_avatar_url,
+            json_extract(v.raw_payload, '$.user.description') AS author_description,
             p.url,
             p.posted_at_claimed,
             p.first_seen_at,
@@ -136,7 +141,10 @@ def list_timeline(connection: sqlite3.Connection, *, limit: int = 50) -> list[di
         FROM posts p
         JOIN authors a ON a.id = p.author_id
         LEFT JOIN post_versions v ON v.id = p.current_version_id
-        ORDER BY COALESCE(p.last_present_at, p.first_seen_at) DESC, p.id DESC
+        ORDER BY
+            COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at) DESC,
+            COALESCE(p.last_present_at, p.first_seen_at) DESC,
+            p.id DESC
         LIMIT ?
         """,
         (limit,),
@@ -165,6 +173,11 @@ def list_filtered_timeline(
             p.platform,
             p.platform_post_id,
             a.platform_uid AS author_platform_uid,
+            COALESCE(
+                json_extract(v.raw_payload, '$.user.screen_name'), a.notes
+            ) AS author_display_name,
+            json_extract(v.raw_payload, '$.user.profile_image_url') AS author_avatar_url,
+            json_extract(v.raw_payload, '$.user.description') AS author_description,
             p.url,
             p.posted_at_claimed,
             p.first_seen_at,
@@ -202,7 +215,10 @@ def list_filtered_timeline(
         WHERE e.label_first_hand_info = 1
            OR e.label_transferable_framework = 1
            OR e.label_reasoned_non_consensus = 1
-        ORDER BY COALESCE(p.last_present_at, p.first_seen_at) DESC, p.id DESC
+        ORDER BY
+            COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at) DESC,
+            COALESCE(p.last_present_at, p.first_seen_at) DESC,
+            p.id DESC
         LIMIT ?
         """,
         (prompt_version.strip(), limit),
@@ -216,9 +232,16 @@ def list_filtered_timeline(
 # pinned list left-joins so a post pinned without an enrichment still shows).
 _QUEUE_CARD_COLUMNS = """
             p.id AS post_id,
+            p.platform_post_id,
             a.platform_uid AS author_platform_uid,
             a.notes AS author_name,
+            COALESCE(
+                json_extract(v.raw_payload, '$.user.screen_name'), a.notes
+            ) AS author_display_name,
+            json_extract(v.raw_payload, '$.user.profile_image_url') AS author_avatar_url,
+            json_extract(v.raw_payload, '$.user.description') AS author_description,
             p.url,
+            p.posted_at_claimed,
             p.feed_state,
             p.source_state,
             p.watch_mode,
@@ -429,6 +452,112 @@ def author_scorecards(connection: sqlite3.Connection, prompt_version: str) -> di
     return {"scorecards": cards, "label_scale": label_scale}
 
 
+def author_profile(
+    connection: sqlite3.Connection,
+    platform_uid: str,
+    *,
+    limit: int = 30,
+) -> dict[str, object]:
+    if limit < 1:
+        raise ValueError("author post limit must be positive")
+    if not platform_uid.strip():
+        raise ValueError("author uid must not be empty")
+    row = connection.execute(
+        """
+        SELECT
+            a.id AS author_id,
+            a.platform,
+            a.platform_uid AS author_platform_uid,
+            a.notes AS author_name,
+            a.live_monitoring_started_at,
+            COUNT(p.id) AS post_count,
+            SUM(CASE WHEN p.ingest_mode = 'live' THEN 1 ELSE 0 END) AS live_post_count,
+            SUM(CASE WHEN p.watch_mode = ? THEN 1 ELSE 0 END) AS pinned_count,
+            (
+                SELECT COALESCE(json_extract(v.raw_payload, '$.user.screen_name'), a.notes)
+                FROM posts p2 JOIN post_versions v ON v.id = p2.current_version_id
+                WHERE p2.author_id = a.id
+                ORDER BY COALESCE(p2.posted_at_claimed, p2.last_present_at, p2.first_seen_at) DESC,
+                         p2.id DESC
+                LIMIT 1
+            ) AS author_display_name,
+            (
+                SELECT json_extract(v.raw_payload, '$.user.profile_image_url')
+                FROM posts p2 JOIN post_versions v ON v.id = p2.current_version_id
+                WHERE p2.author_id = a.id
+                ORDER BY COALESCE(p2.posted_at_claimed, p2.last_present_at, p2.first_seen_at) DESC,
+                         p2.id DESC
+                LIMIT 1
+            ) AS author_avatar_url,
+            (
+                SELECT json_extract(v.raw_payload, '$.user.description')
+                FROM posts p2 JOIN post_versions v ON v.id = p2.current_version_id
+                WHERE p2.author_id = a.id
+                ORDER BY COALESCE(p2.posted_at_claimed, p2.last_present_at, p2.first_seen_at) DESC,
+                         p2.id DESC
+                LIMIT 1
+            ) AS author_description
+        FROM authors a
+        LEFT JOIN posts p ON p.author_id = a.id
+        WHERE a.platform = 'xueqiu' AND a.platform_uid = ?
+        GROUP BY a.id
+        """,
+        (WatchMode.PINNED.value, platform_uid.strip()),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"author not found: {platform_uid}")
+    posts = connection.execute(
+        """
+        SELECT
+            p.id AS post_id,
+            p.platform,
+            p.platform_post_id,
+            a.platform_uid AS author_platform_uid,
+            COALESCE(
+                json_extract(v.raw_payload, '$.user.screen_name'), a.notes
+            ) AS author_display_name,
+            json_extract(v.raw_payload, '$.user.profile_image_url') AS author_avatar_url,
+            json_extract(v.raw_payload, '$.user.description') AS author_description,
+            p.url,
+            p.posted_at_claimed,
+            p.first_seen_at,
+            p.last_present_at,
+            p.source_checked_at,
+            p.feed_state,
+            p.source_state,
+            p.watch_mode,
+            p.absent_healthy_streak,
+            p.current_version_id,
+            v.content_text AS current_text,
+            v.first_observed_at AS current_version_first_observed_at,
+            (
+                SELECT MAX(s.observed_at)
+                FROM version_sightings s
+                WHERE s.version_id = p.current_version_id
+            ) AS current_version_last_observed_at,
+            (
+                SELECT MAX(o.observed_at)
+                FROM post_observations o
+                WHERE o.post_id = p.id AND o.present = 0
+            ) AS last_feed_absence_detected_at
+        FROM posts p
+        JOIN authors a ON a.id = p.author_id
+        LEFT JOIN post_versions v ON v.id = p.current_version_id
+        WHERE a.platform = 'xueqiu' AND a.platform_uid = ?
+        ORDER BY
+            COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at) DESC,
+            COALESCE(p.last_present_at, p.first_seen_at) DESC,
+            p.id DESC
+        LIMIT ?
+        """,
+        (platform_uid.strip(), limit),
+    ).fetchall()
+    return {
+        "author": _row_dict(row),
+        "posts": [_post_projection(post) for post in posts],
+    }
+
+
 def _version_history(connection: sqlite3.Connection, post_id: int) -> list[dict[str, object]]:
     rows = connection.execute(
         """
@@ -504,6 +633,11 @@ def build_evidence_card(connection: sqlite3.Connection, post_id: int) -> dict[st
             p.url,
             p.ingest_mode,
             a.platform_uid AS author_platform_uid,
+            COALESCE(
+                json_extract(v.raw_payload, '$.user.screen_name'), a.notes
+            ) AS author_display_name,
+            json_extract(v.raw_payload, '$.user.profile_image_url') AS author_avatar_url,
+            json_extract(v.raw_payload, '$.user.description') AS author_description,
             v.content_text AS current_text,
             v.first_observed_at AS current_version_first_observed_at,
             (
