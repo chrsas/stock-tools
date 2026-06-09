@@ -178,6 +178,23 @@ def _enrich_post_one(server: ArchiveHttpServer, **labels: bool) -> None:
         connection.close()
 
 
+def test_layout_offers_persistent_light_dark_and_system_themes(
+    web_server: ArchiveHttpServer,
+) -> None:
+    status, _, html = _request(web_server, "GET", "/")
+    assert status == 200
+    assert '<select id="theme-select" aria-label="主题">' in html
+    assert '<option value="system">跟随系统</option>' in html
+    assert '<option value="light">浅色</option>' in html
+    assert '<option value="dark">暗色</option>' in html
+    assert 'matchMedia("(prefers-color-scheme: dark)")' in html
+    assert 'systemTheme.addEventListener("change"' in html
+    assert "--page: light-dark(#f5f6f8, #0f141b);" in html
+    assert html.count("--page: light-dark(") == 1
+    assert 'localStorage.getItem("kol-theme")' in html
+    assert 'localStorage.setItem("kol-theme", preference)' in html
+
+
 def test_queue_view_keeps_label_guide(web_server: ArchiveHttpServer) -> None:
     _enrich_post_one(web_server, non_consensus=True)
     status, _, html = _request(web_server, "GET", "/?view=queue")

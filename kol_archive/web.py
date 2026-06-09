@@ -308,30 +308,84 @@ def _layout(title: str, body: str) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(title)}</title>
+  <script>
+    (() => {{
+      const systemTheme = matchMedia("(prefers-color-scheme: dark)");
+      const saved = localStorage.getItem("kol-theme");
+      const preference = saved === "light" || saved === "dark" ? saved : "system";
+      const applyTheme = (nextPreference) => {{
+        document.documentElement.dataset.theme =
+          nextPreference === "system"
+            ? systemTheme.matches ? "dark" : "light"
+            : nextPreference;
+        document.documentElement.dataset.themePreference = nextPreference;
+      }};
+      window.kolTheme = {{ applyTheme, preference, systemTheme }};
+      applyTheme(preference);
+      systemTheme.addEventListener("change", () => {{
+        if (window.kolTheme.preference === "system") applyTheme("system");
+      }});
+    }})();
+  </script>
   <style>
-    :root {{ color-scheme: light; font-family: system-ui, sans-serif; }}
-    body {{ margin: 0; background: #f5f6f8; color: #18202b; }}
+    :root {{
+      color-scheme: light dark;
+      font-family: system-ui, sans-serif;
+      --page: light-dark(#f5f6f8, #0f141b);
+      --surface: light-dark(#fff, #171e27);
+      --surface-soft: light-dark(#fbfcfe, #1b2430);
+      --surface-code: light-dark(#f7f8fa, #111821);
+      --text: light-dark(#18202b, #e6edf5);
+      --text-soft: light-dark(#5d6878, #aab7c7);
+      --text-faint: light-dark(#8190a4, #8998ab);
+      --link: light-dark(#075985, #7dd3fc);
+      --border: light-dark(#d8dee8, #344152);
+      --border-soft: light-dark(#e4e8ef, #2c3746);
+      --accent-soft: light-dark(#e0f2fe, #16384a);
+      --active-soft: light-dark(#eaf6fb, #17394a);
+      --neutral-soft: light-dark(#edf1f5, #293442);
+      --snippet: light-dark(#f7f9fb, #1c2733);
+      --snippet-text: light-dark(#26384d, #d8e3ef);
+      --snippet-border: light-dark(#b8c7d8, #53677c);
+      --avatar: light-dark(#dbe4ee, #293747);
+      --track: light-dark(#eef3f7, #293544);
+      --success-bg: light-dark(#e6f6ee, #153b2c);
+      --success: light-dark(#15803d, #6ee7a8);
+      --warn-bg: light-dark(#fff3d6, #493515);
+      --warn: light-dark(#9a5b00, #f6c76b);
+      --control-border: light-dark(#cbd5e1, #435266);
+      --hover-border: light-dark(#7ba9c4, #6f91aa);
+    }}
+    :root[data-theme="light"] {{ color-scheme: light; }}
+    :root[data-theme="dark"] {{
+      color-scheme: dark;
+    }}
+    body {{ margin: 0; background: var(--page); color: var(--text); }}
     main {{ max-width: 1180px; margin: 0 auto; padding: 16px; }}
-    a {{ color: #075985; }}
-    article, section {{ background: #fff; border: 1px solid #d8dee8; border-radius: 10px;
+    a {{ color: var(--link); }}
+    article, section {{ background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px;
       margin: 12px 0; padding: 14px; }}
     h1, h2, h3 {{ margin: 0 0 10px; line-height: 1.25; }}
     h1 {{ font-size: 1.5rem; }} h2 {{ font-size: 1.2rem; }} h3 {{ font-size: 1rem; }}
     p {{ margin: 8px 0; overflow-wrap: anywhere; }}
-    .muted {{ color: #5d6878; word-break: break-all; }}
-    .chip {{ display: inline-block; background: #e0f2fe; color: #075985; border-radius: 999px;
+    .muted {{ color: var(--text-soft); word-break: break-all; }}
+    .chip {{ display: inline-block; background: var(--accent-soft); color: var(--link);
+      border-radius: 999px;
       padding: 2px 10px; margin-right: 6px; font-size: .82rem; }}
     .table-wrap {{ overflow-x: auto; }}
     table {{ border-collapse: collapse; width: 100%; font-size: .88rem; }}
-    th, td {{ border-bottom: 1px solid #e4e8ef; padding: 8px; text-align: left;
+    th, td {{ border-bottom: 1px solid var(--border-soft); padding: 8px; text-align: left;
       vertical-align: top; white-space: pre-wrap; }}
-    th {{ color: #42526a; }}
-    pre {{ overflow-x: auto; background: #f7f8fa; border-radius: 6px; padding: 10px;
+    th {{ color: var(--text-soft); }}
+    pre {{ overflow-x: auto; background: var(--surface-code); border-radius: 6px; padding: 10px;
       white-space: pre-wrap; word-break: break-word; }}
     form {{ display: grid; gap: 8px; margin: 10px 0; }}
     label {{ display: grid; gap: 5px; }}
     input, textarea, select, button {{ box-sizing: border-box; font: inherit; max-width: 100%;
       min-height: 40px; padding: 8px; }}
+    input, textarea, select {{ background: var(--surface); color: var(--text);
+      border: 1px solid var(--control-border); border-radius: 5px; }}
     textarea {{ min-height: 84px; }}
     button {{ cursor: pointer; width: fit-content; }}
     .actions {{ display: flex; flex-wrap: wrap; gap: 10px; }}
@@ -340,84 +394,98 @@ def _layout(title: str, body: str) -> str:
       flex-wrap: wrap; gap: 10px; }}
     .nav {{ display: flex; flex-wrap: wrap; gap: 12px; font-size: .9rem; }}
     .toolbar {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }}
-    .filter {{ border: 1px solid #cbd5e1; background: #fff; color: #334155;
+    .filter {{ border: 1px solid var(--control-border); background: var(--surface);
+      color: var(--text);
       border-radius: 999px; padding: 6px 12px; font-size: .85rem; }}
     .filter.active {{ background: #075985; border-color: #075985; color: #fff; }}
     .filter.active:hover {{ text-decoration: none; }}
     .overview-grid {{ display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 14px;
       align-items: start; }}
     .author-list {{ position: sticky; top: 12px; }}
-    .author-option {{ display: block; border: 1px solid #d8dee8; border-radius: 9px;
-      padding: 11px; margin-bottom: 8px; background: #fff; color: inherit;
+    .author-option {{ display: block; border: 1px solid var(--border); border-radius: 9px;
+      padding: 11px; margin-bottom: 8px; background: var(--surface); color: inherit;
       text-decoration: none; }}
-    .author-option:hover {{ border-color: #7ba9c4; }}
-    .author-option.active {{ border-color: #075985; background: #eaf6fb; }}
+    .author-option:hover {{ border-color: var(--hover-border); }}
+    .author-option.active {{ border-color: var(--link); background: var(--active-soft); }}
     .author-option .author-badge {{ margin-bottom: 7px; }}
-    .toolcount {{ color: #5d6878; font-size: .82rem; }}
+    .toolcount {{ color: var(--text-soft); font-size: .82rem; }}
     .layout {{ display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px;
       align-items: start; }}
-    .panel {{ background: #fff; border: 1px solid #d8dee8; border-radius: 10px;
+    .panel {{ background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
       padding: 14px; margin: 0 0 12px; }}
     .sectit {{ display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
       flex-wrap: wrap; margin-bottom: 8px; }}
-    .candidate {{ border: 1px solid #d8dee8; border-radius: 9px; padding: 13px; margin: 10px 0; }}
+    .candidate {{ border: 1px solid var(--border); border-radius: 9px; padding: 13px;
+      margin: 10px 0; }}
     .chead {{ display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
       align-items: start; }}
     .author-badge {{ display: flex; align-items: center; gap: 9px; min-width: 0; }}
     .avatar {{ width: 34px; height: 34px; border-radius: 50%; object-fit: cover; flex: none;
-      background: #dbe4ee; border: 1px solid #cbd5e1; }}
+      background: var(--avatar); border: 1px solid var(--control-border); }}
     .avatar.placeholder::after {{ content: ""; display: block; width: 100%; height: 100%; }}
     .author-name {{ font-weight: 700; line-height: 1.25; }}
     .small {{ font-size: .8rem; }}
     .link-row {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }}
     .who {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; min-width: 0; }}
     .who .name {{ font-weight: 700; font-size: 1rem; }}
-    .who .uid {{ color: #8190a4; font-size: .8rem; }}
+    .who .uid {{ color: var(--text-faint); font-size: .8rem; }}
     .status {{ display: inline-flex; align-items: center; gap: 6px; border-radius: 999px;
-      background: #e6f6ee; color: #15803d; padding: 4px 10px; font-weight: 700; font-size: .8rem;
+      background: var(--success-bg); color: var(--success); padding: 4px 10px;
+      font-weight: 700; font-size: .8rem;
       white-space: nowrap; }}
-    .status.warn {{ background: #fff3d6; color: #9a5b00; }}
+    .status.warn {{ background: var(--warn-bg); color: var(--warn); }}
     .dot {{ width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }}
     .meta-row {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }}
-    .pill {{ display: inline-flex; align-items: center; border-radius: 999px; background: #e4f4fb;
-      color: #075985; padding: 3px 9px; font-size: .8rem; }}
-    .pill.gray {{ background: #edf1f5; color: #566273; }}
-    .snippet {{ margin: 9px 0; padding: 9px 12px; border-left: 3px solid #b8c7d8;
-      border-radius: 0 6px 6px 0; background: #f7f9fb; color: #26384d; font-size: .9rem; }}
+    .pill {{ display: inline-flex; align-items: center; border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--link); padding: 3px 9px; font-size: .8rem; }}
+    .pill.gray {{ background: var(--neutral-soft); color: var(--text-soft); }}
+    .snippet {{ margin: 9px 0; padding: 9px 12px; border-left: 3px solid var(--snippet-border);
+      border-radius: 0 6px 6px 0; background: var(--snippet); color: var(--snippet-text);
+      font-size: .9rem; }}
     .evidence-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
       margin: 10px 0; }}
-    .fact {{ border: 1px solid #e2e8f0; background: #fbfcfe; border-radius: 7px; padding: 8px;
+    .fact {{ border: 1px solid var(--border-soft); background: var(--surface-soft);
+      border-radius: 7px; padding: 8px;
       min-width: 0; }}
     .fact b {{ display: block; font-size: .8rem; margin-bottom: 4px; }}
-    .fact span {{ display: block; color: #5d6878; font-size: .8rem; line-height: 1.4;
+    .fact span {{ display: block; color: var(--text-soft); font-size: .8rem; line-height: 1.4;
       overflow-wrap: anywhere; }}
     .qactions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; align-items: stretch; }}
     .qactions form {{ display: inline; margin: 0; }}
     .primary {{ background: #075985; border: 1px solid #075985; color: #fff; border-radius: 7px;
       padding: 7px 11px; font-size: .85rem; min-height: 36px; }}
-    .secondary {{ background: #fff; border: 1px solid #cbd5e1; color: #075985; border-radius: 7px;
+    .secondary {{ background: var(--surface); border: 1px solid var(--control-border);
+      color: var(--link); border-radius: 7px;
       padding: 7px 11px; font-size: .85rem; }}
-    .side-item {{ border: 1px solid #e0e7ef; border-radius: 7px; padding: 9px;
+    .side-item {{ border: 1px solid var(--border-soft); border-radius: 7px; padding: 9px;
       margin-bottom: 8px; }}
     .side-item b {{ display: block; font-size: .92rem; }}
-    .side-item .who-line {{ color: #5d6878; font-size: .8rem; margin: 2px 0 6px; }}
+    .side-item .who-line {{ color: var(--text-soft); font-size: .8rem; margin: 2px 0 6px; }}
     .bars {{ display: grid; gap: 5px; }}
     .barrow {{ display: grid; grid-template-columns: 72px minmax(0, 1fr) 28px; gap: 7px;
       align-items: center; font-size: .78rem; }}
-    .bartrack {{ height: 11px; border-radius: 999px; background: #eef3f7; overflow: hidden;
+    .bartrack {{ height: 11px; border-radius: 999px; background: var(--track); overflow: hidden;
       min-width: 0; }}
     .barfill {{ display: block; height: 100%; min-width: 3px; border-radius: 999px; }}
     .f0 {{ background: #0ea5e9; }} .f1 {{ background: #6366f1; }} .f2 {{ background: #d97706; }}
-    .label-card {{ border: 1px solid #e0e7ef; background: #fbfcfe; border-radius: 7px; padding: 9px;
+    .label-card {{ border: 1px solid var(--border-soft); background: var(--surface-soft);
+      border-radius: 7px; padding: 9px;
       margin-bottom: 8px; }}
     .label-card b {{ display: block; font-size: .88rem; margin-bottom: 4px; }}
-    .label-card p {{ margin: 0; color: #5d6878; font-size: .8rem; line-height: 1.45; }}
+    .label-card p {{ margin: 0; color: var(--text-soft); font-size: .8rem; line-height: 1.45; }}
     .audit-row {{ display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px;
       font-size: .82rem; line-height: 1.45; margin-bottom: 6px; }}
-    .audit-row span {{ color: #5d6878; }}
+    .audit-row span {{ color: var(--text-soft); }}
     .viewpoint {{ border-left: 4px solid #0ea5e9; }}
-    .market-row {{ border-top: 1px solid #e4e8ef; padding-top: 8px; margin-top: 8px; }}
+    .market-row {{ border-top: 1px solid var(--border-soft); padding-top: 8px; margin-top: 8px; }}
     .market-row strong {{ margin-right: 8px; }}
+    .theme-control {{ display: flex; width: fit-content; align-items: center; gap: 6px;
+      margin: 10px max(12px, calc((100% - 1180px) / 2 + 16px)) 0 auto;
+      padding: 5px 7px; border: 1px solid var(--border);
+      border-radius: 8px; background: var(--surface); color: var(--text-soft); font-size: .78rem;
+      box-shadow: 0 2px 10px rgb(0 0 0 / 12%); }}
+    .theme-control select {{ min-height: 30px; padding: 3px 6px; font-size: .78rem; }}
     @media (max-width: 860px) {{
       .layout, .overview-grid {{ grid-template-columns: 1fr; }}
       .author-list {{ position: static; }}
@@ -429,10 +497,33 @@ def _layout(title: str, body: str) -> str:
       .evidence-grid {{ grid-template-columns: 1fr; }}
       .chead {{ flex-direction: column; }}
       .barrow {{ grid-template-columns: 64px minmax(0, 1fr) 26px; }}
+      .theme-control {{ margin-right: 10px; }}
     }}
   </style>
 </head>
-<body><main>{body}</main></body>
+<body>
+<label class="theme-control">主题
+  <select id="theme-select" aria-label="主题">
+    <option value="system">跟随系统</option>
+    <option value="light">浅色</option>
+    <option value="dark">暗色</option>
+  </select>
+</label>
+<main>{body}</main>
+<script>
+  (() => {{
+    const select = document.getElementById("theme-select");
+    select.value = document.documentElement.dataset.themePreference;
+    select.addEventListener("change", () => {{
+      const preference = select.value;
+      window.kolTheme.preference = preference;
+      window.kolTheme.applyTheme(preference);
+      if (preference === "system") localStorage.removeItem("kol-theme");
+      else localStorage.setItem("kol-theme", preference);
+    }});
+  }})();
+</script>
+</body>
 </html>"""
 
 
