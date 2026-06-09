@@ -452,11 +452,134 @@ def author_scorecards(connection: sqlite3.Connection, prompt_version: str) -> di
     return {"scorecards": cards, "label_scale": label_scale}
 
 
+def author_recent_viewpoints(
+    connection: sqlite3.Connection,
+    platform_uid: str,
+    prompt_version: str,
+    *,
+    limit: int = 10,
+) -> list[dict[str, object]]:
+    """Return one author's latest enriched viewpoints and any market outcomes."""
+    if limit < 1:
+        raise ValueError("viewpoint limit must be positive")
+    if not platform_uid.strip():
+        raise ValueError("author uid must not be empty")
+    if not prompt_version.strip():
+        raise ValueError("prompt_version must not be empty")
+    rows = connection.execute(
+        """
+        SELECT
+            p.id AS post_id,
+            p.platform_post_id,
+            p.url,
+            p.posted_at_claimed,
+            p.first_seen_at,
+            p.current_version_id AS version_id,
+            v.content_text AS current_text,
+            v.first_observed_at AS viewpoint_first_observed_at,
+            e.rationale AS enrichment_rationale,
+            e.evidence_snippet AS enrichment_evidence_snippet
+        FROM posts p
+        JOIN authors a ON a.id = p.author_id
+        JOIN post_versions v ON v.id = p.current_version_id
+        JOIN enrichments e
+            ON e.version_id = p.current_version_id AND e.prompt_version = ?
+        WHERE a.platform = 'xueqiu' AND a.platform_uid = ? AND e.post_type = '观点'
+        ORDER BY
+            COALESCE(p.posted_at_claimed, v.first_observed_at, p.first_seen_at) DESC,
+            p.id DESC
+        LIMIT ?
+        """,
+        (prompt_version.strip(), platform_uid.strip(), limit),
+    ).fetchall()
+    viewpoints: list[dict[str, object]] = []
+    for row in rows:
+        item = _row_dict(row)
+        outcomes = connection.execute(
+            """
+            SELECT
+                c.id AS claim_id,
+                c.ticker,
+                c.direction,
+                c.horizon_days,
+                c.target_price,
+                c.confidence_phrasing,
+                c.claim_made_at,
+                c.status,
+                o.resolved_at,
+                o.raw_return,
+                o.benchmark_return,
+                o.excess_return,
+                o.notes AS outcome_notes
+            FROM claims c
+            LEFT JOIN claim_outcomes o ON o.claim_id = c.id
+            WHERE c.post_id = ? AND c.version_id = ?
+            ORDER BY c.id
+            """,
+            (int(row["post_id"]), int(row["version_id"])),
+        ).fetchall()
+        item["market_outcomes"] = [_row_dict(outcome) for outcome in outcomes]
+        viewpoints.append(item)
+    return viewpoints
+
+
+def author_viewpoint_overview(
+    connection: sqlite3.Connection,
+    prompt_version: str,
+    *,
+    per_author_limit: int = 10,
+) -> list[dict[str, object]]:
+    """Return every author with their latest viewpoints, in stable author order."""
+    if not prompt_version.strip():
+        raise ValueError("prompt_version must not be empty")
+    if per_author_limit < 1:
+        raise ValueError("viewpoint limit must be positive")
+    rows = connection.execute(
+        """
+        SELECT
+            a.id AS author_id,
+            a.platform_uid AS author_platform_uid,
+            a.notes AS author_name,
+            (
+                SELECT COALESCE(json_extract(v.raw_payload, '$.user.screen_name'), a.notes)
+                FROM posts p JOIN post_versions v ON v.id = p.current_version_id
+                WHERE p.author_id = a.id
+                ORDER BY COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at) DESC,
+                         p.id DESC
+                LIMIT 1
+            ) AS author_display_name,
+            (
+                SELECT json_extract(v.raw_payload, '$.user.profile_image_url')
+                FROM posts p JOIN post_versions v ON v.id = p.current_version_id
+                WHERE p.author_id = a.id
+                ORDER BY COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at) DESC,
+                         p.id DESC
+                LIMIT 1
+            ) AS author_avatar_url
+        FROM authors a
+        WHERE a.platform = 'xueqiu'
+        ORDER BY a.id
+        """
+    ).fetchall()
+    overview = []
+    for row in rows:
+        item = _row_dict(row)
+        item["viewpoints"] = author_recent_viewpoints(
+            connection,
+            str(row["author_platform_uid"]),
+            prompt_version,
+            limit=per_author_limit,
+        )
+        overview.append(item)
+    return overview
+
+
 def author_profile(
     connection: sqlite3.Connection,
     platform_uid: str,
     *,
     limit: int = 30,
+    prompt_version: str = "enrich-v1",
 ) -> dict[str, object]:
     if limit < 1:
         raise ValueError("author post limit must be positive")
@@ -555,6 +678,7 @@ def author_profile(
     return {
         "author": _row_dict(row),
         "posts": [_post_projection(post) for post in posts],
+        "viewpoints": author_recent_viewpoints(connection, platform_uid, prompt_version, limit=10),
     }
 
 

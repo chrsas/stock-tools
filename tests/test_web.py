@@ -177,9 +177,9 @@ def _enrich_post_one(server: ArchiveHttpServer, **labels: bool) -> None:
         connection.close()
 
 
-def test_queue_is_default_view_and_keeps_label_guide(web_server: ArchiveHttpServer) -> None:
+def test_queue_view_keeps_label_guide(web_server: ArchiveHttpServer) -> None:
     _enrich_post_one(web_server, non_consensus=True)
-    status, _, html = _request(web_server, "GET", "/")
+    status, _, html = _request(web_server, "GET", "/?view=queue")
     assert status == 200
     assert "待处理注意力" in html
     assert "标签说明" in html  # label guide must stay (explicit requirement)
@@ -195,12 +195,12 @@ def test_queue_is_default_view_and_keeps_label_guide(web_server: ArchiveHttpServ
 
 def test_queue_dequeues_after_pin(web_server: ArchiveHttpServer) -> None:
     _enrich_post_one(web_server, non_consensus=True)
-    _, _, before = _request(web_server, "GET", "/")
+    _, _, before = _request(web_server, "GET", "/?view=queue")
     assert "雪球 post-1" in before
 
     status, _, _ = _request(web_server, "POST", "/posts/1/pin", {"csrf_token": CSRF_TOKEN})
     assert status == 303
-    _, _, after = _request(web_server, "GET", "/")
+    _, _, after = _request(web_server, "GET", "/?view=queue")
     assert "雪球 post-1" not in after  # pinned -> dispositioned -> out of the queue
 
 
@@ -218,7 +218,7 @@ def test_pinned_view_lists_pinned_versions_and_offers_unpin(
     assert status == 303
 
     # The home toolbar now exposes a clickable 已钉住 filter, and the count rose.
-    _, _, home = _request(web_server, "GET", "/")
+    _, _, home = _request(web_server, "GET", "/?view=queue")
     assert 'href="/?view=pinned"' in home
     assert "已钉住 1" in home
     assert "操作说明" in home  # the persistent action guide stays in the aside
@@ -282,15 +282,60 @@ def test_pinned_list_includes_preview_only_post_matching_toolbar_count(
     assert "暂无完整正文版本" in pinned  # placeholder instead of an empty body
 
 
-def test_authors_view_renders_unranked_composition_without_hit_rate(
+def test_authors_view_renders_recent_viewpoints_without_ranking(
     web_server: ArchiveHttpServer,
 ) -> None:
     _enrich_post_one(web_server, non_consensus=True)
-    status, _, html = _request(web_server, "GET", "/?view=authors")
+    status, _, html = _request(web_server, "GET", "/")
     assert status == 200
-    assert "账号标签构成" in html
-    assert "1 富化 · 1 命中" in html  # raw counts, not a rate
+    assert "博主最近观点" in html
+    assert "最近观点 1 · 已有市场结果 0" in html
+    assert "观点依据「可证伪片段」" in html
+    assert "尚未提取可证伪命题" in html
     assert "密度" not in html  # no hit-rate metric / ranking label
+
+
+def test_author_viewpoint_shows_recorded_market_relationship(
+    web_server: ArchiveHttpServer,
+) -> None:
+    _enrich_post_one(web_server, non_consensus=True)
+    connection = connect_database(web_server.db_path)
+    try:
+        version_id = int(
+            connection.execute("SELECT current_version_id FROM posts WHERE id = 1").fetchone()[0]
+        )
+        claim_id = connection.execute(
+            """
+            INSERT INTO claims(
+                post_id, version_id, author_id, ticker, direction, horizon_days,
+                target_price, confidence_phrasing, claim_made_at, ingest_mode, status, created_at
+            ) VALUES (?, ?, 1, 'SH000300', 'long', 10, NULL, '看多', ?, 'live', 'resolved', ?)
+            """,
+            (1, version_id, BASE_TIME, BASE_TIME),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO claim_outcomes(
+                claim_id, resolved_at, raw_return, benchmark_return, excess_return, notes
+            ) VALUES (?, ?, 0.12, 0.03, 0.09, 'test')
+            """,
+            (claim_id, BASE_TIME),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    status, _, author = _request(web_server, "GET", "/authors/100")
+    assert status == 200
+    assert "最近 10 个观点与市场变化" in author
+    assert "SH000300 · long · 10 天" in author
+    assert "标的变化 +12.00%" in author
+    assert "基准变化 +3.00%" in author
+    assert "超额变化 +9.00%" in author
+
+    status, _, overview = _request(web_server, "GET", "/")
+    assert status == 200
+    assert "最近观点 1 · 已有市场结果 1" in overview
 
 
 def test_web_settings_default_to_loopback_and_reject_wildcard_addresses() -> None:
@@ -343,6 +388,8 @@ def test_read_routes_render_redacted_timeline_and_evidence_card(
     assert "&amp;amp; QA</title>" not in author
     assert "作者 测试作者" in author
     assert "作者简介" in author
+    assert "最近 10 个观点与市场变化" in author
+    assert "最近还没有被富化为“观点”的发言" in author
     assert "雪球 post-1" in author
     assert 'href="https://xueqiu.com/u/100"' in author
 

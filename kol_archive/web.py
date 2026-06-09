@@ -21,7 +21,7 @@ from kol_archive.maintenance import redact_text
 from kol_archive.models import FeedState, SourceState, WatchMode
 from kol_archive.presentation import (
     author_profile,
-    author_scorecards,
+    author_viewpoint_overview,
     build_evidence_card,
     list_attention_queue,
     list_filtered_timeline,
@@ -405,6 +405,9 @@ def _layout(title: str, body: str) -> str:
     .audit-row {{ display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px;
       font-size: .82rem; line-height: 1.45; margin-bottom: 6px; }}
     .audit-row span {{ color: #5d6878; }}
+    .viewpoint {{ border-left: 4px solid #0ea5e9; }}
+    .market-row {{ border-top: 1px solid #e4e8ef; padding-top: 8px; margin-top: 8px; }}
+    .market-row strong {{ margin-right: 8px; }}
     @media (max-width: 860px) {{ .layout {{ grid-template-columns: 1fr; }} }}
     @media (max-width: 640px) {{
       main {{ padding: 10px; }} article, section {{ padding: 11px; }}
@@ -461,8 +464,8 @@ def _timeline_html(connection: sqlite3.Connection, limit: int) -> str:
     articles = [_timeline_article(item) for item in items]
     content = "".join(articles) or "<p>归档中暂无帖子。</p>"
     nav = (
-        '<p><a href="/">待处理队列</a> · <a href="/?view=filtered">标签过滤流</a>'
-        ' · <a href="/?view=authors">按账号</a></p>'
+        '<p><a href="/">博主最近观点</a> · <a href="/?view=queue">待处理队列</a>'
+        ' · <a href="/?view=filtered">标签过滤流</a></p>'
     )
     return _layout("KOL 原始时间线", f"<h1>KOL 原始时间线</h1>{nav}{content}")
 
@@ -487,8 +490,8 @@ def _filtered_timeline_html(connection: sqlite3.Connection, prompt_version: str,
         "<code>python -m kol_archive enrich</code> 富化，再回来查看。</p>"
     )
     nav = (
-        '<p><a href="/">待处理队列</a> · <a href="/?view=raw">原始时间线</a>'
-        ' · <a href="/?view=authors">按账号</a></p>'
+        '<p><a href="/">博主最近观点</a> · <a href="/?view=queue">待处理队列</a>'
+        ' · <a href="/?view=raw">原始时间线</a></p>'
     )
     heading = f'<h1>KOL 标签过滤流</h1><p class="muted">prompt 版本：{escape(prompt_version)}</p>'
     return _layout("KOL 标签过滤流", f"{heading}{nav}{content}")
@@ -568,50 +571,6 @@ def _audit_panel() -> str:
     )
     return (
         '<section class="panel"><div class="sectit"><h2>证据口径</h2></div>' + rows + "</section>"
-    )
-
-
-def _scorecard_bars(card: dict[str, object], scale: int) -> str:
-    counts = (
-        ("f0", "第一手", int(cast(int, card["first_hand"]))),
-        ("f1", "框架", int(cast(int, card["framework"]))),
-        ("f2", "非共识", int(cast(int, card["non_consensus"]))),
-    )
-    rows = []
-    for klass, label, count in counts:
-        width = (100 * count / scale) if scale else 0
-        rows.append(
-            f'<div class="barrow"><span>{label}</span><span class="bartrack">'
-            f'<span class="barfill {klass}" style="width:{width:.0f}%"></span></span>'
-            f"<span>{count}</span></div>"
-        )
-    return '<div class="bars">' + "".join(rows) + "</div>"
-
-
-def _scorecards_panel(data: dict[str, object], *, hint: str) -> str:
-    # Charter §0.11: no cross-author ranking, no prominent hit-rate metric. This
-    # shows raw label counts + genre composition only, never a density % and
-    # never sorted by a score (presentation orders neutrally by author id).
-    cards = cast(list[dict[str, object]], data["scorecards"])
-    scale = int(cast(int, data["label_scale"]))
-    items = []
-    for card in cards:
-        genres = cast(list[dict[str, object]], card["genres"])[:5]
-        genre = " · ".join(f"{escape(_text(g['post_type']))}{g['count']}" for g in genres)
-        uid = card["author_platform_uid"]
-        name = _text(card.get("author_name")).strip() or _text(uid)
-        items.append(
-            f'<div class="side-item"><b>{escape(name)}</b>'
-            f'<div class="who-line">uid {escape(_text(uid))} · '
-            f"{card['enriched']} 富化 · {card['hit']} 命中</div>"
-            f'<div class="link-row">{_local_author_link(uid)}{_snowball_user_link(uid)}</div>'
-            f"{_scorecard_bars(card, scale)}"
-            f'<div class="muted" style="font-size:.8rem;margin-top:6px">体裁 {genre}</div></div>'
-        )
-    body = "".join(items) or "<p>暂无富化样本。</p>"
-    return (
-        '<section class="panel"><div class="sectit"><h2>账号标签构成</h2>'
-        f'<span class="muted">{escape(hint)}</span></div>{body}</section>'
     )
 
 
@@ -736,9 +695,10 @@ def _queue_counts(connection: sqlite3.Connection, prompt_version: str) -> dict[s
 
 
 _HOME_NAV = (
-    '<nav class="nav"><a href="/?view=raw">原始时间线</a>'
+    '<nav class="nav"><a href="/">博主最近观点</a>'
+    '<a href="/?view=raw">原始时间线</a>'
     '<a href="/?view=filtered">全部过滤流</a>'
-    '<a href="/?view=authors">按账号</a></nav>'
+    '<a href="/?view=queue">待处理队列</a></nav>'
 )
 
 
@@ -758,7 +718,7 @@ def _queue_toolbar(counts: dict[str, int], *, active: str) -> str:
         )
 
     return (
-        chip("pending", "/", f"待处理 {counts['pending']}")
+        chip("pending", "/?view=queue", f"待处理 {counts['pending']}")
         + chip("tier3", "/?tier=3", f"只看三标签命中 {counts['three']}")
         + chip("pinned", "/?view=pinned", f"已钉住 {counts['pinned']}")
         + f'<span class="toolcount" title="{escape(_TOOLBAR_HINTS["absent"])}">'
@@ -767,8 +727,6 @@ def _queue_toolbar(counts: dict[str, int], *, active: str) -> str:
 
 
 def _home_aside() -> str:
-    # The per-author composition lens stays one click away (?view=authors); the
-    # default home carries no per-author hit-rate metric (charter §0.11).
     return _label_guide_panel() + _action_guide_panel() + _audit_panel()
 
 
@@ -831,30 +789,103 @@ def _pinned_html(
     return _layout("KOL 照妖镜 · 已钉住", body)
 
 
-def _scorecards_html(connection: sqlite3.Connection, prompt_version: str) -> str:
-    scorecards = author_scorecards(connection, prompt_version)
+def _percent(value: object) -> str:
+    if value is None:
+        return "无"
+    return f"{float(cast(float, value)) * 100:+.2f}%"
+
+
+def _market_outcomes_html(viewpoint: dict[str, object]) -> str:
+    outcomes = cast(list[dict[str, object]], viewpoint["market_outcomes"])
+    if not outcomes:
+        return '<p class="muted">尚未提取可证伪命题，暂时无法关联市场变化。</p>'
+    rows = []
+    for outcome in outcomes:
+        ticker = escape(_text(outcome.get("ticker")))
+        direction = escape(_text(outcome.get("direction")))
+        horizon = outcome.get("horizon_days")
+        horizon_text = "未设期限" if horizon is None else f"{horizon} 天"
+        if outcome.get("resolved_at") is None:
+            result = "等待结果"
+        else:
+            result = (
+                f"标的变化 {_percent(outcome.get('raw_return'))} · "
+                f"基准变化 {_percent(outcome.get('benchmark_return'))} · "
+                f"超额变化 {_percent(outcome.get('excess_return'))}"
+            )
+        rows.append(
+            f'<div class="market-row"><strong>{ticker} · {direction} · {horizon_text}</strong>'
+            f'<span class="muted">{escape(result)}</span></div>'
+        )
+    return "".join(rows)
+
+
+def _viewpoint_card(viewpoint: dict[str, object], *, compact: bool = False) -> str:
+    post_id = viewpoint["post_id"]
+    text = escape(_text(viewpoint.get("current_text")))
+    snippet = escape(_text(viewpoint.get("enrichment_evidence_snippet"))) or "（无依据片段）"
+    original_link = _original_post_link(viewpoint.get("url"))
+    details = (
+        f"<details><summary>展开原文</summary><pre>{text}</pre></details>"
+        if compact
+        else f"<pre>{text}</pre>"
+    )
+    return f"""<article class="viewpoint">
+  <div class="sectit"><h3><a href="/posts/{post_id}">{escape(_post_title(viewpoint))}</a></h3>
+  <span class="muted">发布 {_fmt_ts(viewpoint.get("posted_at_claimed"))}</span></div>
+  <p class="snippet">观点依据「{snippet}」</p>
+  {_market_outcomes_html(viewpoint)}
+  <div class="link-row">{original_link}
+    <a class="secondary" href="/posts/{post_id}">打开证据卡</a>
+  </div>
+  {details}
+</article>"""
+
+
+def _viewpoint_overview_html(connection: sqlite3.Connection, prompt_version: str) -> str:
+    authors = author_viewpoint_overview(connection, prompt_version)
     nav = (
-        '<nav class="nav"><a href="/">待处理队列</a>'
+        '<nav class="nav"><a href="/?view=queue">待处理队列</a>'
         '<a href="/?view=raw">原始时间线</a>'
         '<a href="/?view=filtered">全部过滤流</a></nav>'
     )
     header = (
-        '<div class="topbar"><div><h1>KOL 照妖镜 · 账号标签构成</h1>'
-        '<p class="muted">每账号产出的标签计数与体裁构成（诊断汇总，非跨人排行榜，'
-        "不计算命中率、不按分数排序）。条长按全局最大计数归一，仅作构成对照，不是评分。</p></div>"
+        '<div class="topbar"><div><h1>KOL 照妖镜 · 博主最近观点</h1>'
+        '<p class="muted">逐个查看每位博主最近 10 个明确观点，以及已提取命题与后续市场变化。'
+        "页面按账号 id 稳定排列，不做跨人排名。</p></div>"
         f"{nav}</div>"
     )
-    panel = _scorecards_panel(scorecards, hint="按账号 id 排列，条长=标签计数")
-    body = (
-        f'{header}<div class="layout"><div>{panel}</div>'
-        f"<aside>{_label_guide_panel()}{_audit_panel()}</aside></div>"
-    )
-    return _layout("KOL 照妖镜 · 账号标签构成", body)
+    sections = []
+    for author in authors:
+        viewpoints = cast(list[dict[str, object]], author["viewpoints"])
+        evaluated = sum(
+            1
+            for viewpoint in viewpoints
+            if any(
+                outcome.get("resolved_at") is not None
+                for outcome in cast(list[dict[str, object]], viewpoint["market_outcomes"])
+            )
+        )
+        uid = author["author_platform_uid"]
+        cards = "".join(_viewpoint_card(viewpoint, compact=True) for viewpoint in viewpoints)
+        if not cards:
+            cards = "<p>最近还没有被富化为“观点”的发言。</p>"
+        sections.append(
+            f"""<section>
+  {_author_badge(author)}
+  <p class="muted">最近观点 {len(viewpoints)} · 已有市场结果 {evaluated}</p>
+  <div class="link-row">{_local_author_link(uid)}{_snowball_user_link(uid)}</div>
+  {cards}
+</section>"""
+        )
+    content = "".join(sections) or "<p>暂无已监控博主。</p>"
+    return _layout("KOL 照妖镜 · 博主最近观点", f"{header}{content}")
 
 
 def _author_html(profile: dict[str, object]) -> str:
     author = cast(dict[str, object], profile["author"])
     posts = cast(list[dict[str, object]], profile["posts"])
+    viewpoints = cast(list[dict[str, object]], profile["viewpoints"])
     uid = _cell(author.get("author_platform_uid"))
     title = _author_name(author)
     description = escape(_text(author.get("author_description")))
@@ -864,8 +895,12 @@ def _author_html(profile: dict[str, object]) -> str:
         f"钉住 {int(cast(int, author.get('pinned_count') or 0))}"
     )
     posts_html = "".join(_timeline_article(item) for item in posts) or "<p>暂无帖子。</p>"
+    viewpoints_html = "".join(_viewpoint_card(item) for item in viewpoints) or (
+        "<p>最近还没有被富化为“观点”的发言。</p>"
+    )
     snowball_link = _snowball_user_link(author.get("author_platform_uid"))
-    body = f"""<p><a href="/">返回待处理队列</a> · <a href="/?view=raw">原始时间线</a></p>
+    body = f"""<p><a href="/">返回博主最近观点</a> · <a href="/?view=queue">待处理队列</a>
+· <a href="/?view=raw">原始时间线</a></p>
 <section>
   {_author_badge(author)}
   <h1>{escape(title)}</h1>
@@ -874,6 +909,11 @@ def _author_html(profile: dict[str, object]) -> str:
   </p>
   <div class="link-row">{snowball_link}</div>
   <p>{description}</p>
+</section>
+<section>
+  <h2>最近 10 个观点与市场变化</h2>
+  <p class="muted">只列当前版本被富化为“观点”的发言。市场变化来自已提取的可证伪命题与结果。</p>
+  {viewpoints_html}
 </section>
 <section>
   <h2>最近帖子</h2>
@@ -957,7 +997,7 @@ def _post_html(card: dict[str, Any], csrf_token: str) -> str:
     attention_log = cast(list[dict[str, object]], card["attention_log"])
     rewrite_exercises = cast(list[dict[str, object]], card["rewrite_exercises"])
     enrichments = cast(list[dict[str, object]], card["enrichments"])
-    body = f"""<p><a href="/">返回待处理队列</a></p>
+    body = f"""<p><a href="/">返回博主最近观点</a> · <a href="/?view=queue">待处理队列</a></p>
 <h1>证据卡片：{escape(title)}</h1>
 <section>
   {_author_badge(post)}
@@ -1000,8 +1040,6 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         LOGGER.info("web request " + format_string, *args)
 
     def _render_home(self, connection: sqlite3.Connection, query: str) -> str:
-        # The pending-attention queue is the default view; the raw timeline,
-        # full filter stream, and per-author lens all stay one click away.
         view = self._query_value(query, "view")
         prompt_version = self.server.enrich_prompt_version
         limit = self.server.timeline_limit
@@ -1009,17 +1047,17 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             return _timeline_html(connection, limit)
         if view == "filtered":
             return _filtered_timeline_html(connection, prompt_version, limit)
-        if view == "authors":
-            return _scorecards_html(connection, prompt_version)
         if view == "pinned":
             return _pinned_html(connection, prompt_version, limit, self.server.csrf_token)
-        return _queue_html(
-            connection,
-            prompt_version,
-            limit,
-            self.server.csrf_token,
-            tier3_only=self._query_value(query, "tier") == "3",
-        )
+        if view == "queue" or self._query_value(query, "tier") == "3":
+            return _queue_html(
+                connection,
+                prompt_version,
+                limit,
+                self.server.csrf_token,
+                tier3_only=self._query_value(query, "tier") == "3",
+            )
+        return _viewpoint_overview_html(connection, prompt_version)
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -1037,7 +1075,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._with_connection(
                     lambda connection: self._send_html(
                         HTTPStatus.OK,
-                        _author_html(author_profile(connection, author_uid)),
+                        _author_html(
+                            author_profile(
+                                connection,
+                                author_uid,
+                                prompt_version=self.server.enrich_prompt_version,
+                            )
+                        ),
                     )
                 )
                 return

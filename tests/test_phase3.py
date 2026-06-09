@@ -29,6 +29,7 @@ from kol_archive.models import (
     RunStatus,
 )
 from kol_archive.presentation import (
+    author_recent_viewpoints,
     author_scorecards,
     build_evidence_card,
     list_attention_queue,
@@ -535,6 +536,23 @@ def test_author_scorecards_are_unranked_counts_without_hit_rate(archive: Archive
     assert (cards[1]["enriched"], cards[1]["hit"]) == (2, 1)
     assert (cards[1]["first_hand"], cards[1]["framework"]) == (1, 1)
     assert result["label_scale"] == 1
+
+
+def test_author_recent_viewpoints_only_returns_latest_ten_viewpoints(archive: Archive) -> None:
+    posts = [make_post(f"view-{index}", text=f"观点 {index}") for index in range(12)]
+    posts.append(make_post("research", text="研究"))
+    archive.record_feed_run(make_feed_run(), posts)
+    for index in range(12):
+        _enrich(archive, f"view-{index}", make_result())
+    _enrich(archive, "research", make_result(post_type="研究"))
+
+    viewpoints = author_recent_viewpoints(archive.connection, "100", "enrich-v1")
+
+    assert len(viewpoints) == 10
+    assert [item["platform_post_id"] for item in viewpoints] == [
+        f"view-{index}" for index in range(11, 1, -1)
+    ]
+    assert all(item["platform_post_id"] != "research" for item in viewpoints)
 
 
 # ── CLI: batch enrich ────────────────────────────────────────────────────
