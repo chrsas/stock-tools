@@ -289,10 +289,60 @@ def test_authors_view_renders_recent_viewpoints_without_ranking(
     status, _, html = _request(web_server, "GET", "/")
     assert status == 200
     assert "博主最近观点" in html
-    assert "最近观点 1 · 已有市场结果 0" in html
+    assert "观点发言 1 · 已评估观点 0" in html
+    assert "最近 1 个观点簇" in html
     assert "观点依据「可证伪片段」" in html
     assert "尚未提取可证伪命题" in html
+    assert 'aria-label="博主列表"' in html
+    assert "选择博主" in html
+    assert 'href="/?author=100"' in html
+    assert 'class="author-option active"' in html
     assert "密度" not in html  # no hit-rate metric / ranking label
+
+
+def test_author_selector_only_renders_selected_author_viewpoints(
+    web_server: ArchiveHttpServer,
+) -> None:
+    _enrich_post_one(web_server, non_consensus=True)
+    connection = connect_database(web_server.db_path)
+    try:
+        archive = Archive(connection)
+        archive.add_author("xueqiu", "200", BASE_TIME, notes="第二位博主")
+        second_post = replace(
+            _make_post(),
+            platform_post_id="post-2",
+            author_id=2,
+            content_text="第二位博主的观点",
+            content_hash="hash-b",
+            raw_payload={"user": {"screen_name": "第二位博主"}},
+        )
+        archive.record_feed_run(replace(_make_feed_run(), author_id=2), [second_post])
+        target = next(item for item in archive.enrichment_targets("enrich-v1") if item.post_id == 2)
+        archive.add_enrichment(
+            target,
+            EnrichmentResult(
+                post_type="观点",
+                label_first_hand_info=False,
+                label_transferable_framework=True,
+                label_reasoned_non_consensus=False,
+                rationale="理由",
+                evidence_snippet="第二位博主的观点",
+            ),
+            "test-model",
+            "enrich-v1",
+            BASE_TIME,
+        )
+    finally:
+        connection.close()
+
+    _, _, first = _request(web_server, "GET", "/")
+    assert "第二位博主" in first  # visible in the author list
+    assert "第二位博主的观点" not in first  # first author remains selected
+
+    _, _, second = _request(web_server, "GET", "/?author=200")
+    assert 'href="/?author=200"' in second
+    assert "第二位博主的观点" in second
+    assert "原始正文 A" not in second
 
 
 def test_author_viewpoint_shows_recorded_market_relationship(
@@ -321,13 +371,30 @@ def test_author_viewpoint_shows_recorded_market_relationship(
             """,
             (claim_id, BASE_TIME),
         )
+        second_claim_id = connection.execute(
+            """
+            INSERT INTO claims(
+                post_id, version_id, author_id, ticker, direction, horizon_days,
+                target_price, confidence_phrasing, claim_made_at, ingest_mode, status, created_at
+            ) VALUES (?, ?, 1, 'SH000905', 'long', 10, NULL, '看多', ?, 'live', 'resolved', ?)
+            """,
+            (1, version_id, BASE_TIME, BASE_TIME),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO claim_outcomes(
+                claim_id, resolved_at, raw_return, benchmark_return, excess_return, notes
+            ) VALUES (?, ?, 0.10, 0.03, 0.07, 'test-2')
+            """,
+            (second_claim_id, BASE_TIME),
+        )
         connection.commit()
     finally:
         connection.close()
 
     status, _, author = _request(web_server, "GET", "/authors/100")
     assert status == 200
-    assert "最近 10 个观点与市场变化" in author
+    assert "最近 10 个观点簇与市场变化" in author
     assert "SH000300 · long · 10 天" in author
     assert "标的变化 +12.00%" in author
     assert "基准变化 +3.00%" in author
@@ -335,7 +402,7 @@ def test_author_viewpoint_shows_recorded_market_relationship(
 
     status, _, overview = _request(web_server, "GET", "/")
     assert status == 200
-    assert "最近观点 1 · 已有市场结果 1" in overview
+    assert "观点发言 1 · 已评估观点 1" in overview
 
 
 def test_web_settings_default_to_loopback_and_reject_wildcard_addresses() -> None:
@@ -388,7 +455,7 @@ def test_read_routes_render_redacted_timeline_and_evidence_card(
     assert "&amp;amp; QA</title>" not in author
     assert "作者 测试作者" in author
     assert "作者简介" in author
-    assert "最近 10 个观点与市场变化" in author
+    assert "最近 10 个观点簇与市场变化" in author
     assert "最近还没有被富化为“观点”的发言" in author
     assert "雪球 post-1" in author
     assert 'href="https://xueqiu.com/u/100"' in author

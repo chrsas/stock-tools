@@ -29,8 +29,10 @@ from kol_archive.models import (
     RunStatus,
 )
 from kol_archive.presentation import (
+    author_recent_viewpoint_clusters,
     author_recent_viewpoints,
     author_scorecards,
+    author_viewpoint_overview,
     build_evidence_card,
     list_attention_queue,
     list_filtered_timeline,
@@ -553,6 +555,79 @@ def test_author_recent_viewpoints_only_returns_latest_ten_viewpoints(archive: Ar
         f"view-{index}" for index in range(11, 1, -1)
     ]
     assert all(item["platform_post_id"] != "research" for item in viewpoints)
+
+
+def test_author_recent_viewpoint_clusters_groups_shared_nested_ticker(archive: Archive) -> None:
+    original = dataclasses.replace(
+        make_post("original", text="$中控技术(SH688777)$ 首次观点"),
+        raw_payload={"stockCorrelation": ["SH688777"]},
+    )
+    reply = dataclasses.replace(
+        make_post("reply", text="回复：继续强化"),
+        raw_payload={"retweeted_status": {"stockCorrelation": ["SH688777"]}},
+    )
+    archive.record_feed_run(make_feed_run(), [original, reply])
+    _enrich(archive, "original", make_result())
+    _enrich(archive, "reply", make_result())
+
+    clusters = author_recent_viewpoint_clusters(archive.connection, "100", "enrich-v1")
+
+    assert len(clusters) == 1
+    assert clusters[0]["ticker"] == "SH688777"
+    assert clusters[0]["title"] == "中控技术（SH688777）"
+    assert clusters[0]["statement_count"] == 2
+    assert [
+        item["platform_post_id"]
+        for item in cast(list[dict[str, object]], clusters[0]["viewpoints"])
+    ] == ["reply", "original"]
+
+
+def test_author_recent_viewpoint_clusters_use_rolling_window_and_observation_fallback(
+    archive: Archive,
+) -> None:
+    posts = []
+    for index, observed_at in enumerate(
+        (
+            "2026-06-03T00:00:00+00:00",
+            "2026-06-08T00:00:00+00:00",
+            "2026-06-13T00:00:00+00:00",
+        )
+    ):
+        posts.append(
+            dataclasses.replace(
+                make_post(f"chain-{index}", observed_at=observed_at, text=f"观点 {index}"),
+                posted_at_claimed=None,
+                raw_payload={"stockCorrelation": ["SH688777"]},
+            )
+        )
+    archive.record_feed_run(make_feed_run("2026-06-13T00:00:00+00:00"), posts)
+    for index in range(3):
+        _enrich(archive, f"chain-{index}", make_result())
+
+    clusters = author_recent_viewpoint_clusters(archive.connection, "100", "enrich-v1")
+
+    assert len(clusters) == 1
+    assert clusters[0]["statement_count"] == 3
+    assert clusters[0]["latest_at"] == "2026-06-13T00:00:00+00:00"
+    assert clusters[0]["first_at"] == "2026-06-03T00:00:00+00:00"
+
+
+def test_author_viewpoint_overview_is_one_lightweight_summary_query(archive: Archive) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post("viewpoint", text="观点")])
+    _enrich(archive, "viewpoint", make_result())
+    selects: list[str] = []
+    archive.connection.set_trace_callback(
+        lambda statement: (
+            selects.append(statement) if statement.lstrip().upper().startswith("SELECT") else None
+        )
+    )
+
+    overview = author_viewpoint_overview(archive.connection, "enrich-v1")
+
+    archive.connection.set_trace_callback(None)
+    assert len(selects) == 1
+    assert overview[0]["viewpoint_count"] == 1
+    assert "viewpoint_clusters" not in overview[0]
 
 
 # ── CLI: batch enrich ────────────────────────────────────────────────────

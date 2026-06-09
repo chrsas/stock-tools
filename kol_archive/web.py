@@ -21,6 +21,7 @@ from kol_archive.maintenance import redact_text
 from kol_archive.models import FeedState, SourceState, WatchMode
 from kol_archive.presentation import (
     author_profile,
+    author_recent_viewpoint_clusters,
     author_viewpoint_overview,
     build_evidence_card,
     list_attention_queue,
@@ -343,6 +344,15 @@ def _layout(title: str, body: str) -> str:
       border-radius: 999px; padding: 6px 12px; font-size: .85rem; }}
     .filter.active {{ background: #075985; border-color: #075985; color: #fff; }}
     .filter.active:hover {{ text-decoration: none; }}
+    .overview-grid {{ display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 14px;
+      align-items: start; }}
+    .author-list {{ position: sticky; top: 12px; }}
+    .author-option {{ display: block; border: 1px solid #d8dee8; border-radius: 9px;
+      padding: 11px; margin-bottom: 8px; background: #fff; color: inherit;
+      text-decoration: none; }}
+    .author-option:hover {{ border-color: #7ba9c4; }}
+    .author-option.active {{ border-color: #075985; background: #eaf6fb; }}
+    .author-option .author-badge {{ margin-bottom: 7px; }}
     .toolcount {{ color: #5d6878; font-size: .82rem; }}
     .layout {{ display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px;
       align-items: start; }}
@@ -408,7 +418,10 @@ def _layout(title: str, body: str) -> str:
     .viewpoint {{ border-left: 4px solid #0ea5e9; }}
     .market-row {{ border-top: 1px solid #e4e8ef; padding-top: 8px; margin-top: 8px; }}
     .market-row strong {{ margin-right: 8px; }}
-    @media (max-width: 860px) {{ .layout {{ grid-template-columns: 1fr; }} }}
+    @media (max-width: 860px) {{
+      .layout, .overview-grid {{ grid-template-columns: 1fr; }}
+      .author-list {{ position: static; }}
+    }}
     @media (max-width: 640px) {{
       main {{ padding: 10px; }} article, section {{ padding: 11px; }}
       th, td {{ min-width: 128px; }} button {{ width: 100%; }}
@@ -820,29 +833,72 @@ def _market_outcomes_html(viewpoint: dict[str, object]) -> str:
     return "".join(rows)
 
 
-def _viewpoint_card(viewpoint: dict[str, object], *, compact: bool = False) -> str:
+def _viewpoint_card(
+    viewpoint: dict[str, object],
+    *,
+    compact: bool = False,
+    role: str | None = None,
+    show_actions: bool = True,
+) -> str:
     post_id = viewpoint["post_id"]
     text = escape(_text(viewpoint.get("current_text")))
     snippet = escape(_text(viewpoint.get("enrichment_evidence_snippet"))) or "（无依据片段）"
     original_link = _original_post_link(viewpoint.get("url"))
+    heading = f"{escape(role)} · " if role else ""
+    actions = (
+        f'<div class="link-row">{original_link}'
+        f'<a class="secondary" href="/posts/{post_id}">打开证据卡</a></div>'
+        if show_actions
+        else ""
+    )
     details = (
         f"<details><summary>展开原文</summary><pre>{text}</pre></details>"
         if compact
         else f"<pre>{text}</pre>"
     )
     return f"""<article class="viewpoint">
-  <div class="sectit"><h3><a href="/posts/{post_id}">{escape(_post_title(viewpoint))}</a></h3>
-  <span class="muted">发布 {_fmt_ts(viewpoint.get("posted_at_claimed"))}</span></div>
+  <div class="sectit"><h3>{heading}<a href="/posts/{post_id}">{escape(_post_title(viewpoint))}</a>
+  </h3><span class="muted">发布 {_fmt_ts(viewpoint.get("viewpoint_at"))}</span></div>
   <p class="snippet">观点依据「{snippet}」</p>
   {_market_outcomes_html(viewpoint)}
-  <div class="link-row">{original_link}
-    <a class="secondary" href="/posts/{post_id}">打开证据卡</a>
-  </div>
+  {actions}
   {details}
 </article>"""
 
 
-def _viewpoint_overview_html(connection: sqlite3.Connection, prompt_version: str) -> str:
+def _viewpoint_cluster_card(cluster: dict[str, object]) -> str:
+    viewpoints = cast(list[dict[str, object]], cluster["viewpoints"])
+    statements = []
+    for index, viewpoint in enumerate(viewpoints):
+        text = _text(viewpoint.get("current_text")).lstrip()
+        if text.startswith("回复"):
+            role = "相关回复"
+        elif index == len(viewpoints) - 1:
+            role = "首次记录"
+        else:
+            role = "强化或更新"
+        statements.append(_viewpoint_card(viewpoint, compact=True, role=role, show_actions=False))
+    ticker = cluster.get("ticker")
+    grouping = (
+        f"依据原帖或转发原帖中的明确证券代码 {_cell(ticker)}，按 7 天连续强化周期聚合。"
+        if ticker
+        else "未发现明确证券代码，作为独立观点展示。"
+    )
+    latest_snippet = escape(_text(viewpoints[0].get("enrichment_evidence_snippet")))
+    return f"""<section class="panel">
+  <div class="sectit"><h2>{escape(_text(cluster["title"]))}</h2>
+  <span class="chip">{cluster["statement_count"]} 次相关发言</span></div>
+  <p class="muted">{escape(grouping)}<br>
+  首次记录 {_fmt_ts(cluster.get("first_at"))} · 最近强化 {_fmt_ts(cluster.get("latest_at"))}</p>
+  <p class="snippet">最新依据「{latest_snippet}」</p>
+  <details><summary>展开 {cluster["statement_count"]} 条相关发言</summary>
+  {"".join(statements)}</details>
+</section>"""
+
+
+def _viewpoint_overview_html(
+    connection: sqlite3.Connection, prompt_version: str, selected_uid: str | None
+) -> str:
     authors = author_viewpoint_overview(connection, prompt_version)
     nav = (
         '<nav class="nav"><a href="/?view=queue">待处理队列</a>'
@@ -851,41 +907,58 @@ def _viewpoint_overview_html(connection: sqlite3.Connection, prompt_version: str
     )
     header = (
         '<div class="topbar"><div><h1>KOL 照妖镜 · 博主最近观点</h1>'
-        '<p class="muted">逐个查看每位博主最近 10 个明确观点，以及已提取命题与后续市场变化。'
-        "页面按账号 id 稳定排列，不做跨人排名。</p></div>"
+        '<p class="muted">先选择博主，再查看最近 10 个明确观点及后续市场变化。</p></div>'
         f"{nav}</div>"
     )
-    sections = []
+    if not authors:
+        return _layout("KOL 照妖镜 · 博主最近观点", f"{header}<p>暂无已监控博主。</p>")
+    selected = next(
+        (
+            author
+            for author in authors
+            if _text(author.get("author_platform_uid")) == _text(selected_uid)
+        ),
+        authors[0],
+    )
+    author_options = []
     for author in authors:
-        viewpoints = cast(list[dict[str, object]], author["viewpoints"])
-        evaluated = sum(
-            1
-            for viewpoint in viewpoints
-            if any(
-                outcome.get("resolved_at") is not None
-                for outcome in cast(list[dict[str, object]], viewpoint["market_outcomes"])
-            )
-        )
         uid = author["author_platform_uid"]
-        cards = "".join(_viewpoint_card(viewpoint, compact=True) for viewpoint in viewpoints)
-        if not cards:
-            cards = "<p>最近还没有被富化为“观点”的发言。</p>"
-        sections.append(
-            f"""<section>
-  {_author_badge(author)}
-  <p class="muted">最近观点 {len(viewpoints)} · 已有市场结果 {evaluated}</p>
-  <div class="link-row">{_local_author_link(uid)}{_snowball_user_link(uid)}</div>
+        active = " active" if author is selected else ""
+        author_options.append(
+            f'<a class="author-option{active}" href="/?author={quote(_text(uid), safe="")}">'
+            f"{_author_badge(author)}"
+            f'<span class="muted small">观点发言 {author["viewpoint_count"]} · '
+            f"已评估观点 {author['evaluated_viewpoint_count']}</span>"
+            "</a>"
+        )
+    selected_uid_value = selected["author_platform_uid"]
+    selected_clusters = author_recent_viewpoint_clusters(
+        connection, _text(selected_uid_value), prompt_version, limit=10
+    )
+    cards = "".join(_viewpoint_cluster_card(cluster) for cluster in selected_clusters)
+    if not cards:
+        cards = "<p>最近还没有被富化为“观点”的发言。</p>"
+    selected_panel = f"""<section>
+  <div class="sectit"><div>{_author_badge(selected)}</div>
+  <div class="link-row">{_local_author_link(selected_uid_value)}
+  {_snowball_user_link(selected_uid_value)}</div></div>
+  <h2>最近 {len(selected_clusters)} 个观点簇</h2>
+  <p class="muted">同一博主、共享明确 A 股证券代码且处于 7 天连续周期内的发言合并展示。</p>
   {cards}
 </section>"""
-        )
-    content = "".join(sections) or "<p>暂无已监控博主。</p>"
-    return _layout("KOL 照妖镜 · 博主最近观点", f"{header}{content}")
+    body = (
+        f'{header}<div class="overview-grid">'
+        f'<aside class="author-list" aria-label="博主列表">'
+        f'<section class="panel"><h2>选择博主</h2>{"".join(author_options)}</section></aside>'
+        f"<div>{selected_panel}</div></div>"
+    )
+    return _layout("KOL 照妖镜 · 博主最近观点", body)
 
 
 def _author_html(profile: dict[str, object]) -> str:
     author = cast(dict[str, object], profile["author"])
     posts = cast(list[dict[str, object]], profile["posts"])
-    viewpoints = cast(list[dict[str, object]], profile["viewpoints"])
+    viewpoint_clusters = cast(list[dict[str, object]], profile["viewpoint_clusters"])
     uid = _cell(author.get("author_platform_uid"))
     title = _author_name(author)
     description = escape(_text(author.get("author_description")))
@@ -895,7 +968,7 @@ def _author_html(profile: dict[str, object]) -> str:
         f"钉住 {int(cast(int, author.get('pinned_count') or 0))}"
     )
     posts_html = "".join(_timeline_article(item) for item in posts) or "<p>暂无帖子。</p>"
-    viewpoints_html = "".join(_viewpoint_card(item) for item in viewpoints) or (
+    viewpoints_html = "".join(_viewpoint_cluster_card(item) for item in viewpoint_clusters) or (
         "<p>最近还没有被富化为“观点”的发言。</p>"
     )
     snowball_link = _snowball_user_link(author.get("author_platform_uid"))
@@ -911,8 +984,8 @@ def _author_html(profile: dict[str, object]) -> str:
   <p>{description}</p>
 </section>
 <section>
-  <h2>最近 10 个观点与市场变化</h2>
-  <p class="muted">只列当前版本被富化为“观点”的发言。市场变化来自已提取的可证伪命题与结果。</p>
+  <h2>最近 10 个观点簇与市场变化</h2>
+  <p class="muted">同一明确证券代码下的多次发言合并展示，原帖证据仍逐条保留。</p>
   {viewpoints_html}
 </section>
 <section>
@@ -1057,7 +1130,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self.server.csrf_token,
                 tier3_only=self._query_value(query, "tier") == "3",
             )
-        return _viewpoint_overview_html(connection, prompt_version)
+        return _viewpoint_overview_html(
+            connection, prompt_version, self._query_value(query, "author")
+        )
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)

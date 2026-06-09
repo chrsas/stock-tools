@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
+from datetime import datetime
 from difflib import unified_diff
-from typing import Any
+from typing import Any, cast
 
 from kol_archive.maintenance import redact_text
 from kol_archive.models import FeedState, SourceState, WatchMode
+
+_CN_TICKER = re.compile(r"^(?:SH|SZ|BJ)\d{6}$")
+_TICKER_NAME = re.compile(r"\$([^$()]+)\(((?:SH|SZ|BJ)\d{6})\)\$")
 
 
 def _row_dict(
@@ -474,8 +480,10 @@ def author_recent_viewpoints(
             p.url,
             p.posted_at_claimed,
             p.first_seen_at,
+            COALESCE(p.posted_at_claimed, v.first_observed_at, p.first_seen_at) AS viewpoint_at,
             p.current_version_id AS version_id,
             v.content_text AS current_text,
+            v.raw_payload,
             v.first_observed_at AS viewpoint_first_observed_at,
             e.rationale AS enrichment_rationale,
             e.evidence_snippet AS enrichment_evidence_snippet
@@ -492,12 +500,15 @@ def author_recent_viewpoints(
         """,
         (prompt_version.strip(), platform_uid.strip(), limit),
     ).fetchall()
-    viewpoints: list[dict[str, object]] = []
-    for row in rows:
-        item = _row_dict(row)
+    viewpoints = [_row_dict(row) for row in rows]
+    outcomes_by_version: dict[int, list[dict[str, object]]] = {}
+    if rows:
+        version_ids = [int(row["version_id"]) for row in rows]
+        placeholders = ",".join("?" for _ in version_ids)
         outcomes = connection.execute(
-            """
+            f"""
             SELECT
+                c.version_id,
                 c.id AS claim_id,
                 c.ticker,
                 c.direction,
@@ -513,27 +524,127 @@ def author_recent_viewpoints(
                 o.notes AS outcome_notes
             FROM claims c
             LEFT JOIN claim_outcomes o ON o.claim_id = c.id
-            WHERE c.post_id = ? AND c.version_id = ?
+            WHERE c.version_id IN ({placeholders})
             ORDER BY c.id
             """,
-            (int(row["post_id"]), int(row["version_id"])),
+            version_ids,
         ).fetchall()
-        item["market_outcomes"] = [_row_dict(outcome) for outcome in outcomes]
-        viewpoints.append(item)
+        for outcome in outcomes:
+            outcomes_by_version.setdefault(int(outcome["version_id"]), []).append(
+                _row_dict(outcome)
+            )
+    for viewpoint in viewpoints:
+        viewpoint["market_outcomes"] = outcomes_by_version.get(
+            int(str(viewpoint["version_id"])), []
+        )
     return viewpoints
+
+
+def _viewpoint_ticker(viewpoint: dict[str, object]) -> str | None:
+    text_matches = {
+        ticker for _, ticker in _TICKER_NAME.findall(str(viewpoint.get("current_text") or ""))
+    }
+    if len(text_matches) == 1:
+        return str(next(iter(text_matches)))
+    raw = viewpoint.get("raw_payload")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    tickers: set[str] = set()
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            correlation = value.get("stockCorrelation")
+            if isinstance(correlation, list):
+                tickers.update(
+                    str(symbol) for symbol in correlation if _CN_TICKER.fullmatch(str(symbol))
+                )
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(payload)
+    return next(iter(tickers)) if len(tickers) == 1 else None
+
+
+def _within_viewpoint_cluster_window(newer: object, older: object, *, days: int = 7) -> bool:
+    try:
+        delta = datetime.fromisoformat(str(newer)) - datetime.fromisoformat(str(older))
+    except ValueError:
+        return False
+    return 0 <= delta.total_seconds() < days * 24 * 60 * 60
+
+
+def _viewpoint_ticker_name(viewpoint: dict[str, object], ticker: str) -> str | None:
+    for name, found_ticker in _TICKER_NAME.findall(str(viewpoint.get("current_text") or "")):
+        if found_ticker == ticker:
+            return str(name)
+    return None
+
+
+def author_recent_viewpoint_clusters(
+    connection: sqlite3.Connection,
+    platform_uid: str,
+    prompt_version: str,
+    *,
+    limit: int = 10,
+) -> list[dict[str, object]]:
+    """Group one author's recent viewpoints by explicit A-share ticker evidence."""
+    viewpoints = author_recent_viewpoints(
+        connection, platform_uid, prompt_version, limit=max(limit * 10, 50)
+    )
+    clusters: list[dict[str, object]] = []
+    for viewpoint in viewpoints:
+        ticker = _viewpoint_ticker(viewpoint)
+        cluster = next(
+            (
+                item
+                for item in clusters
+                if ticker
+                and ticker == item["ticker"]
+                and _within_viewpoint_cluster_window(
+                    item["first_at"], viewpoint.get("viewpoint_at")
+                )
+            ),
+            None,
+        )
+        if cluster is None:
+            cluster = {
+                "cluster_key": ticker or f"post-{viewpoint['post_id']}",
+                "ticker": ticker,
+                "viewpoints": [],
+                "latest_at": viewpoint.get("viewpoint_at"),
+                "first_at": viewpoint.get("viewpoint_at"),
+            }
+            clusters.append(cluster)
+        cast(list[dict[str, object]], cluster["viewpoints"]).append(viewpoint)
+        cluster["first_at"] = viewpoint.get("viewpoint_at")
+    for cluster in clusters:
+        items = cast(list[dict[str, object]], cluster["viewpoints"])
+        primary = cast(str | None, cluster["ticker"])
+        name = None
+        if primary:
+            for item in items:
+                name = _viewpoint_ticker_name(item, primary)
+                if name:
+                    break
+        cluster["title"] = f"{name}（{primary}）" if name and primary else primary or "独立观点"
+        cluster["statement_count"] = len(items)
+    return clusters[:limit]
 
 
 def author_viewpoint_overview(
     connection: sqlite3.Connection,
     prompt_version: str,
-    *,
-    per_author_limit: int = 10,
 ) -> list[dict[str, object]]:
-    """Return every author with their latest viewpoints, in stable author order."""
+    """Return lightweight per-author viewpoint counts, in stable author order."""
     if not prompt_version.strip():
         raise ValueError("prompt_version must not be empty")
-    if per_author_limit < 1:
-        raise ValueError("viewpoint limit must be positive")
     rows = connection.execute(
         """
         SELECT
@@ -555,23 +666,28 @@ def author_viewpoint_overview(
                 ORDER BY COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at) DESC,
                          p.id DESC
                 LIMIT 1
-            ) AS author_avatar_url
+            ) AS author_avatar_url,
+            COUNT(e.id) AS viewpoint_count,
+            SUM(
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM claims c JOIN claim_outcomes o ON o.claim_id = c.id
+                    WHERE c.version_id = e.version_id
+                ) THEN 1 ELSE 0 END
+            ) AS evaluated_viewpoint_count
         FROM authors a
+        LEFT JOIN posts p ON p.author_id = a.id
+        LEFT JOIN enrichments e
+            ON e.version_id = p.current_version_id
+            AND e.prompt_version = ?
+            AND e.post_type = '观点'
         WHERE a.platform = 'xueqiu'
+        GROUP BY a.id
         ORDER BY a.id
-        """
+        """,
+        (prompt_version.strip(),),
     ).fetchall()
-    overview = []
-    for row in rows:
-        item = _row_dict(row)
-        item["viewpoints"] = author_recent_viewpoints(
-            connection,
-            str(row["author_platform_uid"]),
-            prompt_version,
-            limit=per_author_limit,
-        )
-        overview.append(item)
-    return overview
+    return [_row_dict(row) for row in rows]
 
 
 def author_profile(
@@ -678,7 +794,9 @@ def author_profile(
     return {
         "author": _row_dict(row),
         "posts": [_post_projection(post) for post in posts],
-        "viewpoints": author_recent_viewpoints(connection, platform_uid, prompt_version, limit=10),
+        "viewpoint_clusters": author_recent_viewpoint_clusters(
+            connection, platform_uid, prompt_version, limit=10
+        ),
     }
 
 
