@@ -90,6 +90,20 @@ class QueueState(StrEnum):
 
 
 @dataclass(frozen=True)
+class PostImage:
+    """One image referenced by a post's body, in document order.
+
+    ``normalized_url`` (query/signature stripped) is the stable identity used for
+    the version manifest and for de-duplicating re-downloads; ``source_url`` is the
+    signed URL actually fetched for the bytes.
+    """
+
+    source_url: str
+    normalized_url: str
+    ordinal: int
+
+
+@dataclass(frozen=True)
 class NormalizedPost:
     """Platform-neutral post content returned by an adapter."""
 
@@ -99,6 +113,8 @@ class NormalizedPost:
     content_fidelity: ContentFidelity
     content_text: str | None = None
     content_hash: str | None = None
+    image_manifest_hash: str | None = None
+    images: tuple[PostImage, ...] = ()
     posted_at_claimed: str | None = None
     url: str | None = None
     ingest_mode: IngestMode = IngestMode.LIVE
@@ -202,6 +218,40 @@ class RewriteSource:
     post_id: int
     version_id: int
     original_text: str
+
+
+@dataclass(frozen=True)
+class ImageDownloadTarget:
+    """One image in a version's manifest not yet successfully downloaded."""
+
+    version_id: int
+    source_url: str
+    normalized_url: str
+    ordinal: int
+
+
+@dataclass(frozen=True)
+class ImageDownloadResult:
+    """Outcome of one image fetch attempt, appended to ``post_images``."""
+
+    download_status: str  # "ok" | "failed"
+    sha256: str | None = None
+    mime_type: str | None = None
+    byte_size: int | None = None
+    image_bytes: bytes | None = None
+    notes: str | None = None
+
+
+@dataclass(frozen=True)
+class StoredImage:
+    """A successfully downloaded image, the unit OCR and VLM derive from."""
+
+    image_id: int
+    version_id: int
+    post_id: int
+    sha256: str
+    mime_type: str | None
+    image_bytes: bytes
 
 
 @dataclass(frozen=True)

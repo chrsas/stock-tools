@@ -11,13 +11,20 @@ from kol_archive.models import (
     IngestMode,
     LoginState,
     NormalizedPost,
+    PostImage,
     ProbeResult,
     RunStatus,
 )
 from kol_archive.time import timestamp_at_or_before
-from probe.normalize_text import content_hash, content_text
+from probe.normalize_text import (
+    content_hash,
+    content_text,
+    extract_image_urls,
+    image_manifest_hash,
+    normalize_image_url,
+)
 
-ADAPTER_VERSION = "xueqiu-2"
+ADAPTER_VERSION = "xueqiu-3"
 LOGIN_EXPIRED_CODE = "10022"
 NOT_FOUND_CODE = "20210"
 
@@ -101,6 +108,8 @@ def normalize_status(
         "mark": _optional_int(payload, "mark"),
         "truncated": bool(payload.get("truncated")),
     }
+    images: tuple[PostImage, ...] = ()
+    manifest_hash: str | None = None
     if bool(payload.get("is_column")) or bool(payload.get("truncated")):
         fidelity = ContentFidelity.PREVIEW
         display_text = None
@@ -118,6 +127,8 @@ def normalize_status(
             display_text = content_text(raw_text)
             digest = content_hash(raw_text)
             failed = False
+            images = _parse_images(raw_text)
+            manifest_hash = image_manifest_hash([image.normalized_url for image in images])
 
     return (
         NormalizedPost(
@@ -127,6 +138,8 @@ def normalize_status(
             content_fidelity=fidelity,
             content_text=display_text,
             content_hash=digest,
+            image_manifest_hash=manifest_hash,
+            images=images,
             posted_at_claimed=posted_at_claimed,
             url=f"https://xueqiu.com/{user_id}/{platform_post_id}",
             ingest_mode=ingest_mode,
@@ -135,6 +148,25 @@ def normalize_status(
         ),
         failed,
     )
+
+
+def _parse_images(raw_text: str) -> tuple[PostImage, ...]:
+    """Ordered image manifest for a full-fidelity post, parsed from its HTML.
+
+    ``normalized_url`` (query stripped) is the manifest/dedupe key; ``source_url``
+    keeps the signed URL actually needed to fetch the bytes. ``ordinal`` preserves
+    document order so a reordered set of images is itself a detectable change.
+    """
+    images: list[PostImage] = []
+    for ordinal, source_url in enumerate(extract_image_urls(raw_text)):
+        images.append(
+            PostImage(
+                source_url=source_url,
+                normalized_url=normalize_image_url(source_url),
+                ordinal=ordinal,
+            )
+        )
+    return tuple(images)
 
 
 def parse_feed_page(

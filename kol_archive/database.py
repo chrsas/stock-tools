@@ -11,6 +11,7 @@ EVIDENCE_TABLES = (
     "post_observations",
     "post_versions",
     "post_events",
+    "post_images",
 )
 
 SCHEMA = """
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS posts (
     last_present_at TEXT,
     current_version_id INTEGER REFERENCES post_versions(id),
     current_content_hash TEXT,
+    current_image_manifest_hash TEXT,
     absent_healthy_streak INTEGER NOT NULL DEFAULT 0 CHECK(absent_healthy_streak >= 0),
     feed_state TEXT NOT NULL CHECK(
         feed_state IN ('present', 'absent_confirmed', 'out_of_scope', 'unknown')
@@ -74,6 +76,7 @@ CREATE TABLE IF NOT EXISTS post_versions (
     post_id INTEGER NOT NULL REFERENCES posts(id),
     content_text TEXT NOT NULL,
     content_hash TEXT NOT NULL,
+    image_manifest_hash TEXT,
     first_observed_at TEXT NOT NULL,
     ingest_mode TEXT NOT NULL CHECK(ingest_mode IN ('live', 'backfill')),
     raw_payload TEXT CHECK(raw_payload IS NULL OR json_valid(raw_payload))
@@ -220,6 +223,60 @@ CREATE TABLE IF NOT EXISTS prices (
     PRIMARY KEY(ticker, date)
 );
 
+-- Append-only evidence: one row per image-fetch attempt for a version. A
+-- re-download of the same normalized_url appends a new row (never updates), so a
+-- byte swap behind an unchanged URL stays visible as a second row with a
+-- different sha256. download_status records 'ok' or 'failed' so a failure is
+-- archived rather than silently retried-into-nothing.
+CREATE TABLE IF NOT EXISTS post_images (
+    id INTEGER PRIMARY KEY,
+    version_id INTEGER NOT NULL REFERENCES post_versions(id),
+    source_url TEXT NOT NULL,
+    normalized_url TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    sha256 TEXT,
+    mime_type TEXT,
+    byte_size INTEGER CHECK(byte_size IS NULL OR byte_size >= 0),
+    image_bytes BLOB,
+    downloaded_at TEXT NOT NULL,
+    download_status TEXT NOT NULL CHECK(download_status IN ('ok', 'failed')),
+    notes TEXT,
+    CHECK(
+        (download_status = 'ok' AND sha256 IS NOT NULL AND image_bytes IS NOT NULL)
+        OR (download_status = 'failed' AND image_bytes IS NULL)
+    )
+);
+
+-- Derived, searchable text extracted from a stored image (not evidence: it is a
+-- machine transcription that may contain recognition errors). Keyed idempotently
+-- per (image, engine, engine_version) so re-runs and engine upgrades coexist.
+CREATE TABLE IF NOT EXISTS image_ocr (
+    id INTEGER PRIMARY KEY,
+    image_id INTEGER NOT NULL REFERENCES post_images(id),
+    image_sha256 TEXT NOT NULL,
+    engine TEXT NOT NULL,
+    engine_version TEXT NOT NULL,
+    ocr_text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(image_id, engine, engine_version)
+);
+
+-- Inference, not evidence: a vision model's description of an image, used only to
+-- enrich/filter attention. Mirrors enrichments' idempotency; the bytes sent are
+-- the stored BLOB (not the remote URL), so a failed/replaced source cannot change
+-- what was judged. Keyed per (image, model, prompt_version).
+CREATE TABLE IF NOT EXISTS image_enrichments (
+    id INTEGER PRIMARY KEY,
+    image_id INTEGER NOT NULL REFERENCES post_images(id),
+    image_sha256 TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    description TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(image_id, model, prompt_version)
+);
+
 CREATE VIEW IF NOT EXISTS version_sightings AS
 SELECT version_id, observed_at, 'feed' AS channel, fetch_run_id AS run_id
 FROM post_observations
@@ -266,6 +323,25 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         "fetch_runs",
         "reached_timeline_end",
         "reached_timeline_end INTEGER NOT NULL DEFAULT 0 CHECK(reached_timeline_end IN (0, 1))",
+    )
+    # Image-manifest tracking, added after the schema shipped. Existing rows keep
+    # NULL: version-change detection treats a NULL prior manifest as "not
+    # comparable" (no spurious fork on the first post-upgrade poll); the next
+    # positive projection populates posts.current_image_manifest_hash, after which
+    # real manifest comparison begins. We never back-fill post_versions —
+    # ALTER ADD COLUMN is DDL (allowed), but UPDATE on an append-only evidence
+    # table is not.
+    _ensure_column(
+        connection,
+        "post_versions",
+        "image_manifest_hash",
+        "image_manifest_hash TEXT",
+    )
+    _ensure_column(
+        connection,
+        "posts",
+        "current_image_manifest_hash",
+        "current_image_manifest_hash TEXT",
     )
     for table in EVIDENCE_TABLES:
         connection.executescript(

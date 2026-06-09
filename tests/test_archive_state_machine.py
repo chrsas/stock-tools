@@ -205,6 +205,25 @@ def test_evidence_tables_are_append_only_and_post_identity_is_locked(archive: Ar
     archive.record_feed_run(make_feed_run(), [make_post()])
     post_id = int(str(scalar(archive, "SELECT id FROM posts")))
     archive.record_probe_run(make_probe_run(post_id, ProbeResult.NOT_FOUND))
+    # Seed a post_images row so the append-only triggers have a row to fire on
+    # (a BEFORE UPDATE/DELETE trigger does not run when zero rows match).
+    version_id = int(str(scalar(archive, "SELECT id FROM post_versions")))
+    archive.connection.execute(
+        """
+        INSERT INTO post_images(
+            id, version_id, source_url, normalized_url, ordinal, sha256, mime_type,
+            byte_size, image_bytes, downloaded_at, download_status
+        ) VALUES (1, ?, ?, ?, 0, ?, 'image/png', 3, ?, ?, 'ok')
+        """,
+        (
+            version_id,
+            "https://x/i.png?s=1",
+            "https://x/i.png",
+            "abc",
+            b"png",
+            "2026-06-02T00:00:00+00:00",
+        ),
+    )
 
     for table in EVIDENCE_TABLES:
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):

@@ -134,6 +134,39 @@ $env:LLM_API_KEY = "<本地密钥>"
 
 改写产物只进入 `rewrite_exercises`，并自动钉住帖子。它不会进入事件研究或回测数据。
 
+## 图片证据（下载 / OCR / VLM）
+
+帖子正文里的 K 线图、收益截图、持仓图常常和文字同等重要，且最易随删帖一并失效。
+采集时帖子的图片 URL 已随 `raw_payload` 入库，但图片**字节**需要在失效前单独固化。
+三个独立按需 pass（均不进实时 `run-once`，避免把慢速网络/可选依赖塞进原子写）：
+
+```powershell
+# 1) 下载并固化图片字节（sha256 + BLOB 存入 post_images，纯追加证据表）
+.\.venv\Scripts\python.exe -m kol_archive download-images --config-dir config
+# 2) OCR 提取图内文字（派生材料，非证据正文；winocr 主、tesseract 兜底）
+.\.venv\Scripts\python.exe -m kol_archive ocr-images --config-dir config
+# 3) 多模态模型描述图片（推断产物，绝不写回证据正文）
+$env:LLM_API_KEY = "<本地密钥>"
+.\.venv\Scripts\python.exe -m kol_archive enrich-images --config-dir config
+```
+
+均支持 `--post-id` 限定单帖、`--limit` 限本轮数量。
+
+图片现在纳入**版本判定**：`content_hash` 只覆盖去标签后的正文，看不见图片，因此每个版本另算
+一个 `image_manifest_hash`（对去签名后的有序图片 URL 列表取哈希）。正文不变但**换图/增图/删图**
+也会生成新版本，被时间线和 diff 捕获。升级前的旧版本 manifest 为 NULL，按「不可比」处理——升级后
+首轮不会把所有帖误判成「图片变了」，投影会把 manifest 补上，之后比对自然生效（适配器版本 `xueqiu-3`）。
+
+`post_images` 是**纯追加日志**：一次抓取（成功或失败）记一行，同一 URL 字节被偷换时重下会追加新行、
+新 sha256 并在 `notes` 标 `bytes_changed`，因此替换可被发现而无需改动旧行。单图大小、单批累计字节
+上限和下载节奏见 `config/config.yml` 的 `images` 段。OCR 表记 `engine/engine_version/image_sha256`；
+VLM 描述走 `vision_model` / `vision_prompt_version`（默认复用 `llm.model`），按 `UNIQUE(image_id,
+model, prompt_version)` 幂等，发送给模型的是库内 BLOB 转 base64，不碰可能失效的远程 URL。
+
+OCR 依赖是可选的，按需安装：`.\.venv\Scripts\python.exe -m pip install -r requirements-ocr.txt`
+（Windows 走 winocr；跨平台用 tesseract，需另装其二进制与中文语言包）。导出时图片字节与 OCR 原文
+作证据保留，VLM 描述按 `notes` 类脱敏，图片 `source_url` 的签名查询参数被剥除。
+
 ## 本地网页
 
 启动服务端渲染网页：

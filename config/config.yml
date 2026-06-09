@@ -49,7 +49,14 @@ fidelity:
   direct: full
 
 adapter:
-  version: xueqiu-2   # 接口结构变更时递增
+  version: xueqiu-3   # 接口结构变更时递增（xueqiu-3：解析图片清单并纳入版本判定）
+
+# ── 图片证据（下载/OCR/VLM；均为独立按需 pass，不进实时采集）──────────────
+images:
+  request_min_interval_seconds: 1.0    # 图片 CDN 较温和，间隔可小于 feed
+  request_jitter_seconds: 1.0
+  max_image_bytes: 8388608             # 单图上限 8MiB，超限记 download_status=failed(too_large)
+  max_batch_bytes: 268435456           # 单次 download-images 累计成功字节上限 256MiB，达到即停，余量留待下轮
 
 storage:
   db_path: data/kol.sqlite3
@@ -80,6 +87,9 @@ llm:
   api_key_env: LLM_API_KEY     # API Key 仅从环境变量读取
   prompt_version: rewrite-v1   # 阶段 2 改写训练 prompt 版本
   enrich_prompt_version: enrich-v1   # 阶段 3 批量富化 prompt 版本（按版本隔离 enrichments）
+  # 图片 VLM 描述（enrich-images，推断产物，不进证据正文）：
+  vision_model: ""             # 留空则复用上面的 model；建议填多模态模型 id
+  vision_prompt_version: vision-v1   # 按版本隔离 image_enrichments
 
 # ── 后续阶段占位 ──────────────────────────────────────────────────
 # prices:                # 阶段4 行情数据源

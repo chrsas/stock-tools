@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import json
 import re
@@ -12,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 EXPORT_QUERIES = {
@@ -26,6 +28,9 @@ EXPORT_QUERIES = {
     "attention_log": "SELECT * FROM attention_log",
     "rewrite_exercises": "SELECT * FROM rewrite_exercises",
     "enrichments": "SELECT * FROM enrichments",
+    "post_images": "SELECT * FROM post_images",
+    "image_ocr": "SELECT * FROM image_ocr",
+    "image_enrichments": "SELECT * FROM image_enrichments",
     "claims": "SELECT * FROM claims",
     "claim_outcomes": "SELECT * FROM claim_outcomes",
     "prices": "SELECT * FROM prices",
@@ -35,7 +40,14 @@ JSON_COLUMNS = {
     ("posts", "raw_meta"),
     ("post_versions", "raw_payload"),
 }
-TEXT_REDACTION_COLUMNS = {"notes"}
+# Image source URLs carry a rotating CDN signature in their query string; drop the
+# whole query/fragment on export so a credential-bearing token never leaves the
+# machine. The query-free normalized_url is exported alongside for identity.
+URL_REDACTION_COLUMNS = {("post_images", "source_url")}
+# The vision model's description is inference, not evidence — scrub it like notes
+# (heuristic credential redaction) on export. OCR text and image bytes are
+# evidence and are exported intact.
+TEXT_REDACTION_COLUMNS = {"notes", "description"}
 _SNAPSHOT_NAME_RE = re.compile(r"^kol-(\d{8}T\d{12}Z)(?:-(\d+))?\.sqlite3$")
 _SENSITIVE_KEY_PARTS = (
     "apikey",
@@ -183,6 +195,12 @@ def redact_text(value: str) -> str:
     return _SECRET_ASSIGNMENT_RE.sub(r"\1=[REDACTED]", redacted)
 
 
+def redact_url(value: str) -> str:
+    """Strip the query/fragment so a signed CDN URL exports without its token."""
+    split = urlsplit(value)
+    return urlunsplit((split.scheme, split.netloc, split.path, "", ""))
+
+
 def _sanitize_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -199,8 +217,14 @@ def _sanitize_value(value: Any) -> Any:
 def _export_value(relation: str, column: str, value: Any) -> Any:
     if value is None:
         return None
+    if isinstance(value, (bytes, bytearray)):
+        # BLOBs (image bytes) are not JSON/CSV-serializable; base64 keeps the
+        # export self-contained and lossless.
+        return base64.b64encode(bytes(value)).decode("ascii")
     if (relation, column) in JSON_COLUMNS:
         return _sanitize_value(json.loads(str(value)))
+    if (relation, column) in URL_REDACTION_COLUMNS:
+        return redact_url(str(value))
     if column in TEXT_REDACTION_COLUMNS:
         return redact_text(str(value))
     return value

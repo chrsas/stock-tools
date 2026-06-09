@@ -1,0 +1,7 @@
+# 可选：图片 OCR 派生层依赖（ocr-images 命令）。核心采集/下载/VLM 不需要这些。
+# Windows 首选 winocr（离线、免费、调用系统 Windows.Media.Ocr）；
+# 跨平台兜底 tesseract，需另装 tesseract 二进制并配好中文语言包(chi_sim)。
+-r requirements.txt
+Pillow>=10,<12
+winocr>=0.0.16 ; sys_platform == "win32"
+pytesseract>=0.3.10
