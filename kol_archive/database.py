@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from kol_archive.market import has_explicit_market_relation
+
 EVIDENCE_TABLES = (
     "fetch_runs",
     "probe_runs",
@@ -183,6 +185,7 @@ CREATE TABLE IF NOT EXISTS enrichments (
     label_first_hand_info INTEGER NOT NULL CHECK(label_first_hand_info IN (0, 1)),
     label_transferable_framework INTEGER NOT NULL CHECK(label_transferable_framework IN (0, 1)),
     label_reasoned_non_consensus INTEGER NOT NULL CHECK(label_reasoned_non_consensus IN (0, 1)),
+    is_market_related INTEGER NOT NULL CHECK(is_market_related IN (0, 1)),
     rationale TEXT NOT NULL,
     evidence_snippet TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -310,6 +313,32 @@ def _ensure_column(
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
 
+def _backfill_market_relation(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT e.id, v.content_text, v.raw_payload
+        FROM enrichments e
+        JOIN post_versions v ON v.id = e.version_id
+        WHERE e.is_market_related IS NULL
+        """
+    ).fetchall()
+    connection.executemany(
+        "UPDATE enrichments SET is_market_related = ? WHERE id = ?",
+        (
+            (
+                int(
+                    has_explicit_market_relation(
+                        str(row["content_text"]),
+                        str(row["raw_payload"]) if row["raw_payload"] is not None else None,
+                    )
+                ),
+                int(row["id"]),
+            )
+            for row in rows
+        ),
+    )
+
+
 def initialize_database(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
     _ensure_column(
@@ -342,6 +371,20 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         "posts",
         "current_image_manifest_hash",
         "current_image_manifest_hash TEXT",
+    )
+    _ensure_column(
+        connection,
+        "enrichments",
+        "is_market_related",
+        "is_market_related INTEGER CHECK(is_market_related IN (0, 1))",
+    )
+    _backfill_market_relation(connection)
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_enrichments_market_viewpoints
+        ON enrichments(prompt_version, post_type, is_market_related, version_id);
+        CREATE INDEX IF NOT EXISTS idx_claims_version_id ON claims(version_id);
+        """
     )
     for table in EVIDENCE_TABLES:
         connection.executescript(

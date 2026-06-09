@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from typing import cast
 
+from kol_archive.market import has_explicit_market_relation
 from kol_archive.models import (
     BACKFILL_PAGES_NOTE,
     TIMELINE_PARSE_FAILED_NOTE,
@@ -564,7 +565,7 @@ class Archive:
         if not prompt_version.strip():
             raise ValueError("prompt_version must not be empty")
         query = """
-            SELECT v.post_id, v.id AS version_id, v.content_text
+            SELECT v.post_id, v.id AS version_id, v.content_text, v.raw_payload
             FROM post_versions v
             LEFT JOIN enrichments e
                 ON e.version_id = v.id AND e.prompt_version = ?
@@ -586,6 +587,7 @@ class Archive:
                 post_id=int(row["post_id"]),
                 version_id=int(row["version_id"]),
                 original_text=str(row["content_text"]),
+                raw_payload=str(row["raw_payload"]) if row["raw_payload"] is not None else None,
             )
             for row in rows
         ]
@@ -613,9 +615,9 @@ class Archive:
                 INSERT OR IGNORE INTO enrichments(
                     post_id, version_id, post_type,
                     label_first_hand_info, label_transferable_framework,
-                    label_reasoned_non_consensus,
+                    label_reasoned_non_consensus, is_market_related,
                     rationale, evidence_snippet, model, prompt_version, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     target.post_id,
@@ -624,6 +626,7 @@ class Archive:
                     int(result.label_first_hand_info),
                     int(result.label_transferable_framework),
                     int(result.label_reasoned_non_consensus),
+                    int(has_explicit_market_relation(target.original_text, target.raw_payload)),
                     result.rationale.strip(),
                     result.evidence_snippet.strip(),
                     model.strip(),

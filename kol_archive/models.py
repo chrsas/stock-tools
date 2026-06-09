@@ -261,6 +261,7 @@ class EnrichmentTarget:
     post_id: int
     version_id: int
     original_text: str
+    raw_payload: str | None
 
 
 @dataclass(frozen=True)

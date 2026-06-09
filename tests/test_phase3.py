@@ -87,6 +87,7 @@ def make_post(
         content_hash=f"hash-{text}",
         posted_at_claimed="2026-05-20T00:00:00+00:00",
         url=f"https://xueqiu.com/100/{platform_post_id}",
+        raw_payload={"stockCorrelation": ["SH000001"]},
     )
 
 
@@ -307,6 +308,72 @@ def test_add_enrichment_is_idempotent_on_unique_key(archive: Archive) -> None:
 
     count = archive.connection.execute("SELECT COUNT(*) FROM enrichments").fetchone()[0]
     assert count == 1
+
+
+def test_add_enrichment_persists_market_relation_from_archived_payload(archive: Archive) -> None:
+    unrelated = dataclasses.replace(
+        make_post("unrelated", text="今天跑步状态很好"),
+        raw_payload={"text": "今天跑步状态很好"},
+    )
+    archive.record_feed_run(make_feed_run(), [unrelated, make_post("related")])
+    for target in archive.enrichment_targets("enrich-v1"):
+        archive.add_enrichment(target, make_result(), "test-model", "enrich-v1", BASE_TIME)
+
+    rows = archive.connection.execute(
+        """
+        SELECT p.platform_post_id, e.is_market_related
+        FROM enrichments e JOIN posts p ON p.id = e.post_id
+        ORDER BY p.platform_post_id
+        """
+    ).fetchall()
+
+    assert [(row["platform_post_id"], row["is_market_related"]) for row in rows] == [
+        ("related", 1),
+        ("unrelated", 0),
+    ]
+
+
+def test_market_relation_lookup_indexes_exist(archive: Archive) -> None:
+    enrichment_indexes = {
+        row["name"] for row in archive.connection.execute("PRAGMA index_list(enrichments)")
+    }
+    claim_indexes = {row["name"] for row in archive.connection.execute("PRAGMA index_list(claims)")}
+
+    assert "idx_enrichments_market_viewpoints" in enrichment_indexes
+    assert "idx_claims_version_id" in claim_indexes
+
+
+def test_initialize_database_backfills_legacy_market_relation_column() -> None:
+    connection = connect_database(":memory:")
+    connection.executescript(
+        """
+        CREATE TABLE post_versions (
+            id INTEGER PRIMARY KEY,
+            content_text TEXT NOT NULL,
+            raw_payload TEXT
+        );
+        CREATE TABLE enrichments (
+            id INTEGER PRIMARY KEY,
+            version_id INTEGER NOT NULL,
+            prompt_version TEXT NOT NULL,
+            post_type TEXT NOT NULL
+        );
+        INSERT INTO post_versions(id, content_text, raw_payload)
+        VALUES
+            (1, '生活随笔', '{"text":"生活随笔"}'),
+            (2, '继续看好', '{"stockCorrelation":["SH688777"]}');
+        INSERT INTO enrichments(id, version_id, prompt_version, post_type)
+        VALUES (1, 1, 'enrich-v1', '观点'), (2, 2, 'enrich-v1', '观点');
+        """
+    )
+
+    initialize_database(connection)
+
+    rows = connection.execute(
+        "SELECT id, is_market_related FROM enrichments ORDER BY id"
+    ).fetchall()
+    assert [(row["id"], row["is_market_related"]) for row in rows] == [(1, 0), (2, 1)]
+    connection.close()
 
 
 def test_enrichment_targets_post_id_filter_and_limit(archive: Archive) -> None:
@@ -557,6 +624,23 @@ def test_author_recent_viewpoints_only_returns_latest_ten_viewpoints(archive: Ar
     assert all(item["platform_post_id"] != "research" for item in viewpoints)
 
 
+def test_author_recent_viewpoints_excludes_market_unrelated_opinions(archive: Archive) -> None:
+    unrelated = dataclasses.replace(
+        make_post("unrelated", text="今天跑步状态很好"),
+        raw_payload={"text": "今天跑步状态很好"},
+    )
+    related = make_post("related", text="继续看好市场")
+    archive.record_feed_run(make_feed_run(), [unrelated, related])
+    _enrich(archive, "unrelated", make_result())
+    _enrich(archive, "related", make_result())
+
+    viewpoints = author_recent_viewpoints(archive.connection, "100", "enrich-v1")
+    overview = author_viewpoint_overview(archive.connection, "enrich-v1")
+
+    assert [item["platform_post_id"] for item in viewpoints] == ["related"]
+    assert overview[0]["viewpoint_count"] == 1
+
+
 def test_author_recent_viewpoint_clusters_groups_shared_nested_ticker(archive: Archive) -> None:
     original = dataclasses.replace(
         make_post("original", text="$中控技术(SH688777)$ 首次观点"),
@@ -626,6 +710,8 @@ def test_author_viewpoint_overview_is_one_lightweight_summary_query(archive: Arc
 
     archive.connection.set_trace_callback(None)
     assert len(selects) == 1
+    assert "json_tree" not in selects[0]
+    assert " GLOB " not in selects[0]
     assert overview[0]["viewpoint_count"] == 1
     assert "viewpoint_clusters" not in overview[0]
 

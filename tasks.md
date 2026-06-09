@@ -2,7 +2,9 @@
 
 > 本文件是交给编码 Agent 的执行规范。Agent 必须先通读「第 0 节 项目宪章」并全程遵守，这些是不可违反的硬约束，优先级高于任何后续任务的便利性。
 >
-> **证据与身份的边界**：`fetch_runs / probe_runs / post_observations / post_versions / post_events` 是不可篡改的证据，只追加。`posts` 承担**双重身份**：它的身份字段是被证据表外键引用的稳定登记（不可删、不可改），其余字段是可由证据重算的可变投影。
+> **证据与身份的边界**：`fetch_runs / probe_runs / post_observations / post_versions / post_events / post_images`
+> 是不可篡改的证据，只追加。`posts` 承担**双重身份**：它的身份字段是被证据表外键引用的稳定登记
+> （不可删、不可改），其余字段是可由证据重算的可变投影。
 
 ---
 
@@ -10,7 +12,7 @@
 
 工具定位是「照妖镜 + 注意力分配器」，识别谁在装、谁在耍赖，并把高价值内容捞给用户。它**不是**预测、跟单或排行榜工具。核心机制：feed 轮询负责发现新帖与近期缺席；直链复查负责持续盯住重要证据（可访问性与编辑）；钉住动作决定哪些历史证据值得长期投入采集成本。
 
-1. **不可篡改证据只追加。** 五张证据表由 DB 触发器强制只追加。**`posts` 禁止物理删除**，且身份字段 `id, author_id, platform, platform_post_id, first_seen_at` 锁成不可更新（触发器拦截 UPDATE/DELETE）；其余字段可更新。
+1. **不可篡改证据只追加。** 六张证据表由 DB 触发器强制只追加。**`posts` 禁止物理删除**，且身份字段 `id, author_id, platform, platform_post_id, first_seen_at` 锁成不可更新（触发器拦截 UPDATE/DELETE）；其余字段可更新。
 2. **一次采集完成后的所有写入在同一 SQLite 事务内原子提交，崩溃整体回滚。**
    - feed 侧：`insert fetch_run → insert posts 空壳(新帖) → insert post_versions(full 内容变化) → insert post_observations → insert events → update posts 投影`。
    - 直链侧：`内存解析 → (full 内容变化)insert post_version → insert probe_run(直接带 observed_version_id) → insert events → update posts 投影`。先有版本行，probe_run 的外键才成立。
@@ -34,7 +36,7 @@
 |---|---|---|
 | 运行形态 | 单 Python 进程 | 不引入容器编排、消息队列、独立 worker |
 | 数据库 | SQLite + WAL | 每个连接执行 `PRAGMA foreign_keys=ON;`；完成写入包进单一事务 |
-| 追加写/身份保护 | DB 触发器 | 五张证据表 `BEFORE UPDATE/DELETE` 即 `RAISE`；`posts` 禁删且身份字段不可改；人工纠错走单独审计通道 |
+| 追加写/身份保护 | DB 触发器 | 六张证据表 `BEFORE UPDATE/DELETE` 即 `RAISE`；`posts` 禁删且身份字段不可改；人工纠错走单独审计通道 |
 | JSON 列 | `TEXT CHECK(col IS NULL OR json_valid(col))` | SQLite 无 jsonb |
 | 调度 | cron 或 APScheduler | feed 轮询、直链复查两个独立任务 |
 | 采集 | Python + httpx / playwright | 单平台适配器，实现 `NormalizedPost` |
@@ -93,7 +95,7 @@ post_observations                [append-only]
 
 posts        (稳定身份登记 + 可变投影；禁删；身份字段不可改)
   id, author_id, platform, platform_post_id, first_seen_at,   -- 身份字段，锁定
-  last_present_at, current_version_id FK, current_content_hash,
+  last_present_at, current_version_id FK, current_content_hash, current_image_manifest_hash,
   absent_healthy_streak(int default 0),
   feed_state, source_state, source_checked_at(nullable), watch_mode,
   posted_at_claimed, url, ingest_mode(live|backfill),
@@ -101,7 +103,7 @@ posts        (稳定身份登记 + 可变投影；禁删；身份字段不可改
   UNIQUE(platform, platform_post_id)
 
 post_versions                    [append-only]
-  id, post_id, content_text, content_hash,
+  id, post_id, content_text, content_hash, image_manifest_hash,
   first_observed_at(不可变), ingest_mode(live|backfill), raw_payload
   -- 不去重：full 内容一变即新建行（含回放到旧内容也新建），保留各自首次观察时间
   -- 仅 full fidelity 的内容进入此表；preview 不建版本
@@ -128,10 +130,26 @@ rewrite_exercises                -- 训练材料，禁止流入回测
 enrichments
   id, post_id, version_id, post_type,
   label_first_hand_info(bool), label_transferable_framework(bool),
-  label_reasoned_non_consensus(bool),
+  label_reasoned_non_consensus(bool), is_market_related(bool),
   rationale, evidence_snippet, model, prompt_version, created_at
   UNIQUE(version_id, prompt_version)
+  -- is_market_related 由归档正文中的明确 A 股代码或 raw_payload.stockCorrelation 派生；
+  -- 旧库初始化时一次性回填，网页热查询只读该标志；已有 claim 也可进入市场相关观点页
   -- 后期加 attention_tier(0..3)，需 author 富化帖数 >= MIN_SAMPLES
+
+post_images                     [append-only]
+  id, version_id, source_url, normalized_url, ordinal,
+  sha256(nullable), mime_type(nullable), byte_size(nullable), image_bytes(nullable),
+  downloaded_at, download_status(ok|failed), notes
+  -- 每次下载尝试追加一行；同 URL 字节变化通过新 sha256 + bytes_changed 留痕
+
+image_ocr                       -- 派生转写，非原始证据
+  id, image_id, image_sha256, engine, engine_version, ocr_text, created_at
+  UNIQUE(image_id, engine, engine_version)
+
+image_enrichments               -- VLM 推断，非原始证据
+  id, image_id, image_sha256, model, prompt_version, prompt, description, created_at
+  UNIQUE(image_id, model, prompt_version)
 
 -- 阶段 4（占位）
 claims
@@ -191,7 +209,7 @@ prices  (只读)  ticker, date, close, ...
 
 **1b 存档与双轨状态机**
 - 单进程 + SQLite(WAL)，连接级 `PRAGMA foreign_keys=ON`；建全部表、视图、UNIQUE/部分唯一索引、FK。
-- 触发器：五张证据表只追加；`posts` 禁删与身份字段不可改。
+- 触发器：六张证据表只追加；`posts` 禁删与身份字段不可改。
 - feed 与直链两任务，各按第 2 节事务顺序原子写入；实现 2.2–2.6 全部规则。
 
 **1c 备份与导出**
@@ -210,6 +228,7 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 
 **2b1 本机网页闭环**
 - 新增 `serve --config-dir config` 启动命令，默认只监听 `127.0.0.1`。
+- 默认首页展示博主最近市场相关观点；左侧选择博主，右侧展示最近观点簇和已记录市场结果。
 - 服务端渲染原始时间线和证据卡片，原文始终可读；手机窄屏下保持可用。
 - 时间线展示三维状态、人读标签、删帖强弱信号、首次观察、最后观察和检测到缺失时间。
 - 证据卡片展示观察历史、版本列表、版本 diff、状态变迁、关联 run、脱敏附注、关注理由、改写训练和钉住状态。
@@ -224,8 +243,22 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 **DoD**：本机浏览器可以完成阶段 2 的查看与操作闭环；页面只展示脱敏后的证据；CLI 行为保持兼容；默认监听仅限本机；显式绑定 Tailscale 地址后手机可在 tailnet 内访问；公网无法访问；网页路由、脱敏、CSRF 和关键写操作有自动化测试。
 
 ### 阶段 3：LLM 标签 + 标签门过滤（需累积样本）
-批量富化每个 `version` 出 `post_type`、三布尔标签、`rationale`、`evidence_snippet`、`model`、`prompt_version`（幂等键 UNIQUE(version_id, prompt_version)）；命中任一标签进过滤流按时间排序，过滤为默认、原始流一键可达；后期达 `MIN_SAMPLES` 加 `attention_tier`，按 `prompt_version` 隔离。
-**DoD**：命中标签进过滤流；原始流始终可达；样本不足不强行分级。
+批量富化每个 `version` 出 `post_type`、三布尔标签、`rationale`、`evidence_snippet`、`model`、
+`prompt_version`（幂等键 UNIQUE(version_id, prompt_version)）；归档证据另行派生
+`is_market_related`，用于博主观点页减噪。命中任一标签进过滤流按时间排序，原始流一键可达；
+市场相关观点按博主展示，同一明确证券代码在连续 7 天窗口内聚合为观点簇；后期达
+`MIN_SAMPLES` 加 `attention_tier`，按 `prompt_version` 隔离。
+**DoD**：命中标签进过滤流；市场无关观点不进入博主观点页但仍保留在原始流和富化记录；
+观点簇逐条保留原帖证据；原始流始终可达；样本不足不强行分级。
+
+### 图片证据扩展：下载 + OCR + VLM
+帖子版本记录去签名后的有序图片清单哈希，正文不变但换图、增图或删图也生成新版本。
+图片字节按下载尝试追加到 `post_images`；OCR 与 VLM 描述分别进入派生表，不写回证据正文。
+三个 pass 独立按需运行，单图失败不阻断批次；导出保留图片字节和 OCR 原文，对图片来源 URL
+去查询参数，并对 VLM 描述执行启发式脱敏。
+
+**DoD**：图片清单变化可形成新版本；同 URL 字节变化可追溯；下载、OCR、VLM 均可续跑且幂等；
+旧版本 NULL 清单升级后首轮不误报换图；导出不携带图片签名参数。
 
 ### 阶段 4：事件研究等（占位，按需）
 行情对齐、交易日规则、基准选择、多时间窗口待定。可能冲突候选只摆证据；`claims`+`claim_outcomes`（无 hit 头部、不跨人排名）；事件研究 pandas 自写，导出只消费对应版本 `ingest_mode='live'` 且 `first_observed_at >= live_monitoring_started_at` 的命题，回填排除；回测库到时再评估。
@@ -258,7 +291,7 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 ### 6.1 测试（核心，正确性靠测试兜底而非靠人读规范）
 
 - **每条 DoD 对应至少一个自动化测试**；阶段不补齐对应测试，该阶段不算完成。测试用临时文件或 `:memory:` SQLite，连接同样 `PRAGMA foreign_keys=ON`。
-- **必测的不变量**：① 五张证据表 `UPDATE/DELETE` 被触发器拒绝；② `posts` 删除被拒、身份字段 `id/author_id/platform/platform_post_id/first_seen_at` 改写被拒、其余字段可改；③ A→B→A 落三条版本行且首次观察时间各异；④ `content_fidelity=preview` 不建版本、不发 content 事件；⑤ feed 连续完整健康缺席达阈值 N 才 `absent_confirmed` 并入队，partial/failed run 不产生任何负面推断；⑥ `gone_confirmed` 黏性：其后 `restricted/not_found` 不降级，仅 `reachable` 翻回；⑦ 同一帖至多一条 `state='pending'`（部分唯一索引生效）；⑧ **解析失败降级路径**：旧帖原为 `absent_confirmed`，本轮识别出 `post_id` 但正文解析失败时，`fetch_run` 变 `partial`，写 `present=true`/`content_fidelity=na`/`version_id=null`/`content_hash=null` 的 observation，在场投影被重置（`feed_state=present`、`absent_healthy_streak=0`、`last_present_at` 更新），内容投影 `current_version_id/hash` 不变，且本轮对其他帖不执行任何负面推断（见 6.3）。
+- **必测的不变量**：① 六张证据表 `UPDATE/DELETE` 被触发器拒绝；② `posts` 删除被拒、身份字段 `id/author_id/platform/platform_post_id/first_seen_at` 改写被拒、其余字段可改；③ A→B→A 落三条版本行且首次观察时间各异；④ `content_fidelity=preview` 不建版本、不发 content 事件；⑤ feed 连续完整健康缺席达阈值 N 才 `absent_confirmed` 并入队，partial/failed run 不产生任何负面推断；⑥ `gone_confirmed` 黏性：其后 `restricted/not_found` 不降级，仅 `reachable` 翻回；⑦ 同一帖至多一条 `state='pending'`（部分唯一索引生效）；⑧ **解析失败降级路径**：旧帖原为 `absent_confirmed`，本轮识别出 `post_id` 但正文解析失败时，`fetch_run` 变 `partial`，写 `present=true`/`content_fidelity=na`/`version_id=null`/`content_hash=null` 的 observation，在场投影被重置（`feed_state=present`、`absent_healthy_streak=0`、`last_present_at` 更新），内容投影 `current_version_id/hash` 不变，且本轮对其他帖不执行任何负面推断（见 6.3）。
 - **崩溃注入测试**：在「插证据 → 更新投影」之间强制抛异常，断言整条事务回滚、证据与投影不错位、无半写状态。
 - **采集解析用离线 fixture**，不在测试里打真实平台；fixture 取自 `probe/raw/` 的真实响应样本，覆盖正常帖、置顶帖、删帖错误码（10022 登录失效 / 20210 not_found）、限权、分页边界。
 - **「完整健康」判定**（feed: `status=ok AND login_state=valid AND pagination_complete AND NOT rate_limited`；直链: 去掉分页项）必须有独立单测覆盖各假值组合，这是负面推断与状态推进的总闸。

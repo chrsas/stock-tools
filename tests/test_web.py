@@ -71,6 +71,7 @@ def _make_post() -> NormalizedPost:
         raw_meta={"cookie": "meta-secret"},
         raw_payload={
             "token": "payload-secret",
+            "stockCorrelation": ["SH000001"],
             "user": {
                 "screen_name": "测试作者 & QA",
                 "profile_image_url": "community/avatar.jpg!50x50.png",
@@ -314,7 +315,10 @@ def test_author_selector_only_renders_selected_author_viewpoints(
             author_id=2,
             content_text="第二位博主的观点",
             content_hash="hash-b",
-            raw_payload={"user": {"screen_name": "第二位博主"}},
+            raw_payload={
+                "stockCorrelation": ["SH000001"],
+                "user": {"screen_name": "第二位博主"},
+            },
         )
         archive.record_feed_run(replace(_make_feed_run(), author_id=2), [second_post])
         target = next(item for item in archive.enrichment_targets("enrich-v1") if item.post_id == 2)
@@ -456,7 +460,7 @@ def test_read_routes_render_redacted_timeline_and_evidence_card(
     assert "作者 测试作者" in author
     assert "作者简介" in author
     assert "最近 10 个观点簇与市场变化" in author
-    assert "最近还没有被富化为“观点”的发言" in author
+    assert "最近还没有具备明确市场关联的观点发言" in author
     assert "雪球 post-1" in author
     assert 'href="https://xueqiu.com/u/100"' in author
 

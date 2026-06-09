@@ -14,6 +14,10 @@ from kol_archive.models import FeedState, SourceState, WatchMode
 
 _CN_TICKER = re.compile(r"^(?:SH|SZ|BJ)\d{6}$")
 _TICKER_NAME = re.compile(r"\$([^$()]+)\(((?:SH|SZ|BJ)\d{6})\)\$")
+_MARKET_RELATED_VIEWPOINT_SQL = """
+(e.is_market_related = 1
+ OR EXISTS (SELECT 1 FROM claims market_claim WHERE market_claim.version_id = e.version_id))
+"""
 
 
 def _row_dict(
@@ -473,7 +477,7 @@ def author_recent_viewpoints(
     if not prompt_version.strip():
         raise ValueError("prompt_version must not be empty")
     rows = connection.execute(
-        """
+        f"""
         SELECT
             p.id AS post_id,
             p.platform_post_id,
@@ -492,7 +496,10 @@ def author_recent_viewpoints(
         JOIN post_versions v ON v.id = p.current_version_id
         JOIN enrichments e
             ON e.version_id = p.current_version_id AND e.prompt_version = ?
-        WHERE a.platform = 'xueqiu' AND a.platform_uid = ? AND e.post_type = '观点'
+        WHERE a.platform = 'xueqiu'
+          AND a.platform_uid = ?
+          AND e.post_type = '观点'
+          AND {_MARKET_RELATED_VIEWPOINT_SQL}
         ORDER BY
             COALESCE(p.posted_at_claimed, v.first_observed_at, p.first_seen_at) DESC,
             p.id DESC
@@ -546,6 +553,13 @@ def _viewpoint_ticker(viewpoint: dict[str, object]) -> str | None:
     }
     if len(text_matches) == 1:
         return str(next(iter(text_matches)))
+    outcome_matches = {
+        str(outcome["ticker"])
+        for outcome in cast(list[dict[str, object]], viewpoint.get("market_outcomes") or [])
+        if _CN_TICKER.fullmatch(str(outcome.get("ticker") or ""))
+    }
+    if len(outcome_matches) == 1:
+        return str(next(iter(outcome_matches)))
     raw = viewpoint.get("raw_payload")
     if not isinstance(raw, str) or not raw:
         return None
@@ -646,7 +660,7 @@ def author_viewpoint_overview(
     if not prompt_version.strip():
         raise ValueError("prompt_version must not be empty")
     rows = connection.execute(
-        """
+        f"""
         SELECT
             a.id AS author_id,
             a.platform_uid AS author_platform_uid,
@@ -681,6 +695,7 @@ def author_viewpoint_overview(
             ON e.version_id = p.current_version_id
             AND e.prompt_version = ?
             AND e.post_type = '观点'
+            AND {_MARKET_RELATED_VIEWPOINT_SQL}
         WHERE a.platform = 'xueqiu'
         GROUP BY a.id
         ORDER BY a.id

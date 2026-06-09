@@ -882,7 +882,7 @@ def _viewpoint_cluster_card(cluster: dict[str, object]) -> str:
     grouping = (
         f"依据原帖或转发原帖中的明确证券代码 {_cell(ticker)}，按 7 天连续强化周期聚合。"
         if ticker
-        else "未发现明确证券代码，作为独立观点展示。"
+        else "已有可证伪市场命题，暂未归并到单一证券代码。"
     )
     latest_snippet = escape(_text(viewpoints[0].get("enrichment_evidence_snippet")))
     return f"""<section class="panel">
@@ -907,7 +907,7 @@ def _viewpoint_overview_html(
     )
     header = (
         '<div class="topbar"><div><h1>KOL 照妖镜 · 博主最近观点</h1>'
-        '<p class="muted">先选择博主，再查看最近 10 个明确观点及后续市场变化。</p></div>'
+        '<p class="muted">先选择博主，再查看最近 10 个有明确市场关联的观点及后续变化。</p></div>'
         f"{nav}</div>"
     )
     if not authors:
@@ -937,13 +937,16 @@ def _viewpoint_overview_html(
     )
     cards = "".join(_viewpoint_cluster_card(cluster) for cluster in selected_clusters)
     if not cards:
-        cards = "<p>最近还没有被富化为“观点”的发言。</p>"
+        cards = "<p>最近还没有具备明确市场关联的观点发言。</p>"
+    market_gate_note = (
+        "仅保留含明确 A 股证券代码或已有可证伪市场命题的观点；同一代码在 7 天连续周期内合并展示。"
+    )
     selected_panel = f"""<section>
   <div class="sectit"><div>{_author_badge(selected)}</div>
   <div class="link-row">{_local_author_link(selected_uid_value)}
   {_snowball_user_link(selected_uid_value)}</div></div>
   <h2>最近 {len(selected_clusters)} 个观点簇</h2>
-  <p class="muted">同一博主、共享明确 A 股证券代码且处于 7 天连续周期内的发言合并展示。</p>
+  <p class="muted">{market_gate_note}</p>
   {cards}
 </section>"""
     body = (
@@ -969,7 +972,10 @@ def _author_html(profile: dict[str, object]) -> str:
     )
     posts_html = "".join(_timeline_article(item) for item in posts) or "<p>暂无帖子。</p>"
     viewpoints_html = "".join(_viewpoint_cluster_card(item) for item in viewpoint_clusters) or (
-        "<p>最近还没有被富化为“观点”的发言。</p>"
+        "<p>最近还没有具备明确市场关联的观点发言。</p>"
+    )
+    market_gate_note = (
+        "仅保留含明确 A 股证券代码或已有可证伪市场命题的观点；同一代码下的多次发言合并展示。"
     )
     snowball_link = _snowball_user_link(author.get("author_platform_uid"))
     body = f"""<p><a href="/">返回博主最近观点</a> · <a href="/?view=queue">待处理队列</a>
@@ -985,7 +991,7 @@ def _author_html(profile: dict[str, object]) -> str:
 </section>
 <section>
   <h2>最近 10 个观点簇与市场变化</h2>
-  <p class="muted">同一明确证券代码下的多次发言合并展示，原帖证据仍逐条保留。</p>
+  <p class="muted">{market_gate_note}</p>
   {viewpoints_html}
 </section>
 <section>
