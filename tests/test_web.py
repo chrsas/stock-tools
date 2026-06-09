@@ -405,7 +405,7 @@ def test_author_viewpoint_shows_recorded_market_relationship(
             """
             INSERT INTO claim_outcomes(
                 claim_id, resolved_at, raw_return, benchmark_return, excess_return, notes
-            ) VALUES (?, ?, 0.10, 0.03, 0.07, 'test-2')
+            ) VALUES (?, ?, -0.10, -0.03, -0.07, 'test-2')
             """,
             (second_claim_id, BASE_TIME),
         )
@@ -420,10 +420,17 @@ def test_author_viewpoint_shows_recorded_market_relationship(
     assert "标的变化 +12.00%" in author
     assert "基准变化 +3.00%" in author
     assert "超额变化 +9.00%" in author
+    assert 'class="market-positive">超额变化 +9.00%</span>' in author
+    assert 'class="market-negative">超额变化 -7.00%</span>' in author
 
     status, _, overview = _request(web_server, "GET", "/")
     assert status == 200
     assert "观点发言 1 · 已评估观点 1" in overview
+    assert "最新发言的市场关系" in overview
+    assert "SH000300 · long · 10 天" in overview
+    assert "超额变化 +9.00%" in overview
+    assert 'class="market-positive">超额变化 +9.00%</span>' in overview
+    assert 'class="market-negative">超额变化 -7.00%</span>' in overview
 
 
 def test_web_settings_default_to_loopback_and_reject_wildcard_addresses() -> None:

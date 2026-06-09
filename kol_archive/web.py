@@ -353,6 +353,8 @@ def _layout(title: str, body: str) -> str:
       --success: light-dark(#15803d, #6ee7a8);
       --warn-bg: light-dark(#fff3d6, #493515);
       --warn: light-dark(#9a5b00, #f6c76b);
+      --market-up: light-dark(#b91c1c, #fca5a5);
+      --market-down: light-dark(#15803d, #86efac);
       --control-border: light-dark(#cbd5e1, #435266);
       --hover-border: light-dark(#7ba9c4, #6f91aa);
     }}
@@ -480,6 +482,9 @@ def _layout(title: str, body: str) -> str:
     .viewpoint {{ border-left: 4px solid #0ea5e9; }}
     .market-row {{ border-top: 1px solid var(--border-soft); padding-top: 8px; margin-top: 8px; }}
     .market-row strong {{ margin-right: 8px; }}
+    .market-summary {{ background: var(--surface-soft); border-radius: 7px; padding: 8px; }}
+    .market-positive {{ color: var(--market-up); font-weight: 700; }}
+    .market-negative {{ color: var(--market-down); font-weight: 700; }}
     .theme-control {{ display: flex; width: fit-content; align-items: center; gap: 6px;
       margin: 10px max(12px, calc((100% - 1180px) / 2 + 16px)) 0 auto;
       padding: 5px 7px; border: 1px solid var(--border);
@@ -899,10 +904,25 @@ def _percent(value: object) -> str:
     return f"{float(cast(float, value)) * 100:+.2f}%"
 
 
-def _market_outcomes_html(viewpoint: dict[str, object]) -> str:
+def _market_change_html(label: str, value: object) -> str:
+    rendered = f"{escape(label)} {escape(_percent(value))}"
+    if value is None:
+        return rendered
+    numeric = float(cast(float, value))
+    css_class = "market-positive" if numeric > 0 else "market-negative" if numeric < 0 else ""
+    class_attribute = f' class="{css_class}"' if css_class else ""
+    return f"<span{class_attribute}>{rendered}</span>"
+
+
+def _market_outcomes_html(viewpoint: dict[str, object], *, summary: bool = False) -> str:
     outcomes = cast(list[dict[str, object]], viewpoint["market_outcomes"])
     if not outcomes:
-        return '<p class="muted">尚未提取可证伪命题，暂时无法关联市场变化。</p>'
+        message = (
+            "最新发言尚未提取可证伪命题，暂时无法关联市场变化。"
+            if summary
+            else "尚未提取可证伪命题，暂时无法关联市场变化。"
+        )
+        return f'<p class="muted">{message}</p>'
     rows = []
     for outcome in outcomes:
         ticker = escape(_text(outcome.get("ticker")))
@@ -911,15 +931,18 @@ def _market_outcomes_html(viewpoint: dict[str, object]) -> str:
         horizon_text = "未设期限" if horizon is None else f"{horizon} 天"
         if outcome.get("resolved_at") is None:
             result = "等待结果"
+        elif summary:
+            result = _market_change_html("超额变化", outcome.get("excess_return"))
         else:
             result = (
-                f"标的变化 {_percent(outcome.get('raw_return'))} · "
-                f"基准变化 {_percent(outcome.get('benchmark_return'))} · "
-                f"超额变化 {_percent(outcome.get('excess_return'))}"
+                f"{_market_change_html('标的变化', outcome.get('raw_return'))} · "
+                f"{_market_change_html('基准变化', outcome.get('benchmark_return'))} · "
+                f"{_market_change_html('超额变化', outcome.get('excess_return'))}"
             )
+        row_class = "market-row market-summary" if summary else "market-row"
         rows.append(
-            f'<div class="market-row"><strong>{ticker} · {direction} · {horizon_text}</strong>'
-            f'<span class="muted">{escape(result)}</span></div>'
+            f'<div class="{row_class}"><strong>{ticker} · {direction} · {horizon_text}</strong>'
+            f'<span class="muted">{result}</span></div>'
         )
     return "".join(rows)
 
@@ -982,6 +1005,8 @@ def _viewpoint_cluster_card(cluster: dict[str, object]) -> str:
   <p class="muted">{escape(grouping)}<br>
   首次记录 {_fmt_ts(cluster.get("first_at"))} · 最近强化 {_fmt_ts(cluster.get("latest_at"))}</p>
   <p class="snippet">最新依据「{latest_snippet}」</p>
+  <p class="small"><strong>最新发言的市场关系</strong></p>
+  {_market_outcomes_html(viewpoints[0], summary=True)}
   <details><summary>展开 {cluster["statement_count"]} 条相关发言</summary>
   {"".join(statements)}</details>
 </section>"""
