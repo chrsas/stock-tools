@@ -14,9 +14,9 @@ defineProps<{ item: Row; showLabels?: boolean }>();
       <a :href="`/posts/${item.post_id}`">{{ postTitle(item) }}</a>
     </header>
     <div v-if="showLabels" class="pills">
-      <span v-if="item.label_first_hand_info">第一手信息</span>
-      <span v-if="item.label_transferable_framework">可迁移框架</span>
-      <span v-if="item.label_reasoned_non_consensus">有据非共识</span>
+      <span v-if="item.label_first_hand_info" class="lbl lbl-first">第一手信息</span>
+      <span v-if="item.label_transferable_framework" class="lbl lbl-frame">可迁移框架</span>
+      <span v-if="item.label_reasoned_non_consensus" class="lbl lbl-reason">有据非共识</span>
       <span>{{ item.post_type }}</span>
     </div>
     <p>{{ item.status?.human_label }}</p>
