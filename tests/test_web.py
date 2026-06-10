@@ -146,6 +146,17 @@ def _request(
     return response.status, response_headers, content
 
 
+def _request_bytes(server: ArchiveHttpServer, path: str) -> tuple[int, dict[str, str], bytes]:
+    host, port = cast(tuple[str, int], server.server_address)
+    connection = http.client.HTTPConnection(host, port, timeout=5)
+    connection.request("GET", path)
+    response = connection.getresponse()
+    content = response.read()
+    response_headers = {key: value for key, value in response.getheaders()}
+    connection.close()
+    return response.status, response_headers, content
+
+
 def _read_post_row(server: ArchiveHttpServer) -> tuple[str, int]:
     connection = connect_database(server.db_path)
     try:
@@ -195,6 +206,13 @@ def test_layout_offers_persistent_light_dark_and_system_themes(
     assert status == 200
     assert '<div id="app"></div>' in html
     asset_paths = re.findall(r'(?:src|href)="(/assets/[^"]+)"', html)
+    assert '<link rel="icon" type="image/png" href="/favicon.png">' in html
+    assert '<link rel="apple-touch-icon" href="/app-icon.png">' in html
+    favicon_response = _request_bytes(web_server, "/favicon.png")
+    app_icon_response = _request_bytes(web_server, "/app-icon.png")
+    assert favicon_response[0] == app_icon_response[0] == 200
+    assert favicon_response[1]["Content-Type"] == "image/png"
+    assert app_icon_response[1]["Content-Type"] == "image/png"
     assert 'localStorage.getItem("kol-theme")' in html
     assert html.index('localStorage.getItem("kol-theme")') < html.index('<div id="app"></div>')
     asset_responses = [_request(web_server, "GET", path) for path in asset_paths]

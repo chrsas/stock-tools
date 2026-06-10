@@ -302,7 +302,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                     )
                 )
                 return
-            if path.startswith("/assets/"):
+            if path.startswith("/assets/") or path in {"/favicon.png", "/app-icon.png"}:
                 self._send_asset(path)
                 return
             if path == "/" or self._author_uid(path) is not None or self._post_id(path) is not None:

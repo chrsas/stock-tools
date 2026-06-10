@@ -70,7 +70,7 @@ onMounted(() => { applyTheme(); refresh(); });
   <div class="shell">
     <nav class="sidebar">
       <a class="logo" href="/">
-        <span class="logo-mark">照</span>
+        <img class="logo-mark" src="/favicon.png" alt="">
         <span class="logo-text"><strong>KOL 照妖镜</strong><small class="muted">市场观点核验终端</small></span>
       </a>
       <ul class="nav">
