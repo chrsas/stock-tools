@@ -694,7 +694,50 @@ def _descriptive_market_snapshot(
         "benchmark_return": benchmark_return,
         "excess_return": raw_return - benchmark_return,
         "method_version": "descriptive-common-close-v1",
+        "series": _daily_series(
+            connection, ticker, benchmark_ticker, str(start["date"]), str(end["date"])
+        ),
     }
+
+
+def _daily_series(
+    connection: sqlite3.Connection,
+    ticker: str,
+    benchmark_ticker: str,
+    start_date: str,
+    end_date: str,
+) -> list[dict[str, object]]:
+    """Per-trading-day asset OHLC and benchmark close across the snapshot window.
+
+    OHLC is NULL for close-only CSV rows; the frontend draws a close line when open is
+    absent and a candlestick when it is present (Xueqiu kline bars).
+    """
+    rows = connection.execute(
+        """
+        SELECT asset.date AS date,
+               asset.open AS asset_open,
+               asset.high AS asset_high,
+               asset.low AS asset_low,
+               asset.close AS asset_close,
+               benchmark.close AS benchmark_close
+        FROM prices asset
+        JOIN prices benchmark ON benchmark.date = asset.date AND benchmark.ticker = ?
+        WHERE asset.ticker = ? AND asset.date >= ? AND asset.date <= ?
+        ORDER BY asset.date ASC
+        """,
+        (benchmark_ticker, ticker, start_date, end_date),
+    ).fetchall()
+    return [
+        {
+            "date": row["date"],
+            "open": row["asset_open"],
+            "high": row["asset_high"],
+            "low": row["asset_low"],
+            "close": row["asset_close"],
+            "benchmark_close": row["benchmark_close"],
+        }
+        for row in rows
+    ]
 
 
 def author_recent_viewpoint_clusters(

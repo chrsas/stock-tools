@@ -32,6 +32,12 @@ from kol_archive.database import connect_database, initialize_database
 from kol_archive.enrich import load_enrich_settings, request_enrichment
 from kol_archive.image_enrich import load_vision_settings, run_image_enrichment
 from kol_archive.images import ImageDownloader, ImageDownloadSettings
+from kol_archive.kline import (
+    DEFAULT_BAR_COUNT,
+    discover_tickers,
+    fetch_and_store,
+    validated_symbol,
+)
 from kol_archive.maintenance import (
     create_verified_backup,
     export_archive,
@@ -630,6 +636,37 @@ def _download_images_command(args: argparse.Namespace) -> None:
         connection.close()
 
 
+def _fetch_kline_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    prices_config = config.get("prices") or {}
+    benchmark = (args.benchmark or str(prices_config.get("benchmark_ticker") or "SH000300")).upper()
+    connection, _ = _connect_existing_archive(_resolve_db_path(args.path, config))
+    client = None
+    try:
+        tickers = (
+            [validated_symbol(ticker) for ticker in args.ticker]
+            if args.ticker
+            else discover_tickers(connection)
+        )
+        # The benchmark must share dates with each asset for the snapshot join, so always
+        # pull it alongside whatever assets we fetch.
+        if benchmark not in tickers:
+            tickers.append(benchmark)
+        if not tickers:
+            note = "no tracked tickers; pass --ticker"
+            _print_json({"tickers": 0, "bars": 0, "failures": [], "note": note})
+            return
+        client = _build_collector_client(config)
+        summary = fetch_and_store(connection, client, tickers, count=args.count)
+        _print_json(
+            {"tickers": summary.tickers, "bars": summary.bars, "failures": list(summary.failures)}
+        )
+    finally:
+        if client is not None:
+            client.close()
+        connection.close()
+
+
 def _ocr_images_command(args: argparse.Namespace) -> None:
     config = load_config(args.config_dir)
     connection, archive = _connect_existing_archive(_resolve_db_path(args.path, config))
@@ -832,6 +869,24 @@ def main() -> None:
     import_names_parser.add_argument("--path", type=Path)
     import_names_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     import_names_parser.set_defaults(handler=_import_ticker_names_command)
+    fetch_kline_parser = subparsers.add_parser(
+        "fetch-kline", help="fetch daily OHLC bars from Xueqiu via the dedicated browser"
+    )
+    fetch_kline_parser.add_argument(
+        "--ticker",
+        action="append",
+        help="ticker to fetch (repeatable); default: every tracked ticker",
+    )
+    fetch_kline_parser.add_argument(
+        "--benchmark",
+        help="benchmark ticker to include (default: prices.benchmark_ticker or SH000300)",
+    )
+    fetch_kline_parser.add_argument(
+        "--count", type=int, default=DEFAULT_BAR_COUNT, help="daily bars to pull per ticker"
+    )
+    fetch_kline_parser.add_argument("--path", type=Path)
+    fetch_kline_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    fetch_kline_parser.set_defaults(handler=_fetch_kline_command)
     download_images_parser = subparsers.add_parser(
         "download-images", help="fetch and store image bytes for archived versions"
     )

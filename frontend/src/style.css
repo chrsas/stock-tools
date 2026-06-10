@@ -105,13 +105,20 @@ small { font-size: .8rem; }
 .author-layout { display: grid; grid-template-columns: 272px 1fr; gap: 20px; align-items: start; }
 .roster { position: sticky; top: 80px; display: grid; gap: 4px; padding: 13px; }
 .roster-head { display: flex; align-items: baseline; justify-content: space-between; padding: 2px 4px 8px; }
-.author-option { display: grid; gap: .3rem; padding: 10px; border-radius: var(--radius-sm); color: inherit; border: 1px solid transparent; transition: background .12s; }
+.author-option { display: grid; gap: .35rem; padding: 10px; border-radius: var(--radius-sm); border: 1px solid transparent; transition: background .12s; }
 .author-option:hover { background: var(--surface-2); }
 .author-option.active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 26%, transparent); }
+.author-pick { display: grid; gap: .3rem; color: inherit; }
+.author-option .xq-jump { justify-self: start; }
 .roster-note { padding: 9px 5px 2px; border-top: 1px solid var(--line-soft); margin: 5px 0 0; font-size: .8rem; }
 
 .stream { display: grid; gap: 14px; }
-.author-banner { padding: 1rem 1.1rem; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.author-banner { display: flex; align-items: center; justify-content: space-between; gap: .7rem; padding: 1rem 1.1rem; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+
+.xq-jump { display: inline-flex; align-items: center; gap: .2rem; padding: 2px 9px; font-size: .76rem; line-height: 1.6;
+  color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  border-radius: 999px; white-space: nowrap; transition: background .12s; }
+.xq-jump:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 
 .author-badge { display: flex; gap: .7rem; align-items: center; }
 .author-badge img, .avatar-placeholder { width: 42px; height: 42px; border-radius: 10px; background: var(--surface-3);
@@ -155,6 +162,10 @@ summary:hover { color: var(--accent); }
   background: var(--surface-2); border: 1px solid var(--line-soft); }
 .market-row strong { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: .9rem; }
 .market-row span { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: .82rem; }
+
+.market-chart { margin: .55rem 0 0; display: grid; gap: .3rem; }
+.market-chart-canvas { width: 100%; height: 180px; }
+.market-chart figcaption { font-size: .72rem; }
 
 /* ---------------------------------------------------------------- queue */
 .toolbar { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }

@@ -11,7 +11,6 @@ defineProps<{ item: Row }>();
     <span v-else class="avatar-placeholder"></span>
     <span>
       <strong>{{ authorName(item) }}</strong>
-      <small>uid {{ item.author_platform_uid }}</small>
     </span>
   </div>
 </template>

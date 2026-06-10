@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { loadPage, mutate, type Row } from "./api";
-import { authorName, fmtTime, postTitle } from "./format";
+import { authorName, fmtTime, postTitle, xueqiuUrl } from "./format";
 import AuthorBadge from "./components/AuthorBadge.vue";
 import PostLinks from "./components/PostLinks.vue";
 import QueueCard from "./components/QueueCard.vue";
@@ -106,15 +106,19 @@ onMounted(() => { applyTheme(); refresh(); });
           <div class="author-layout">
             <aside class="panel roster">
               <div class="roster-head"><span class="eyebrow">博主</span><small class="muted">{{ page.authors.length }} 位在档</small></div>
-              <a v-for="author in page.authors" :key="author.author_platform_uid" class="author-option" :class="{ active: author.author_platform_uid === page.selected?.author_platform_uid }" :href="`/?author=${encodeURIComponent(author.author_platform_uid)}`">
-                <AuthorBadge :item="author" />
-                <small class="muted">观点发言 {{ author.viewpoint_count }} · 已评估观点 {{ author.evaluated_viewpoint_count }}</small>
-              </a>
+              <div v-for="author in page.authors" :key="author.author_platform_uid" class="author-option" :class="{ active: author.author_platform_uid === page.selected?.author_platform_uid }">
+                <a class="author-pick" :href="`/?author=${encodeURIComponent(author.author_platform_uid)}`">
+                  <AuthorBadge :item="author" />
+                  <small class="muted">观点发言 {{ author.viewpoint_count }} · 已评估观点 {{ author.evaluated_viewpoint_count }}</small>
+                </a>
+                <a v-if="xueqiuUrl(author)" class="xq-jump" :href="xueqiuUrl(author)" target="_blank" rel="noopener noreferrer" title="在雪球查看主页">雪球 ↗</a>
+              </div>
               <p class="roster-note muted">仅展示观点构成，不做跨博主排名或命中率评分。</p>
             </aside>
             <section class="stream">
               <div v-if="page.selected" class="author-banner">
                 <AuthorBadge :item="page.selected" />
+                <a v-if="xueqiuUrl(page.selected)" class="xq-jump" :href="xueqiuUrl(page.selected)" target="_blank" rel="noopener noreferrer" title="在雪球查看主页">雪球主页 ↗</a>
               </div>
               <div class="stream-label"><span class="eyebrow">最近 {{ page.clusters.length }} 个观点簇</span></div>
               <p v-if="page.clusters.length && !hasMarketFeedback(page.clusters)" class="empty soft">

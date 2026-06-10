@@ -28,3 +28,7 @@ export function fmtTime(value: unknown): string {
 export function originalUrl(item: Row): string {
   return /^https?:\/\//.test(String(item.url || "")) ? item.url : "";
 }
+
+export function xueqiuUrl(item: Row): string {
+  return item.author_platform_uid ? `https://xueqiu.com/u/${encodeURIComponent(item.author_platform_uid)}` : "";
+}

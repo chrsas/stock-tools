@@ -224,6 +224,10 @@ CREATE TABLE IF NOT EXISTS prices (
     ticker TEXT NOT NULL,
     date TEXT NOT NULL,
     close REAL NOT NULL,
+    open REAL,
+    high REAL,
+    low REAL,
+    volume REAL,
     PRIMARY KEY(ticker, date)
 );
 
@@ -390,6 +394,11 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         "stance_summary",
         "stance_summary TEXT NOT NULL DEFAULT ''",
     )
+    # Daily OHLC, added so Xueqiu kline bars can back a candlestick view. CSV price
+    # imports only carry close, so these stay NULL for those rows; the chart falls
+    # back to a close line when open/high/low are absent.
+    for column in ("open", "high", "low", "volume"):
+        _ensure_column(connection, "prices", column, f"{column} REAL")
     _backfill_market_relation(connection)
     connection.executescript(
         """

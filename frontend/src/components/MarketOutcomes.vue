@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Row } from "../api";
+import MarketChart from "./MarketChart.vue";
 
 defineProps<{ outcomes?: Row[]; snapshot?: Row | null }>();
 
@@ -19,6 +20,7 @@ function percent(value: unknown): string {
       {{ percent(snapshot.benchmark_return) }}
     </span>
     <small>{{ snapshot.start_date }} 至 {{ snapshot.end_date }} · 描述性共同收盘口径</small>
+    <MarketChart :series="snapshot.series" :benchmark-ticker="snapshot.benchmark_ticker" />
   </div>
   <div v-for="outcome in outcomes" :key="outcome.claim_id" class="market-row">
     <strong>{{ outcome.ticker }} · {{ outcome.direction }} · {{ outcome.horizon_days == null ? "未设期限" : `${outcome.horizon_days} 天` }}</strong>

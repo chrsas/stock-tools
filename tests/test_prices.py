@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from kol_archive.database import connect_database, initialize_database
+from kol_archive.kline import DailyBar, store_daily_bars
 from kol_archive.prices import import_prices_csv, import_ticker_names_csv
 
 
@@ -33,6 +34,26 @@ def test_import_prices_csv_is_idempotent_and_imports_optional_names(tmp_path: Pa
         connection.execute("SELECT name FROM ticker_names WHERE ticker = 'SZ300973'").fetchone()[0]
         == "立高食品"
     )
+    connection.close()
+
+
+def test_import_prices_csv_clears_existing_ohlc_fields(tmp_path: Path) -> None:
+    connection = connect_database(":memory:")
+    initialize_database(connection)
+    store_daily_bars(
+        connection,
+        "SH688303",
+        [DailyBar("2026-06-04", open=10, high=11, low=9, close=10.5, volume=1000)],
+    )
+    source = tmp_path / "prices.csv"
+    source.write_text("ticker,date,close\nSH688303,2026-06-04,12\n", encoding="utf-8")
+
+    import_prices_csv(connection, source)
+
+    row = connection.execute(
+        "SELECT close, open, high, low, volume FROM prices WHERE ticker = 'SH688303'"
+    ).fetchone()
+    assert tuple(row) == (12.0, None, None, None, None)
     connection.close()
 
 

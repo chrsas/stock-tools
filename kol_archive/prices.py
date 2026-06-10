@@ -64,7 +64,12 @@ def import_prices_csv(connection: sqlite3.Connection, path: Path) -> PriceImport
         connection.executemany(
             """
             INSERT INTO prices(ticker, date, close) VALUES (?, ?, ?)
-            ON CONFLICT(ticker, date) DO UPDATE SET close = excluded.close
+            ON CONFLICT(ticker, date) DO UPDATE SET
+                close = excluded.close,
+                open = NULL,
+                high = NULL,
+                low = NULL,
+                volume = NULL
             """,
             ((ticker, row_date, close) for ticker, row_date, close, _ in rows),
         )
