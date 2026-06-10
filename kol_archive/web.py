@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import re
 import secrets
 import sqlite3
 from collections.abc import Callable
@@ -17,7 +18,7 @@ from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
 from kol_archive.config import load_config
-from kol_archive.database import connect_database
+from kol_archive.database import connect_database, initialize_database
 from kol_archive.maintenance import redact_text
 from kol_archive.models import FeedState, WatchMode
 from kol_archive.presentation import (
@@ -44,7 +45,9 @@ class WebSettings:
     port: int = 8765
     timeline_limit: int = 50
     window_days: int = 30
-    enrich_prompt_version: str = "enrich-v1"
+    enrich_prompt_version: str = "enrich-v2"
+    market_benchmark_ticker: str = "SH000300"
+    viewpoint_cluster_window_days: int = 7
 
 
 class ArchiveHttpServer(ThreadingHTTPServer):
@@ -54,6 +57,8 @@ class ArchiveHttpServer(ThreadingHTTPServer):
     timeline_limit: int
     window_days: int
     enrich_prompt_version: str
+    market_benchmark_ticker: str
+    viewpoint_cluster_window_days: int
 
 
 def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
@@ -72,13 +77,22 @@ def load_web_settings(
     web = _section(config, "web")
     monitoring = _section(config, "monitoring")
     llm = _section(config, "llm")
+    prices = _section(config, "prices")
     settings = WebSettings(
         bind_host=str(bind_host or web.get("bind_host") or "127.0.0.1").strip(),
         port=int(port if port is not None else web.get("port") or 8765),
         timeline_limit=int(web.get("timeline_limit") or 50),
         window_days=int(monitoring.get("window_days") or 30),
-        enrich_prompt_version=str(llm.get("enrich_prompt_version") or "enrich-v1").strip()
-        or "enrich-v1",
+        enrich_prompt_version=str(
+            web.get("enrich_prompt_version") or llm.get("enrich_prompt_version") or "enrich-v2"
+        ).strip()
+        or "enrich-v2",
+        market_benchmark_ticker=str(prices.get("benchmark_ticker") or "SH000300").strip(),
+        viewpoint_cluster_window_days=int(
+            7
+            if web.get("viewpoint_cluster_window_days") is None
+            else web["viewpoint_cluster_window_days"]
+        ),
     )
     if not settings.bind_host or settings.bind_host in {"0.0.0.0", "::", "[::]"}:
         raise ValueError("web.bind_host must be a loopback or explicit tailnet address")
@@ -88,6 +102,10 @@ def load_web_settings(
         raise ValueError("web.timeline_limit must be positive")
     if settings.window_days < 1:
         raise ValueError("monitoring.window_days must be positive")
+    if not re.fullmatch(r"(?:SH|SZ|BJ)\d{6}", settings.market_benchmark_ticker):
+        raise ValueError("prices.benchmark_ticker must be an A-share ticker")
+    if settings.viewpoint_cluster_window_days < 1:
+        raise ValueError("web.viewpoint_cluster_window_days must be positive")
     return settings
 
 
@@ -102,6 +120,11 @@ def create_server(
         raise FileNotFoundError(f"SQLite archive does not exist: {db_path}")
     if not WEB_DIST.joinpath("index.html").is_file():
         raise FileNotFoundError("Vue frontend is missing. Run npm run build in frontend.")
+    connection = connect_database(db_path)
+    try:
+        initialize_database(connection)
+    finally:
+        connection.close()
     server = ArchiveHttpServer((settings.bind_host, settings.port), ArchiveRequestHandler)
     server.db_path = db_path
     server.config_dir = config_dir
@@ -109,6 +132,8 @@ def create_server(
     server.timeline_limit = settings.timeline_limit
     server.window_days = settings.window_days
     server.enrich_prompt_version = settings.enrich_prompt_version
+    server.market_benchmark_ticker = settings.market_benchmark_ticker
+    server.viewpoint_cluster_window_days = settings.viewpoint_cluster_window_days
     return server
 
 
@@ -162,6 +187,8 @@ def _home_payload(
     prompt_version: str,
     limit: int,
     query: str,
+    benchmark_ticker: str = "SH000300",
+    cluster_window_days: int = 7,
 ) -> dict[str, object]:
     values = parse_qs(query)
     view = (values.get("view") or ["authors"])[0]
@@ -202,7 +229,12 @@ def _home_payload(
     )
     clusters = (
         author_recent_viewpoint_clusters(
-            connection, str(selected["author_platform_uid"]), prompt_version, limit=10
+            connection,
+            str(selected["author_platform_uid"]),
+            prompt_version,
+            limit=10,
+            benchmark_ticker=benchmark_ticker,
+            cluster_window_days=cluster_window_days,
         )
         if selected
         else []
@@ -230,6 +262,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                                 self.server.enrich_prompt_version,
                                 self.server.timeline_limit,
                                 parsed.query,
+                                self.server.market_benchmark_ticker,
+                                self.server.viewpoint_cluster_window_days,
                             ),
                             "csrf_token": self.server.csrf_token,
                         },
@@ -247,6 +281,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                                 connection,
                                 author_uid,
                                 prompt_version=self.server.enrich_prompt_version,
+                                benchmark_ticker=self.server.market_benchmark_ticker,
+                                cluster_window_days=self.server.viewpoint_cluster_window_days,
                             ),
                             "csrf_token": self.server.csrf_token,
                         },

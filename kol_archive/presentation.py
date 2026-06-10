@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from difflib import unified_diff
 from typing import Any, cast
 
@@ -18,6 +18,7 @@ _MARKET_RELATED_VIEWPOINT_SQL = """
 (e.is_market_related = 1
  OR EXISTS (SELECT 1 FROM claims market_claim WHERE market_claim.version_id = e.version_id))
 """
+_A_SHARE_TIMEZONE = timezone(timedelta(hours=8))
 
 
 def _row_dict(
@@ -490,7 +491,8 @@ def author_recent_viewpoints(
             v.raw_payload,
             v.first_observed_at AS viewpoint_first_observed_at,
             e.rationale AS enrichment_rationale,
-            e.evidence_snippet AS enrichment_evidence_snippet
+            e.evidence_snippet AS enrichment_evidence_snippet,
+            e.stance_summary AS enrichment_stance_summary
         FROM posts p
         JOIN authors a ON a.id = p.author_id
         JOIN post_versions v ON v.id = p.current_version_id
@@ -573,9 +575,14 @@ def _viewpoint_ticker(viewpoint: dict[str, object]) -> str | None:
         if isinstance(value, dict):
             correlation = value.get("stockCorrelation")
             if isinstance(correlation, list):
-                tickers.update(
-                    str(symbol) for symbol in correlation if _CN_TICKER.fullmatch(str(symbol))
-                )
+                for item in correlation:
+                    if _CN_TICKER.fullmatch(str(item)):
+                        tickers.add(str(item))
+                    elif isinstance(item, dict):
+                        for key in ("symbol", "ticker", "code"):
+                            symbol = str(item.get(key) or "")
+                            if _CN_TICKER.fullmatch(symbol):
+                                tickers.add(symbol)
             for child in value.values():
                 visit(child)
         elif isinstance(value, list):
@@ -598,7 +605,96 @@ def _viewpoint_ticker_name(viewpoint: dict[str, object], ticker: str) -> str | N
     for name, found_ticker in _TICKER_NAME.findall(str(viewpoint.get("current_text") or "")):
         if found_ticker == ticker:
             return str(name)
-    return None
+    raw = viewpoint.get("raw_payload")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    def visit(value: object) -> str | None:
+        if isinstance(value, dict):
+            symbols = {str(value.get(key) or "") for key in ("symbol", "ticker", "code")}
+            if ticker in symbols:
+                for key in ("name", "stockName", "title"):
+                    name = str(value.get(key) or "").strip()
+                    if name:
+                        return name
+            for child in value.values():
+                found = visit(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = visit(child)
+                if found:
+                    return found
+        return None
+
+    return visit(payload)
+
+
+def _local_ticker_name(connection: sqlite3.Connection, ticker: str) -> str | None:
+    row = connection.execute("SELECT name FROM ticker_names WHERE ticker = ?", (ticker,)).fetchone()
+    return str(row["name"]) if row is not None else None
+
+
+def _descriptive_market_snapshot(
+    connection: sqlite3.Connection,
+    ticker: str,
+    viewpoint_at: object,
+    benchmark_ticker: str,
+) -> dict[str, object] | None:
+    try:
+        viewpoint_date = (
+            datetime.fromisoformat(str(viewpoint_at))
+            .astimezone(_A_SHARE_TIMEZONE)
+            .date()
+            .isoformat()
+        )
+    except ValueError:
+        return None
+    start = connection.execute(
+        """
+        SELECT asset.date, asset.close AS asset_close, benchmark.close AS benchmark_close
+        FROM prices asset
+        JOIN prices benchmark ON benchmark.date = asset.date AND benchmark.ticker = ?
+        WHERE asset.ticker = ? AND asset.date < ?
+        ORDER BY asset.date DESC
+        LIMIT 1
+        """,
+        (benchmark_ticker, ticker, viewpoint_date),
+    ).fetchone()
+    if start is None:
+        return None
+    end = connection.execute(
+        """
+        SELECT asset.date, asset.close AS asset_close, benchmark.close AS benchmark_close
+        FROM prices asset
+        JOIN prices benchmark ON benchmark.date = asset.date AND benchmark.ticker = ?
+        WHERE asset.ticker = ? AND asset.date >= ?
+        ORDER BY asset.date DESC
+        LIMIT 1
+        """,
+        (benchmark_ticker, ticker, viewpoint_date),
+    ).fetchone()
+    if end is None:
+        return None
+    if float(start["asset_close"]) == 0 or float(start["benchmark_close"]) == 0:
+        return None
+    raw_return = float(end["asset_close"]) / float(start["asset_close"]) - 1
+    benchmark_return = float(end["benchmark_close"]) / float(start["benchmark_close"]) - 1
+    return {
+        "ticker": ticker,
+        "benchmark_ticker": benchmark_ticker,
+        "start_date": start["date"],
+        "end_date": end["date"],
+        "raw_return": raw_return,
+        "benchmark_return": benchmark_return,
+        "excess_return": raw_return - benchmark_return,
+        "method_version": "descriptive-common-close-v1",
+    }
 
 
 def author_recent_viewpoint_clusters(
@@ -607,8 +703,12 @@ def author_recent_viewpoint_clusters(
     prompt_version: str,
     *,
     limit: int = 10,
+    benchmark_ticker: str = "SH000300",
+    cluster_window_days: int = 7,
 ) -> list[dict[str, object]]:
     """Group one author's recent viewpoints by explicit A-share ticker evidence."""
+    if cluster_window_days < 1:
+        raise ValueError("cluster_window_days must be positive")
     viewpoints = author_recent_viewpoints(
         connection, platform_uid, prompt_version, limit=max(limit * 10, 50)
     )
@@ -622,7 +722,7 @@ def author_recent_viewpoint_clusters(
                 if ticker
                 and ticker == item["ticker"]
                 and _within_viewpoint_cluster_window(
-                    item["first_at"], viewpoint.get("viewpoint_at")
+                    item["first_at"], viewpoint.get("viewpoint_at"), days=cluster_window_days
                 )
             ),
             None,
@@ -643,12 +743,19 @@ def author_recent_viewpoint_clusters(
         primary = cast(str | None, cluster["ticker"])
         name = None
         if primary:
+            name = _local_ticker_name(connection, primary)
             for item in items:
-                name = _viewpoint_ticker_name(item, primary)
-                if name:
+                payload_name = _viewpoint_ticker_name(item, primary)
+                if payload_name:
+                    name = payload_name
                     break
         cluster["title"] = f"{name}（{primary}）" if name and primary else primary or "独立观点"
         cluster["statement_count"] = len(items)
+        cluster["market_snapshot"] = (
+            _descriptive_market_snapshot(connection, primary, cluster["first_at"], benchmark_ticker)
+            if primary
+            else None
+        )
     return clusters[:limit]
 
 
@@ -711,6 +818,8 @@ def author_profile(
     *,
     limit: int = 30,
     prompt_version: str = "enrich-v1",
+    benchmark_ticker: str = "SH000300",
+    cluster_window_days: int = 7,
 ) -> dict[str, object]:
     if limit < 1:
         raise ValueError("author post limit must be positive")
@@ -810,7 +919,12 @@ def author_profile(
         "author": _row_dict(row),
         "posts": [_post_projection(post) for post in posts],
         "viewpoint_clusters": author_recent_viewpoint_clusters(
-            connection, platform_uid, prompt_version, limit=10
+            connection,
+            platform_uid,
+            prompt_version,
+            limit=10,
+            benchmark_ticker=benchmark_ticker,
+            cluster_window_days=cluster_window_days,
         ),
     }
 
@@ -1031,6 +1145,7 @@ def build_evidence_card(connection: sqlite3.Connection, post_id: int) -> dict[st
                 label_reasoned_non_consensus,
                 rationale,
                 evidence_snippet,
+                stance_summary,
                 model,
                 prompt_version,
                 created_at

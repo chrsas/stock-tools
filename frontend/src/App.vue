@@ -51,6 +51,11 @@ function submitAttention(event: Event) {
   });
 }
 
+function hasMarketFeedback(clusters: Row[]): boolean {
+  return clusters.some((cluster) => cluster.market_snapshot
+    || cluster.viewpoints?.some((viewpoint: Row) => viewpoint.market_outcomes?.length));
+}
+
 onMounted(() => { applyTheme(); refresh(); });
 </script>
 
@@ -86,6 +91,9 @@ onMounted(() => { applyTheme(); refresh(); });
         <section>
           <AuthorBadge v-if="page.selected" :item="page.selected" />
           <h2>最近 {{ page.clusters.length }} 个观点簇</h2>
+          <p v-if="page.clusters.length && !hasMarketFeedback(page.clusters)" class="muted">
+            尚未导入可用行情或记录市场结果，当前先展示观点证据。
+          </p>
           <ViewpointCluster v-for="cluster in page.clusters" :key="cluster.title + cluster.latest_at" :cluster="cluster" />
           <p v-if="!page.clusters.length">最近还没有具备明确市场关联的观点发言。</p>
         </section>
@@ -119,6 +127,9 @@ onMounted(() => { applyTheme(); refresh(); });
       <div class="page-title"><AuthorBadge :item="page.profile.author" /><h1>{{ authorName(page.profile.author) }}</h1></div>
       <p>{{ page.profile.author.author_description }}</p>
       <h2>最近观点簇与市场变化</h2>
+      <p v-if="page.profile.viewpoint_clusters.length && !hasMarketFeedback(page.profile.viewpoint_clusters)" class="muted">
+        尚未导入可用行情或记录市场结果，当前先展示观点证据。
+      </p>
       <ViewpointCluster v-for="cluster in page.profile.viewpoint_clusters" :key="cluster.title + cluster.latest_at" :cluster="cluster" />
       <h2>最近帖子</h2>
       <TimelineCard v-for="item in page.profile.posts" :key="item.post_id" :item="item" />

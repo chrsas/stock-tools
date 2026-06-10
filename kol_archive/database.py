@@ -188,6 +188,7 @@ CREATE TABLE IF NOT EXISTS enrichments (
     is_market_related INTEGER NOT NULL CHECK(is_market_related IN (0, 1)),
     rationale TEXT NOT NULL,
     evidence_snippet TEXT NOT NULL,
+    stance_summary TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL,
     prompt_version TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -224,6 +225,11 @@ CREATE TABLE IF NOT EXISTS prices (
     date TEXT NOT NULL,
     close REAL NOT NULL,
     PRIMARY KEY(ticker, date)
+);
+
+CREATE TABLE IF NOT EXISTS ticker_names (
+    ticker TEXT PRIMARY KEY,
+    name TEXT NOT NULL
 );
 
 -- Append-only evidence: one row per image-fetch attempt for a version. A
@@ -377,6 +383,12 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         "enrichments",
         "is_market_related",
         "is_market_related INTEGER CHECK(is_market_related IN (0, 1))",
+    )
+    _ensure_column(
+        connection,
+        "enrichments",
+        "stance_summary",
+        "stance_summary TEXT NOT NULL DEFAULT ''",
     )
     _backfill_market_relation(connection)
     connection.executescript(

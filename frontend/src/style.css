@@ -33,6 +33,11 @@ textarea { min-height: 6rem; padding: .7rem; }
 .notice, .error { padding: .8rem 1rem; border-radius: 8px; background: #fff2c7; color: #604900; }
 .error { background: #ffe0e0; color: #7d1717; }
 .market-row { display: grid; gap: .3rem; padding: .7rem 0; border-top: 1px solid #ccd5df; }
+.market-snapshot { display: grid; gap: .25rem; margin: .9rem 0; padding: .9rem 1rem; border-radius: 10px; background: color-mix(in srgb, Canvas 88%, #1768ac 12%); }
+.market-snapshot strong { font-size: 1.35rem; }
+.eyebrow { color: #6a7683; font-size: .78rem; font-weight: 700; letter-spacing: .04em; }
+.cluster-rationale { display: grid; gap: .25rem; font-size: 1.05rem; line-height: 1.55; }
+.queue-preview { display: -webkit-box; margin: 1rem 0; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .positive { color: #14804a; }
 .negative { color: #c0362c; }
 @media (max-width: 760px) {

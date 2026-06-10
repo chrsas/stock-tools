@@ -11,8 +11,14 @@ defineProps<{ cluster: Row }>();
   <article class="card">
     <header><h2>{{ cluster.title }}</h2><span class="pill">{{ cluster.statement_count }} 次相关发言</span></header>
     <p class="muted">首次记录 {{ fmtTime(cluster.first_at) }} · 最近强化 {{ fmtTime(cluster.latest_at) }}</p>
-    <p>最新依据「{{ cluster.viewpoints?.[0]?.enrichment_evidence_snippet || "无依据片段" }}」</p>
-    <MarketOutcomes :outcomes="cluster.viewpoints?.[0]?.market_outcomes" />
+    <p class="cluster-rationale">
+      <b>{{ cluster.viewpoints?.[0]?.enrichment_stance_summary ? "立场摘要" : "富化判断" }}</b>
+      {{ cluster.viewpoints?.[0]?.enrichment_stance_summary || cluster.viewpoints?.[0]?.enrichment_rationale || "暂无富化判断" }}
+    </p>
+    <MarketOutcomes :snapshot="cluster.market_snapshot" :outcomes="cluster.viewpoints?.[0]?.market_outcomes" />
+    <blockquote v-if="cluster.viewpoints?.[0]?.enrichment_evidence_snippet">
+      {{ cluster.viewpoints[0].enrichment_evidence_snippet }}
+    </blockquote>
     <details>
       <summary>展开 {{ cluster.statement_count }} 条相关发言</summary>
       <section v-for="viewpoint in cluster.viewpoints" :key="viewpoint.post_id" class="statement">

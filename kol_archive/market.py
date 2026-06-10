@@ -22,10 +22,15 @@ def has_explicit_market_relation(content_text: str, raw_payload: str | None) -> 
     def visit(value: object) -> bool:
         if isinstance(value, dict):
             correlation = value.get("stockCorrelation")
-            if isinstance(correlation, list) and any(
-                _A_SHARE_TICKER.fullmatch(str(symbol)) for symbol in correlation
-            ):
-                return True
+            if isinstance(correlation, list):
+                for item in correlation:
+                    if _A_SHARE_TICKER.fullmatch(str(item)):
+                        return True
+                    if isinstance(item, dict) and any(
+                        _A_SHARE_TICKER.fullmatch(str(item.get(key) or ""))
+                        for key in ("symbol", "ticker", "code")
+                    ):
+                        return True
             return any(visit(child) for child in value.values())
         if isinstance(value, list):
             return any(visit(child) for child in value)

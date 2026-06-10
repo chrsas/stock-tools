@@ -106,6 +106,7 @@ def make_result(
     non_consensus: bool = False,
     post_type: str = "观点",
     snippet: str = "片段",
+    stance_summary: str = "",
 ) -> EnrichmentResult:
     return EnrichmentResult(
         post_type=post_type,
@@ -114,6 +115,7 @@ def make_result(
         label_reasoned_non_consensus=non_consensus,
         rationale="理由",
         evidence_snippet=snippet,
+        stance_summary=stance_summary,
     )
 
 
@@ -171,6 +173,7 @@ def test_request_enrichment_parses_structured_labels() -> None:
         "label_transferable_framework": False,
         "label_reasoned_non_consensus": True,
         "rationale": "给出原始调研数据并提出非共识判断",
+        "stance_summary": "作者认为门店结论与市场共识相反",
         "evidence_snippet": "我实地走访了三家门店",
     }
     with httpx.Client(transport=_llm_response(payload)) as client:
@@ -182,6 +185,7 @@ def test_request_enrichment_parses_structured_labels() -> None:
         label_reasoned_non_consensus=True,
         rationale="给出原始调研数据并提出非共识判断",
         evidence_snippet="我实地走访了三家门店",
+        stance_summary="作者认为门店结论与市场共识相反",
     )
 
 
@@ -308,6 +312,24 @@ def test_add_enrichment_is_idempotent_on_unique_key(archive: Archive) -> None:
 
     count = archive.connection.execute("SELECT COUNT(*) FROM enrichments").fetchone()[0]
     assert count == 1
+
+
+def test_add_enrichment_persists_stance_summary(archive: Archive) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post()])
+    [target] = archive.enrichment_targets("enrich-v1")
+
+    archive.add_enrichment(
+        target,
+        make_result(stance_summary="作者继续看好该标的"),
+        "test-model",
+        "enrich-v1",
+        BASE_TIME,
+    )
+
+    assert (
+        archive.connection.execute("SELECT stance_summary FROM enrichments").fetchone()[0]
+        == "作者继续看好该标的"
+    )
 
 
 def test_add_enrichment_persists_market_relation_from_archived_payload(archive: Archive) -> None:
@@ -664,6 +686,100 @@ def test_author_recent_viewpoint_clusters_groups_shared_nested_ticker(archive: A
         item["platform_post_id"]
         for item in cast(list[dict[str, object]], clusters[0]["viewpoints"])
     ] == ["reply", "original"]
+
+
+def test_author_recent_viewpoint_clusters_reads_structured_name_and_market_snapshot(
+    archive: Archive,
+) -> None:
+    viewpoint = dataclasses.replace(
+        make_post("structured", observed_at="2026-06-03T10:00:00+00:00", text="继续关注"),
+        posted_at_claimed=None,
+        raw_payload={
+            "stockCorrelation": [{"symbol": "SH688777", "name": "中控技术"}],
+        },
+    )
+    archive.record_feed_run(make_feed_run("2026-06-03T10:00:00+00:00"), [viewpoint])
+    _enrich(archive, "structured", make_result())
+    archive.connection.executemany(
+        "INSERT INTO prices(ticker, date, close) VALUES (?, ?, ?)",
+        [
+            ("SH688777", "2026-06-02", 10.0),
+            ("SH000300", "2026-06-02", 100.0),
+            ("SH688777", "2026-06-04", 12.0),
+            ("SH000300", "2026-06-04", 105.0),
+            ("SH688777", "2026-06-05", 11.0),
+            ("SH000300", "2026-06-05", 102.0),
+        ],
+    )
+
+    [cluster] = author_recent_viewpoint_clusters(archive.connection, "100", "enrich-v1")
+
+    assert cluster["title"] == "中控技术（SH688777）"
+    snapshot = cast(dict[str, object], cluster["market_snapshot"])
+    assert snapshot["start_date"] == "2026-06-02"
+    assert snapshot["end_date"] == "2026-06-05"
+    assert snapshot["raw_return"] == pytest.approx(0.1)
+    assert snapshot["benchmark_return"] == pytest.approx(0.02)
+    assert snapshot["excess_return"] == pytest.approx(0.08)
+    assert snapshot["method_version"] == "descriptive-common-close-v1"
+
+
+def test_market_snapshot_uses_beijing_date_across_utc_day_boundary(archive: Archive) -> None:
+    viewpoint = dataclasses.replace(
+        make_post("early-utc", observed_at="2026-06-03T22:00:00+00:00", text="继续关注"),
+        posted_at_claimed=None,
+        raw_payload={"stockCorrelation": ["SH688777"]},
+    )
+    archive.record_feed_run(make_feed_run("2026-06-03T22:00:00+00:00"), [viewpoint])
+    _enrich(archive, "early-utc", make_result())
+    archive.connection.executemany(
+        "INSERT INTO prices(ticker, date, close) VALUES (?, ?, ?)",
+        [
+            ("SH688777", "2026-06-02", 10.0),
+            ("SH000300", "2026-06-02", 100.0),
+            ("SH688777", "2026-06-03", 12.0),
+            ("SH000300", "2026-06-03", 105.0),
+            ("SH688777", "2026-06-04", 13.0),
+            ("SH000300", "2026-06-04", 110.0),
+        ],
+    )
+
+    [cluster] = author_recent_viewpoint_clusters(archive.connection, "100", "enrich-v1")
+
+    snapshot = cast(dict[str, object], cluster["market_snapshot"])
+    assert snapshot["start_date"] == "2026-06-03"
+    assert snapshot["end_date"] == "2026-06-04"
+
+
+def test_author_recent_viewpoint_clusters_uses_local_name_and_configurable_window(
+    archive: Archive,
+) -> None:
+    older = dataclasses.replace(
+        make_post("older", observed_at="2026-05-01T00:00:00+00:00", text="较早观点"),
+        posted_at_claimed=None,
+        raw_payload={"stockCorrelation": ["BJ920982"]},
+    )
+    newer = dataclasses.replace(
+        make_post("newer", observed_at="2026-05-20T00:00:00+00:00", text="后续观点"),
+        posted_at_claimed=None,
+        raw_payload={"stockCorrelation": ["BJ920982"]},
+    )
+    archive.record_feed_run(make_feed_run("2026-05-20T00:00:00+00:00"), [older, newer])
+    _enrich(archive, "older", make_result())
+    _enrich(archive, "newer", make_result())
+    archive.connection.execute(
+        "INSERT INTO ticker_names(ticker, name) VALUES ('BJ920982', '锦波生物')"
+    )
+
+    default_clusters = author_recent_viewpoint_clusters(archive.connection, "100", "enrich-v1")
+    widened_clusters = author_recent_viewpoint_clusters(
+        archive.connection, "100", "enrich-v1", cluster_window_days=30
+    )
+
+    assert len(default_clusters) == 2
+    assert len(widened_clusters) == 1
+    assert widened_clusters[0]["title"] == "锦波生物（BJ920982）"
+    assert widened_clusters[0]["statement_count"] == 2
 
 
 def test_author_recent_viewpoint_clusters_use_rolling_window_and_observation_fallback(

@@ -34,6 +34,7 @@ EXPORT_QUERIES = {
     "claims": "SELECT * FROM claims",
     "claim_outcomes": "SELECT * FROM claim_outcomes",
     "prices": "SELECT * FROM prices",
+    "ticker_names": "SELECT * FROM ticker_names",
     "version_sightings": "SELECT * FROM version_sightings",
 }
 JSON_COLUMNS = {

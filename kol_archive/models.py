@@ -274,3 +274,4 @@ class EnrichmentResult:
     label_reasoned_non_consensus: bool
     rationale: str
     evidence_snippet: str
+    stance_summary: str = ""

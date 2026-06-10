@@ -47,6 +47,7 @@ from kol_archive.presentation import (
     list_filtered_timeline,
     list_timeline,
 )
+from kol_archive.prices import import_prices_csv, import_ticker_names_csv
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
 from kol_archive.service import Archive
 from kol_archive.time import parse_utc_timestamp
@@ -132,6 +133,7 @@ def _connect_existing_archive(path: Path) -> tuple[sqlite3.Connection, Archive]:
     if not path.is_file():
         raise FileNotFoundError(f"SQLite archive does not exist: {path}")
     connection = connect_database(path)
+    initialize_database(connection)
     return connection, Archive(connection)
 
 
@@ -398,7 +400,7 @@ def _enrich_prompt_version(config: dict[str, Any], override: str | None) -> str:
         configured = str(llm.get("enrich_prompt_version") or "").strip()
         if configured:
             return configured
-    return "enrich-v1"
+    return "enrich-v2"
 
 
 def _timeline_command(args: argparse.Namespace) -> None:
@@ -572,6 +574,26 @@ def _enrich_command(args: argparse.Namespace) -> None:
                 "failed": failed,
             }
         )
+    finally:
+        connection.close()
+
+
+def _import_prices_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    connection, _ = _connect_existing_archive(_resolve_db_path(args.path, config))
+    try:
+        summary = import_prices_csv(connection, args.csv_path)
+        _print_json({"rows": summary.rows, "tickers": summary.tickers, "names": summary.names})
+    finally:
+        connection.close()
+
+
+def _import_ticker_names_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    connection, _ = _connect_existing_archive(_resolve_db_path(args.path, config))
+    try:
+        summary = import_ticker_names_csv(connection, args.csv_path)
+        _print_json({"rows": summary.rows})
     finally:
         connection.close()
 
@@ -796,6 +818,20 @@ def main() -> None:
     enrich_parser.add_argument("--path", type=Path)
     enrich_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     enrich_parser.set_defaults(handler=_enrich_command)
+    import_prices_parser = subparsers.add_parser(
+        "import-prices", help="import ticker,date,close[,name] CSV rows"
+    )
+    import_prices_parser.add_argument("csv_path", type=Path)
+    import_prices_parser.add_argument("--path", type=Path)
+    import_prices_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    import_prices_parser.set_defaults(handler=_import_prices_command)
+    import_names_parser = subparsers.add_parser(
+        "import-ticker-names", help="import a locally maintained ticker,name CSV"
+    )
+    import_names_parser.add_argument("csv_path", type=Path)
+    import_names_parser.add_argument("--path", type=Path)
+    import_names_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    import_names_parser.set_defaults(handler=_import_ticker_names_command)
     download_images_parser = subparsers.add_parser(
         "download-images", help="fetch and store image bytes for archived versions"
     )

@@ -616,8 +616,8 @@ class Archive:
                     post_id, version_id, post_type,
                     label_first_hand_info, label_transferable_framework,
                     label_reasoned_non_consensus, is_market_related,
-                    rationale, evidence_snippet, model, prompt_version, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    rationale, evidence_snippet, stance_summary, model, prompt_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     target.post_id,
@@ -629,6 +629,7 @@ class Archive:
                     int(has_explicit_market_relation(target.original_text, target.raw_payload)),
                     result.rationale.strip(),
                     result.evidence_snippet.strip(),
+                    result.stance_summary.strip(),
                     model.strip(),
                     prompt_version.strip(),
                     created_at,

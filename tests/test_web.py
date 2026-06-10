@@ -99,6 +99,8 @@ llm:
   model: test-model
   api_key_env: TEST_LLM_KEY
   prompt_version: rewrite-v1
+web:
+  enrich_prompt_version: enrich-v1
 """,
         encoding="utf-8",
     )
@@ -113,7 +115,7 @@ llm:
     server = create_server(
         db_path,
         config_dir,
-        WebSettings(port=0),
+        WebSettings(port=0, enrich_prompt_version="enrich-v1"),
         csrf_token=CSRF_TOKEN,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -427,14 +429,31 @@ def test_author_viewpoint_shows_recorded_market_relationship(
 
 def test_web_settings_default_to_loopback_and_reject_wildcard_addresses() -> None:
     assert load_web_settings({}) == WebSettings()
-    assert load_web_settings({"web": {"bind_host": "100.64.0.8", "port": 9000}}) == WebSettings(
-        bind_host="100.64.0.8",
-        port=9000,
-    )
+    assert load_web_settings(
+        {
+            "web": {"bind_host": "100.64.0.8", "port": 9000},
+            "prices": {"benchmark_ticker": "SZ399300"},
+        }
+    ) == WebSettings(bind_host="100.64.0.8", port=9000, market_benchmark_ticker="SZ399300")
 
     for host in ("0.0.0.0", "::", "[::]"):
         with pytest.raises(ValueError, match="explicit tailnet address"):
             load_web_settings({"web": {"bind_host": host}})
+    with pytest.raises(ValueError, match="A-share ticker"):
+        load_web_settings({"prices": {"benchmark_ticker": "SPY"}})
+    with pytest.raises(ValueError, match="cluster_window_days"):
+        load_web_settings({"web": {"viewpoint_cluster_window_days": 0}})
+
+
+def test_web_settings_can_read_old_enrichment_during_prompt_migration() -> None:
+    settings = load_web_settings(
+        {
+            "llm": {"enrich_prompt_version": "enrich-v2"},
+            "web": {"enrich_prompt_version": "enrich-v1"},
+        }
+    )
+
+    assert settings.enrich_prompt_version == "enrich-v1"
 
 
 def test_read_routes_return_redacted_timeline_and_evidence_card(

@@ -78,6 +78,8 @@ web:
   bind_host: 127.0.0.1                 # 手机访问时仅在 local 配置覆盖为 Tailscale 地址
   port: 8765
   timeline_limit: 50
+  viewpoint_cluster_window_days: 7     # 同 ticker 相邻观点的聚簇窗口，可在本地配置扩大
+  # enrich_prompt_version: enrich-v1   # 迁移期间可单独指定网页读取的旧富化版本
 
 # ── LLM（阶段 2 单条改写训练 / 阶段 3 批量富化，按需调用）──────────────
 llm:
@@ -86,11 +88,11 @@ llm:
   model: ""                    # 在 config.local.yml 中填写
   api_key_env: LLM_API_KEY     # API Key 仅从环境变量读取
   prompt_version: rewrite-v1   # 阶段 2 改写训练 prompt 版本
-  enrich_prompt_version: enrich-v1   # 阶段 3 批量富化 prompt 版本（按版本隔离 enrichments）
+  enrich_prompt_version: enrich-v2   # 输出契约或判断逻辑变化必须升版本
   # 图片 VLM 描述（enrich-images，推断产物，不进证据正文）：
   vision_model: ""             # 留空则复用上面的 model；建议填多模态模型 id
   vision_prompt_version: vision-v1   # 按版本隔离 image_enrichments
 
 # ── 后续阶段占位 ──────────────────────────────────────────────────
-# prices:                # 阶段4 行情数据源
-#   source: ""
+prices:                         # 描述性市场变化，行情导入仍按需实现
+  benchmark_ticker: SH000300    # 沪深 300；只与 prices 表中的共同交易日比较

@@ -145,7 +145,11 @@ $env:LLM_API_KEY = "<本地密钥>"
 ```
 
 富化按 `(version_id, prompt_version)` 幂等。可用 `--post-id` 限定单帖，或用 `--limit`
-控制单轮数量。三类标签用于待处理队列和过滤流，不改变原始证据。
+控制单轮数量。三类标签用于待处理队列和过滤流，不改变原始证据。新富化结果同时输出
+`stance_summary`，只概括原文明确表达的主张或立场；旧富化记录没有该字段时，页面继续显示标签裁定理由。
+任何改变模型输出字段、字段语义或判断逻辑的 prompt 修改都必须升级 `llm.enrich_prompt_version`。
+当前带立场摘要的契约使用 `enrich-v2`。迁移期间可用 `web.enrich_prompt_version` 让网页继续读取旧版本，
+待新版本富化完成后再切换。
 
 博主观点页只展示 `post_type=观点` 且具备明确市场关联的当前版本。市场关联由归档证据确定：
 
@@ -158,7 +162,8 @@ $env:LLM_API_KEY = "<本地密钥>"
 保留在富化记录和原始时间线中。
 
 同一博主、同一明确证券代码、相邻发言间隔小于 7 天的观点会合并为一个观点簇，逐条保留首次记录、
-强化、更新或相关回复。具有 `claim` 但无法归并到单一代码的观点独立展示。
+强化、更新或相关回复。可通过本地配置 `web.viewpoint_cluster_window_days` 扩大窗口。具有 `claim`
+但无法归并到单一代码的观点独立展示。
 
 ## 图片证据（下载 / OCR / VLM）
 
@@ -217,6 +222,21 @@ npm run build
 默认地址为 `http://127.0.0.1:8765/`。首页是**博主最近观点**：左侧选择博主，右侧展示最近
 10 个市场相关观点簇及已记录的市场结果。首页不展示按账号的命中率或排名。
 
+当 `prices` 表同时具备观点标的和 `prices.benchmark_ticker` 的行情时，观点簇会展示一条
+“发言后市场变化”：先把 UTC 发言时间转换为北京时间交易日，以簇首次发言前最后一个共同交易日
+收盘价为起点，以发言日之后最新共同交易日
+收盘价为终点，展示标的变化、基准变化和超额变化。该数据使用
+`descriptive-common-close-v1` 描述性口径，不写入 `claims` / `claim_outcomes`，不代表作者提出了
+方向性命题，也不参与命中率或排名。默认基准为 `SH000300`，可在本地配置中覆盖。
+
+行情与本地证券名称通过 CSV 导入。价格文件必须包含 `ticker,date,close`，可选 `name`；名称文件包含
+`ticker,name`。重复导入会按 ticker 和日期更新，整份 CSV 校验通过后才写入：
+
+```powershell
+.\.venv\Scripts\python.exe -m kol_archive import-ticker-names config/ticker_names.csv --config-dir config
+.\.venv\Scripts\python.exe -m kol_archive import-prices data/prices.csv --config-dir config
+```
+
 页面顶部可选择跟随系统、浅色或暗色主题。手动选择会保存在当前浏览器中；跟随系统会实时响应
 操作系统的明暗主题变化。
 
@@ -241,6 +261,9 @@ npm run build
 ```
 
 `scorecards` 保留为 CLI 诊断命令，按账号 id 排列，不计算命中率百分比，也不构成排行榜。
+`queue`、`scorecards`、`timeline --filtered` 默认读取 `llm.enrich_prompt_version`。富化版本迁移期间，
+网页可以通过 `web.enrich_prompt_version` 暂读旧版本；CLI 诊断命令需显式传
+`--prompt-version enrich-v1` 才会读取旧结果。
 
 手机访问只走 Tailscale 私网。在被 Git 忽略的 `config/config.local.yml` 中将
 `web.bind_host` 显式覆盖为部署机器的 Tailscale 地址，可按需覆盖 `web.port`。服务拒绝
