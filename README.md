@@ -201,6 +201,19 @@ OCR 依赖是可选的，按需安装：`.\.venv\Scripts\python.exe -m pip insta
 .\.venv\Scripts\python.exe -m kol_archive serve --config-dir config
 ```
 
+网页前端使用 Vue。修改 `frontend/` 后先构建静态资源：
+
+```powershell
+cd frontend
+npm install
+npm run check
+npm test
+npm run build
+```
+
+`kol_archive/web_dist/` 是本地构建产物并已忽略。首次运行网页服务前需要完成一次前端构建；
+`.\scripts\check_quality.ps1` 会自动执行类型检查、测试和构建。
+
 默认地址为 `http://127.0.0.1:8765/`。首页是**博主最近观点**：左侧选择博主，右侧展示最近
 10 个市场相关观点簇及已记录的市场结果。首页不展示按账号的命中率或排名。
 

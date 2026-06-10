@@ -27,6 +27,7 @@ build/Release
 .next
 out/
 .nuxt
+kol_archive/web_dist/
 
 # dotenv environment variable files
 .env

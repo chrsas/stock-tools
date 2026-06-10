@@ -41,12 +41,13 @@
 | 调度 | cron 或 APScheduler | feed 轮询、直链复查两个独立任务 |
 | 采集 | Python + httpx / playwright | 单平台适配器，实现 `NormalizedPost` |
 | 富化 | LLM API | 阶段 2 仅手动触发单条；阶段 3 才批量 |
-| 界面 | 本地页面 + CLI | 第一版不上 React；CLI 保留为维护与故障排查入口 |
+| 界面 | Vue 本地页面 + CLI | Vue 构建产物由现有 Python 单进程托管；CLI 保留为维护与故障排查入口 |
 | 凭据 | API 密钥仅环境变量；登录 cookie 可用环境变量或被忽略的本地配置 | 绝不入库、绝不进导出文件 |
 | 备份 | SQLite backup API 或 `VACUUM INTO` | 不可直接 cp 主文件；定期恢复验证 |
 | 远程 | 阶段 2b 按需启用 | 手机访问只走 Tailscale 私网，不暴露公网 |
 
-迁移到 Postgres/Redis/worker/FastAPI/React 仅在出现实际瓶颈时。
+迁移到 Postgres/Redis/worker/FastAPI 仅在出现实际瓶颈时。页面维护成本已构成实际瓶颈，
+因此界面改用 Vue，继续复用现有 Python 服务层与单进程部署。
 
 ---
 
@@ -225,7 +226,8 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 **DoD**：原始流与诚实观察时间可见；钉/取消钉遵守 2.6；写理由或改写训练自动钉住并锁版本。
 
 ### 阶段 2b：轻量网页界面 + 手机私网访问
-不搬迁现有目录，不拆独立前端工程，不引入 React。网页与 CLI 共用现有 SQLite、状态机、展示投影和脱敏逻辑，继续保持单 Python 进程。
+前端源码放在 `frontend/`，构建产物由现有 `serve` 命令托管。网页与 CLI 共用现有 SQLite、
+状态机、展示投影和脱敏逻辑，继续保持单 Python 进程。
 
 **2b1 本机网页闭环**
 - 新增 `serve --config-dir config` 启动命令，默认只监听 `127.0.0.1`。

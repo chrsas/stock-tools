@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import http.client
+import json
+import re
 import threading
 from collections.abc import Iterator
 from dataclasses import replace
@@ -29,7 +31,6 @@ from kol_archive.web import (
     ArchiveHttpServer,
     ArchiveRequestHandler,
     WebSettings,
-    _avatar_url,
     create_server,
     load_web_settings,
 )
@@ -155,6 +156,13 @@ def _read_post_row(server: ArchiveHttpServer) -> tuple[str, int]:
         connection.close()
 
 
+def _get_json(server: ArchiveHttpServer, path: str) -> dict[str, object]:
+    status, headers, content = _request(server, "GET", path)
+    assert status == 200
+    assert headers["Content-Type"].startswith("application/json")
+    return cast(dict[str, object], json.loads(content))
+
+
 def _enrich_post_one(server: ArchiveHttpServer, **labels: bool) -> None:
     connection = connect_database(server.db_path)
     try:
@@ -183,43 +191,42 @@ def test_layout_offers_persistent_light_dark_and_system_themes(
 ) -> None:
     status, _, html = _request(web_server, "GET", "/")
     assert status == 200
-    assert '<select id="theme-select" aria-label="主题">' in html
-    assert '<option value="system">跟随系统</option>' in html
-    assert '<option value="light">浅色</option>' in html
-    assert '<option value="dark">暗色</option>' in html
-    assert 'matchMedia("(prefers-color-scheme: dark)")' in html
-    assert 'systemTheme.addEventListener("change"' in html
-    assert "--page: light-dark(#f5f6f8, #0f141b);" in html
-    assert html.count("--page: light-dark(") == 1
+    assert '<div id="app"></div>' in html
+    asset_paths = re.findall(r'(?:src|href)="(/assets/[^"]+)"', html)
     assert 'localStorage.getItem("kol-theme")' in html
-    assert 'localStorage.setItem("kol-theme", preference)' in html
+    assert html.index('localStorage.getItem("kol-theme")') < html.index('<div id="app"></div>')
+    asset_responses = [_request(web_server, "GET", path) for path in asset_paths]
+    assets = "".join(response[2] for response in asset_responses)
+    assert all(
+        response[1]["Cache-Control"] == "public, max-age=31536000, immutable"
+        for response in asset_responses
+    )
+    assert ":root[data-theme=light]{color-scheme:light" in assets
+    assert ":root[data-theme=dark]{color-scheme:dark" in assets
+    for label in ("跟随系统", "浅色", "暗色", "kol-theme", "prefers-color-scheme: dark"):
+        assert label in assets
 
 
 def test_queue_view_keeps_label_guide(web_server: ArchiveHttpServer) -> None:
     _enrich_post_one(web_server, non_consensus=True)
-    status, _, html = _request(web_server, "GET", "/?view=queue")
-    assert status == 200
-    assert "待处理注意力" in html
-    assert "标签说明" in html  # label guide must stay (explicit requirement)
-    assert "有据非共识" in html  # the fired label pill
-    assert "可证伪片段" in html  # evidence snippet surfaced
-    assert "雪球 post-1" in html  # the queued post card uses the platform post id
-    assert "本地记录 1" in html  # internal id is clearly labeled as local-only
-    assert f'name="csrf_token" value="{CSRF_TOKEN}"' in html  # pin form CSRF
-    # Charter §0.11: the default home carries no per-author hit-rate / ranking.
-    assert "账号标签构成" not in html
-    assert "密度" not in html
+    payload = _get_json(web_server, "/api/home?view=queue")
+    assert payload["view"] == "queue"
+    assert payload["csrf_token"] == CSRF_TOKEN
+    [item] = cast(list[dict[str, object]], payload["items"])
+    assert item["label_reasoned_non_consensus"] == 1
+    assert item["enrichment_evidence_snippet"] == "可证伪片段"
+    assert item["platform_post_id"] == "post-1 & qa"
 
 
 def test_queue_dequeues_after_pin(web_server: ArchiveHttpServer) -> None:
     _enrich_post_one(web_server, non_consensus=True)
-    _, _, before = _request(web_server, "GET", "/?view=queue")
-    assert "雪球 post-1" in before
+    before = _get_json(web_server, "/api/home?view=queue")
+    assert len(cast(list[object], before["items"])) == 1
 
     status, _, _ = _request(web_server, "POST", "/posts/1/pin", {"csrf_token": CSRF_TOKEN})
     assert status == 303
-    _, _, after = _request(web_server, "GET", "/?view=queue")
-    assert "雪球 post-1" not in after  # pinned -> dispositioned -> out of the queue
+    after = _get_json(web_server, "/api/home?view=queue")
+    assert cast(list[object], after["items"]) == []
 
 
 def test_pinned_view_lists_pinned_versions_and_offers_unpin(
@@ -227,27 +234,21 @@ def test_pinned_view_lists_pinned_versions_and_offers_unpin(
 ) -> None:
     _enrich_post_one(web_server, non_consensus=True)
     # Before pinning: nothing pinned, toolbar count is zero, list is empty.
-    _, _, before = _request(web_server, "GET", "/?view=pinned")
-    assert "已钉住 0" in before
-    assert "还没有钉住任何版本" in before
-    assert "雪球 post-1" not in before
+    before = _get_json(web_server, "/api/home?view=pinned")
+    assert cast(dict[str, int], before["counts"])["pinned"] == 0
+    assert cast(list[object], before["items"]) == []
 
     status, _, _ = _request(web_server, "POST", "/posts/1/pin", {"csrf_token": CSRF_TOKEN})
     assert status == 303
 
     # The home toolbar now exposes a clickable 已钉住 filter, and the count rose.
-    _, _, home = _request(web_server, "GET", "/?view=queue")
-    assert 'href="/?view=pinned"' in home
-    assert "已钉住 1" in home
-    assert "操作说明" in home  # the persistent action guide stays in the aside
+    home = _get_json(web_server, "/api/home?view=queue")
+    assert cast(dict[str, int], home["counts"])["pinned"] == 1
 
     # The pinned view surfaces the dispositioned post with an unpin action.
-    status, _, pinned = _request(web_server, "GET", "/?view=pinned")
-    assert status == 200
-    assert "雪球 post-1" in pinned
-    assert "取消钉住" in pinned
-    assert "钉住当前版本" not in pinned  # already pinned: no re-pin button
-    assert f'name="csrf_token" value="{CSRF_TOKEN}"' in pinned  # unpin form CSRF
+    pinned = _get_json(web_server, "/api/home?view=pinned")
+    [item] = cast(list[dict[str, object]], pinned["items"])
+    assert item["platform_post_id"] == "post-1 & qa"
 
 
 def test_pinned_list_includes_preview_only_post_matching_toolbar_count(
@@ -293,29 +294,28 @@ def test_pinned_list_includes_preview_only_post_matching_toolbar_count(
     )
     assert status == 303
 
-    _, _, pinned = _request(web_server, "GET", "/?view=pinned")
-    assert "已钉住 1" in pinned  # toolbar count
-    assert "雪球 post-preview" in pinned  # and the list agrees, one-for-one
-    assert f"本地记录 {preview_id}" in pinned
-    assert "暂无完整正文版本" in pinned  # placeholder instead of an empty body
+    pinned = _get_json(web_server, "/api/home?view=pinned")
+    assert cast(dict[str, int], pinned["counts"])["pinned"] == 1
+    [item] = cast(list[dict[str, object]], pinned["items"])
+    assert item["platform_post_id"] == "post-preview"
+    assert item["post_id"] == preview_id
+    assert item["current_text"] is None
 
 
 def test_authors_view_renders_recent_viewpoints_without_ranking(
     web_server: ArchiveHttpServer,
 ) -> None:
     _enrich_post_one(web_server, non_consensus=True)
-    status, _, html = _request(web_server, "GET", "/")
-    assert status == 200
-    assert "博主最近观点" in html
-    assert "观点发言 1 · 已评估观点 0" in html
-    assert "最近 1 个观点簇" in html
-    assert "观点依据「可证伪片段」" in html
-    assert "尚未提取可证伪命题" in html
-    assert 'aria-label="博主列表"' in html
-    assert "选择博主" in html
-    assert 'href="/?author=100"' in html
-    assert 'class="author-option active"' in html
-    assert "密度" not in html  # no hit-rate metric / ranking label
+    payload = _get_json(web_server, "/api/home")
+    [author] = cast(list[dict[str, object]], payload["authors"])
+    [cluster] = cast(list[dict[str, object]], payload["clusters"])
+    assert author["viewpoint_count"] == 1
+    assert author["evaluated_viewpoint_count"] == 0
+    assert cluster["statement_count"] == 1
+    assert (
+        cast(list[dict[str, object]], cluster["viewpoints"])[0]["enrichment_evidence_snippet"]
+        == "可证伪片段"
+    )
 
 
 def test_author_selector_only_renders_selected_author_viewpoints(
@@ -356,14 +356,15 @@ def test_author_selector_only_renders_selected_author_viewpoints(
     finally:
         connection.close()
 
-    _, _, first = _request(web_server, "GET", "/")
-    assert "第二位博主" in first  # visible in the author list
-    assert "第二位博主的观点" not in first  # first author remains selected
+    first = _get_json(web_server, "/api/home")
+    assert len(cast(list[object], first["authors"])) == 2
+    first_text = json.dumps(first["clusters"], ensure_ascii=False)
+    assert "第二位博主的观点" not in first_text
 
-    _, _, second = _request(web_server, "GET", "/?author=200")
-    assert 'href="/?author=200"' in second
-    assert "第二位博主的观点" in second
-    assert "原始正文 A" not in second
+    second = _get_json(web_server, "/api/home?author=200")
+    second_text = json.dumps(second["clusters"], ensure_ascii=False)
+    assert "第二位博主的观点" in second_text
+    assert "原始正文 A" not in second_text
 
 
 def test_author_viewpoint_shows_recorded_market_relationship(
@@ -413,24 +414,15 @@ def test_author_viewpoint_shows_recorded_market_relationship(
     finally:
         connection.close()
 
-    status, _, author = _request(web_server, "GET", "/authors/100")
-    assert status == 200
-    assert "最近 10 个观点簇与市场变化" in author
-    assert "SH000300 · long · 10 天" in author
-    assert "标的变化 +12.00%" in author
-    assert "基准变化 +3.00%" in author
-    assert "超额变化 +9.00%" in author
-    assert 'class="market-positive">超额变化 +9.00%</span>' in author
-    assert 'class="market-negative">超额变化 -7.00%</span>' in author
+    author = _get_json(web_server, "/api/authors/100")
+    profile = cast(dict[str, object], author["profile"])
+    author_text = json.dumps(profile["viewpoint_clusters"], ensure_ascii=False)
+    for expected in ("SH000300", "SH000905", "0.12", "0.03", "0.09", "-0.07"):
+        assert expected in author_text
 
-    status, _, overview = _request(web_server, "GET", "/")
-    assert status == 200
-    assert "观点发言 1 · 已评估观点 1" in overview
-    assert "最新发言的市场关系" in overview
-    assert "SH000300 · long · 10 天" in overview
-    assert "超额变化 +9.00%" in overview
-    assert 'class="market-positive">超额变化 +9.00%</span>' in overview
-    assert 'class="market-negative">超额变化 -7.00%</span>' in overview
+    overview = _get_json(web_server, "/api/home")
+    [summary] = cast(list[dict[str, object]], overview["authors"])
+    assert summary["evaluated_viewpoint_count"] == 1
 
 
 def test_web_settings_default_to_loopback_and_reject_wildcard_addresses() -> None:
@@ -445,56 +437,37 @@ def test_web_settings_default_to_loopback_and_reject_wildcard_addresses() -> Non
             load_web_settings({"web": {"bind_host": host}})
 
 
-def test_read_routes_render_redacted_timeline_and_evidence_card(
+def test_read_routes_return_redacted_timeline_and_evidence_card(
     web_server: ArchiveHttpServer,
 ) -> None:
-    status, _, timeline = _request(web_server, "GET", "/?view=raw")
-    assert status == 200
-    assert "KOL 原始时间线" in timeline
-    assert "测试作者" in timeline
-    assert 'src="https://xqimg.imedao.com/community/avatar.jpg!50x50.png"' in timeline
-    assert "原始正文 A" in timeline
-    assert "feed：在场；来源：未复查；监控：近期窗口" in timeline
-    assert 'href="https://xueqiu.com/100/post-1"' in timeline
-    assert 'href="https://xueqiu.com/u/100"' in timeline
-    assert 'href="/authors/100"' in timeline
-    assert 'target="_blank"' in timeline
+    timeline = _get_json(web_server, "/api/home?view=raw")
+    [item] = cast(list[dict[str, object]], timeline["items"])
+    assert item["author_display_name"] == "测试作者 & QA"
+    assert item["current_text"] == "原始正文 A"
+    assert cast(dict[str, str], item["status"])["human_label"] == (
+        "feed：在场；来源：未复查；监控：近期窗口"
+    )
+    assert item["url"] == "https://xueqiu.com/100/post-1"
 
-    status, _, card = _request(web_server, "GET", "/posts/1")
-    assert status == 200
-    assert "<title>证据卡片 雪球 post-1 &amp; qa</title>" in card
-    assert "&amp;amp; qa</title>" not in card
-    assert "证据卡片：雪球 post-1" in card
-    assert "测试作者" in card
-    assert "本地记录 1" in card
-    assert 'href="https://xueqiu.com/100/post-1"' in card
-    assert "打开雪球原帖" in card
-    assert "cookie=[REDACTED]" in card
-    assert f'name="csrf_token" value="{CSRF_TOKEN}"' in card
+    payload = _get_json(web_server, "/api/posts/1")
+    card = cast(dict[str, object], payload["card"])
+    card_text = json.dumps(card, ensure_ascii=False)
+    assert cast(dict[str, object], card["post"])["platform_post_id"] == "post-1 & qa"
+    assert "测试作者 & QA" in card_text
+    assert "cookie=[REDACTED]" in card_text
+    assert payload["csrf_token"] == CSRF_TOKEN
     for secret in ("feed-secret", "meta-secret", "payload-secret", "raw_meta", "raw_payload"):
-        assert secret not in card
+        assert secret not in card_text
 
-    status, _, _ = _request(web_server, "GET", "/posts/999")
+    status, _, _ = _request(web_server, "GET", "/api/posts/999")
     assert status == 404
 
-    status, _, author = _request(web_server, "GET", "/authors/100")
-    assert status == 200
-    assert "<title>作者 测试作者 &amp; QA</title>" in author
-    assert "&amp;amp; QA</title>" not in author
-    assert "作者 测试作者" in author
-    assert "作者简介" in author
-    assert "最近 10 个观点簇与市场变化" in author
-    assert "最近还没有具备明确市场关联的观点发言" in author
-    assert "雪球 post-1" in author
-    assert 'href="https://xueqiu.com/u/100"' in author
-
-
-def test_avatar_url_only_mints_known_xqimg_relative_keys() -> None:
-    assert _avatar_url("community/avatar.jpg!50x50.png") == (
-        "https://xqimg.imedao.com/community/avatar.jpg!50x50.png"
-    )
-    assert _avatar_url("javascript:alert(1)") == ""
-    assert _avatar_url("other-cdn/avatar.jpg") == ""
+    author = _get_json(web_server, "/api/authors/100")
+    profile = cast(dict[str, object], author["profile"])
+    assert cast(dict[str, object], profile["author"])["author_display_name"] == "测试作者 & QA"
+    assert cast(dict[str, object], profile["author"])["author_description"] == "作者简介"
+    assert cast(list[object], profile["viewpoint_clusters"]) == []
+    assert len(cast(list[object], profile["posts"])) == 1
 
 
 def test_author_route_decodes_encoded_uid_segment() -> None:
@@ -574,10 +547,10 @@ def test_attention_and_verdict_routes_reuse_archive_writes(web_server: ArchiveHt
     finally:
         connection.close()
 
-    status, _, card = _request(web_server, "GET", "/posts/1")
-    assert status == 200
-    assert "继续跟踪 &lt;script&gt;alert(1)&lt;/script&gt;" in card
-    assert "<script>alert(1)</script>" not in card
+    payload = _get_json(web_server, "/api/posts/1")
+    card = cast(dict[str, object], payload["card"])
+    [attention_item] = cast(list[dict[str, object]], card["attention_log"])
+    assert attention_item["my_reason"] == "继续跟踪 <script>alert(1)</script>"
 
     status, _, _ = _request(
         web_server,
