@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from kol_archive.config import load_config
 from kol_archive.database import connect_database, initialize_database
+from kol_archive.decisions import list_decisions
 from kol_archive.maintenance import redact_text
 from kol_archive.models import FeedState, WatchMode
 from kol_archive.presentation import (
@@ -217,6 +218,23 @@ def _home_payload(
             "counts": _queue_counts(connection, prompt_version),
             "tier3_only": tier3_only,
         }
+    if view == "decisions":
+        status_values = values.get("status")
+        ticker_values = values.get("ticker")
+        from_values = values.get("from")
+        to_values = values.get("to")
+        return {
+            "view": "decisions",
+            **list_decisions(
+                connection,
+                datetime.now(tz=UTC).isoformat(),
+                status=status_values[0] if status_values else None,
+                ticker=ticker_values[0] if ticker_values else None,
+                decided_from=from_values[0] if from_values else None,
+                decided_to=to_values[0] if to_values else None,
+                limit=limit,
+            ),
+        }
     authors = author_viewpoint_overview(connection, prompt_version)
     selected_uid = (values.get("author") or [""])[0] or None
     selected = next(
@@ -344,6 +362,17 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if exercise_id is not None:
                 self._verdict(exercise_id, form)
                 return
+            if path == "/decisions/add":
+                self._add_decision(form)
+                return
+            decision_id = self._post_id(path, prefix="/decisions/", suffix="/close")
+            if decision_id is not None:
+                self._close_decision(decision_id, form)
+                return
+            decision_id = self._post_id(path, prefix="/decisions/", suffix="/review")
+            if decision_id is not None:
+                self._review_decision(decision_id, form)
+                return
         except ValueError as error:
             self._send_text(HTTPStatus.BAD_REQUEST, redact_text(str(error)))
             return
@@ -420,6 +449,51 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         self._with_archive(lambda archive: archive.review_rewrite_exercise(exercise_id, verdict))
         self._mutation_done(post_id)
 
+    def _add_decision(self, form: dict[str, list[str]]) -> None:
+        now = datetime.now(tz=UTC).isoformat()
+        decision_id: int | None = None
+
+        def add(archive: Archive) -> None:
+            nonlocal decision_id
+            decision_id = archive.add_decision(
+                self._required_form_value(form, "ticker"),
+                self._required_form_value(form, "direction"),
+                self._required_form_value(form, "thesis"),
+                self._required_form_value(form, "invalidation"),
+                self._form_value(form, "decided_at") or now,
+                horizon_days=self._optional_form_int(form, "horizon_days"),
+                position_note=self._form_value(form, "position_note"),
+                source_post_id=self._optional_form_int(form, "source_post_id"),
+                source_version_id=self._optional_form_int(form, "source_version_id"),
+                notes=self._form_value(form, "notes"),
+            )
+
+        self._with_archive(add)
+        assert decision_id is not None
+        self._mutation_done(decision_id, key="decision_id", location="/?view=decisions")
+
+    def _close_decision(self, decision_id: int, form: dict[str, list[str]]) -> None:
+        self._with_archive(
+            lambda archive: archive.close_decision(
+                decision_id,
+                self._required_form_value(form, "status"),
+                self._form_value(form, "closed_at") or datetime.now(tz=UTC).isoformat(),
+                self._form_value(form, "notes"),
+            )
+        )
+        self._mutation_done(decision_id, key="decision_id", location="/?view=decisions")
+
+    def _review_decision(self, decision_id: int, form: dict[str, list[str]]) -> None:
+        self._with_archive(
+            lambda archive: archive.review_decision(
+                decision_id,
+                self._form_value(form, "reviewed_at") or datetime.now(tz=UTC).isoformat(),
+                self._required_form_value(form, "retro"),
+                self._form_value(form, "lesson"),
+            )
+        )
+        self._mutation_done(decision_id, key="decision_id", location="/?view=decisions")
+
     def _read_form(self) -> dict[str, list[str]] | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -444,12 +518,14 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             and secrets.compare_digest(token, self.server.csrf_token)
         )
 
-    def _mutation_done(self, post_id: int) -> None:
+    def _mutation_done(
+        self, item_id: int, *, key: str = "post_id", location: str | None = None
+    ) -> None:
         if "application/json" in self.headers.get("Accept", ""):
-            self._send_json(HTTPStatus.OK, {"ok": True, "post_id": post_id})
+            self._send_json(HTTPStatus.OK, {"ok": True, key: item_id})
             return
         self.send_response(HTTPStatus.SEE_OTHER)
-        self.send_header("Location", f"/posts/{post_id}")
+        self.send_header("Location", location or f"/posts/{item_id}")
         self.end_headers()
 
     def _send_asset(self, path: str) -> None:
@@ -485,6 +561,10 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
 
     def _version_id(self, form: dict[str, list[str]]) -> int:
         return int(self._required_form_value(form, "version_id"))
+
+    def _optional_form_int(self, form: dict[str, list[str]], key: str) -> int | None:
+        value = self._form_value(form, key)
+        return None if value is None else int(value)
 
     @staticmethod
     def _author_uid(path: str, *, prefix: str = "/authors/") -> str | None:
@@ -523,6 +603,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _is_mutation_path(path: str) -> bool:
+        if path.startswith("/decisions/"):
+            return True
         return any(
             path.endswith(suffix)
             for suffix in ("/pin", "/unpin", "/attention", "/rewrite", "/verdict")

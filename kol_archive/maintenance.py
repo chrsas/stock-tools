@@ -33,6 +33,9 @@ EXPORT_QUERIES = {
     "image_enrichments": "SELECT * FROM image_enrichments",
     "claims": "SELECT * FROM claims",
     "claim_outcomes": "SELECT * FROM claim_outcomes",
+    "my_decisions": "SELECT * FROM my_decisions",
+    "my_decision_outcomes": "SELECT * FROM my_decision_outcomes",
+    "my_decision_reviews": "SELECT * FROM my_decision_reviews",
     "prices": "SELECT * FROM prices",
     "ticker_names": "SELECT * FROM ticker_names",
     "version_sightings": "SELECT * FROM version_sightings",
@@ -49,6 +52,13 @@ URL_REDACTION_COLUMNS = {("post_images", "source_url")}
 # (heuristic credential redaction) on export. OCR text and image bytes are
 # evidence and are exported intact.
 TEXT_REDACTION_COLUMNS = {"notes", "description"}
+RELATION_TEXT_REDACTION_COLUMNS = {
+    ("my_decisions", "thesis_text"),
+    ("my_decisions", "invalidation_condition"),
+    ("my_decisions", "position_note"),
+    ("my_decision_reviews", "retro_text"),
+    ("my_decision_reviews", "lesson"),
+}
 _SNAPSHOT_NAME_RE = re.compile(r"^kol-(\d{8}T\d{12}Z)(?:-(\d+))?\.sqlite3$")
 _SENSITIVE_KEY_PARTS = (
     "apikey",
@@ -226,7 +236,7 @@ def _export_value(relation: str, column: str, value: Any) -> Any:
         return _sanitize_value(json.loads(str(value)))
     if (relation, column) in URL_REDACTION_COLUMNS:
         return redact_url(str(value))
-    if column in TEXT_REDACTION_COLUMNS:
+    if column in TEXT_REDACTION_COLUMNS or (relation, column) in RELATION_TEXT_REDACTION_COLUMNS:
         return redact_text(str(value))
     return value
 

@@ -67,3 +67,38 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 
 **DoD**：图片清单变化可形成新版本；同 URL 字节变化可追溯；下载、OCR、VLM 均可续跑且幂等；
 旧版本 NULL 清单升级后首轮不误报换图；导出不携带图片签名参数。
+
+### 阶段 5：自我决策日志
+
+目标函数从「监督 KOL」扩展到「监督自己」：用同一套不可篡改存证与价格结算机器记录用户本人的
+投资决策并强制复盘，独立于 KOL 数据可用。
+
+```
+my_decisions          (身份与论点锁定，状态可变投影)
+  id, ticker, direction(long|short|neutral), thesis_text,
+  invalidation_condition, horizon_days(nullable), position_note(nullable),
+  decided_at, source_post_id(nullable FK), source_version_id(nullable FK),
+  status(open|invalidated|expired|closed), closed_at(nullable), notes
+my_decision_outcomes
+  id, decision_id, resolved_at, raw_return, benchmark_return, excess_return,
+  outcome_method_version, notes
+my_decision_reviews              [append-only]
+  id, decision_id, reviewed_at, retro_text, lesson(nullable)
+```
+
+- 数据库触发器锁定决策的 ticker、方向、原始论点、证伪条件、决策时间与来源关联，禁止物理删除；
+  状态、关闭时间和备注可更新，复盘记录只追加。
+- CLI 提供 `add-decision`、`close-decision`、`review-decision`、`decisions` 和
+  `resolve-decisions`。列表展示到期未结算、逾期未复盘与逐条结果。
+- 网页“我的决策”视图提供录入、按状态与标的筛选、人工关闭、追加复盘和逐条结果下钻，写操作
+  全部使用 POST 与 CSRF。
+- `invalidation_condition` 必填。证伪是否触发由人工判定，工具只展示走势证据与到期提醒。
+- 结算复用 `prices` 共同交易日收盘口径，首版方法为 `descriptive-common-close-v1`：决策发生日前
+  最后一个共同交易日收盘为起点，期限自然日当天或之后首个共同交易日收盘为终点；缺少任一端行情
+  时保持待结算。结果记录基准代码，按决策、基准和方法版本幂等落库，写入后不可修改或删除；冲突
+  重算明确报错，逐条展示且不汇总打分。
+- 决策、结果和复盘纳入脱敏导出。
+
+**DoD**：论点字段 UPDATE 被触发器拒绝、status 可改、行禁删；无证伪条件录入被拒；结算同口径
+可重算稳定；到期未结算与未复盘清单在 CLI 与网页可见；决策、结果、复盘逐条可下钻；全流程不
+输出任何方向性建议文案。

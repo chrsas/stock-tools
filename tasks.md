@@ -221,7 +221,8 @@ prices  (只读)  ticker, date, close, ...
 - **阶段 3**（LLM 标签 + 标签门过滤 + 观点簇）：已完成。交付 `enrich.py`、队列/记分卡视图。
 - **图片证据扩展**（下载/OCR/VLM，适配器 `xueqiu-3`）：已完成。交付 `images.py`、`ocr.py`、
   `image_enrich.py`。
-- 上述阶段全部 DoD 有自动化测试兜底（`tests/`，当前全套 191 通过）。
+- **阶段 5**（自我决策日志）：已完成。交付决策论点锁定、逐条结算、CLI 与网页录入/关闭/复盘闭环。
+- 上述阶段全部 DoD 有自动化测试兜底（`tests/`，当前全套 201 通过）。
 
 ### 阶段 4：事件研究等（占位，按需）
 行情对齐、交易日规则、基准选择、多时间窗口待定。可能冲突候选只摆证据；`claims` +
@@ -238,37 +239,6 @@ prices  (只读)  ticker, date, close, ...
 回填命题、未结算命题和不可比口径不会污染战绩比较。
 
 ---
-
-### 阶段 5：自我决策日志（最高优先）
-
-目标函数从「监督 KOL」扩展到「监督自己」：用同一套不可篡改存证 + 价格结算机器记录用户本人的
-投资决策并强制复盘。这是因果链最短、样本积累最快的功能，独立于 KOL 数据可用。
-
-```
-my_decisions          (身份与论点锁定，状态可变投影)
-  id, ticker, direction(long|short|neutral), thesis_text,
-  invalidation_condition, horizon_days(nullable), position_note(nullable),
-  decided_at, source_post_id(nullable FK), source_version_id(nullable FK),
-  status(open|invalidated|expired|closed), closed_at(nullable), notes
-  -- 触发器锁定 ticker/direction/thesis_text/invalidation_condition/decided_at（写一次不可变，
-  --   防事后改论点）；status/closed_at/notes 可变；禁止物理删除。论点写错走新行 + notes 关联。
-my_decision_outcomes  decision_id, resolved_at, raw_return, benchmark_return, excess_return,
-                      outcome_method_version, notes
-my_decision_reviews              [append-only]
-  id, decision_id, reviewed_at, retro_text, lesson(nullable)
-```
-
-- CLI：`add-decision` / `close-decision` / `review-decision` / `decisions`（列表含到期未结算、
-  未复盘清单）。网页提供同等录入与查看入口，写操作 POST + CSRF。
-- `invalidation_condition` 为必填：没有证伪条件的决策拒绝录入。证伪是否触发由人工判定并
-  `close-decision`，工具只展示走势证据与到期提醒，**绝不自动判定证伪、绝不生成买卖建议**。
-- 结算复用 `prices` 共同交易日收盘口径，`outcome_method_version` 版本化（首版可复用
-  `descriptive-common-close-v1` 的对齐规则）；同一决策可按多窗口结算，逐条展示不汇总打分。
-- 复盘视图：按 status/标的/时间过滤，逐条下钻论点原文、走势、复盘记录；展示「逾期未复盘」计数。
-
-**DoD**：论点字段 UPDATE 被触发器拒绝、status 可改、行禁删；无证伪条件录入被拒；结算同口径
-可重算稳定；到期未结算与未复盘清单在 CLI 与网页可见；决策、结果、复盘逐条可下钻；全流程不
-输出任何方向性建议文案。
 
 ### 阶段 6：中性变更摘要 + 主动通知基础
 

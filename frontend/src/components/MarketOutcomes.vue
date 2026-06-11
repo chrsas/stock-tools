@@ -1,12 +1,9 @@
 <script setup lang="ts">
 import type { Row } from "../api";
+import { percent } from "../format";
 import MarketChart from "./MarketChart.vue";
 
 defineProps<{ outcomes?: Row[]; snapshot?: Row | null }>();
-
-function percent(value: unknown): string {
-  return value == null ? "无" : `${Number(value) >= 0 ? "+" : ""}${(Number(value) * 100).toFixed(2)}%`;
-}
 </script>
 
 <template>

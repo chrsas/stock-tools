@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { loadPage, mutate, type Row } from "./api";
-import { authorName, fmtTime, postTitle, xueqiuUrl } from "./format";
+import { authorName, fmtTime, percent, postTitle, xueqiuUrl } from "./format";
 import AuthorBadge from "./components/AuthorBadge.vue";
 import PostLinks from "./components/PostLinks.vue";
 import QueueCard from "./components/QueueCard.vue";
@@ -29,8 +29,9 @@ async function refresh() {
 }
 
 async function action(path: string, values: Row = {}) {
-  if (!page.value) return;
+  if (!page.value || busy.value) return;
   busy.value = true;
+  error.value = "";
   try {
     await mutate(path, page.value.csrf_token, values);
     await refresh();
@@ -49,6 +50,22 @@ function submitAttention(event: Event) {
     reason: String(values.get("reason") || ""),
     expectation: String(values.get("expectation") || ""),
   });
+}
+
+function submitDecision(event: Event) {
+  const form = event.currentTarget as HTMLFormElement;
+  const values = Object.fromEntries(new FormData(form).entries());
+  action("/decisions/add", values);
+}
+
+function submitDecisionClose(event: Event, decisionId: number) {
+  const form = event.currentTarget as HTMLFormElement;
+  action(`/decisions/${decisionId}/close`, Object.fromEntries(new FormData(form).entries()));
+}
+
+function submitDecisionReview(event: Event, decisionId: number) {
+  const form = event.currentTarget as HTMLFormElement;
+  action(`/decisions/${decisionId}/review`, Object.fromEntries(new FormData(form).entries()));
 }
 
 function hasMarketFeedback(clusters: Row[]): boolean {
@@ -79,6 +96,7 @@ onMounted(() => { applyTheme(); refresh(); });
         <li><a class="nav-item" :class="{ on: navActive('pinned') }" href="/?view=pinned"><svg viewBox="0 0 24 24" class="ico"><path d="M12 17v5" /><path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6z" /></svg>已钉住</a></li>
         <li><a class="nav-item" :class="{ on: navActive('raw') }" href="/?view=raw"><svg viewBox="0 0 24 24" class="ico"><path d="M4 7h16" /><path d="M4 12h16" /><path d="M4 17h10" /></svg>原始时间线</a></li>
         <li><a class="nav-item" :class="{ on: navActive('filtered') }" href="/?view=filtered"><svg viewBox="0 0 24 24" class="ico"><path d="M4 5h16l-6 7v6l-4 2v-8z" /></svg>标签过滤流</a></li>
+        <li><a class="nav-item" :class="{ on: navActive('decisions') }" href="/?view=decisions"><svg viewBox="0 0 24 24" class="ico"><path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>我的决策</a></li>
       </ul>
       <div class="sidebar-foot">
         <span class="eyebrow">prompt 版本</span>
@@ -151,6 +169,68 @@ onMounted(() => { applyTheme(); refresh(); });
           <div class="page-title"><div><h1>{{ page.view === "raw" ? "原始时间线" : "标签过滤流" }}</h1><p v-if="page.prompt_version" class="sub">prompt 版本 {{ page.prompt_version }}</p></div></div>
           <TimelineCard v-for="item in page.items" :key="item.post_id" :item="item" :show-labels="page.view === 'filtered'" />
           <p v-if="!page.items.length" class="empty">暂无记录。</p>
+        </template>
+
+        <template v-else-if="page?.view === 'decisions'">
+          <div class="page-title"><div><h1>我的决策</h1><p class="sub">记录原始论点、证伪条件、结算结果与复盘。</p></div></div>
+          <div class="toolbar">
+            <span>开放 {{ page.counts.open }}</span>
+            <span>到期未结算 {{ page.counts.due_unresolved }}</span>
+            <span>逾期未复盘 {{ page.counts.review_overdue }}</span>
+          </div>
+          <section class="panel">
+            <h2>记录决策</h2>
+            <form @submit.prevent="submitDecision">
+              <label>标的代码<input name="ticker" placeholder="SH688303" required></label>
+              <label>方向<select name="direction" required><option value="long">long</option><option value="short">short</option><option value="neutral">neutral</option></select></label>
+              <label>观察期限（自然日）<input name="horizon_days" type="number" min="1"></label>
+              <label>原始论点<textarea name="thesis" required></textarea></label>
+              <label>证伪条件<textarea name="invalidation" required></textarea></label>
+              <label>仓位备注<textarea name="position_note"></textarea></label>
+              <label>来源帖子 ID<input name="source_post_id" type="number" min="1"></label>
+              <label>来源版本 ID<input name="source_version_id" type="number" min="1"></label>
+              <button :disabled="busy">记录决策</button>
+            </form>
+          </section>
+          <form class="toolbar" method="get">
+            <input type="hidden" name="view" value="decisions">
+            <select name="status" :value="page.filters.status || ''"><option value="">全部状态</option><option value="open">open</option><option value="invalidated">invalidated</option><option value="expired">expired</option><option value="closed">closed</option></select>
+            <input name="ticker" :value="page.filters.ticker || ''" placeholder="按标的筛选">
+            <input name="from" type="date" :value="page.filters.decided_from || ''" aria-label="决策起始日期">
+            <input name="to" type="date" :value="page.filters.decided_to || ''" aria-label="决策结束日期">
+            <button>筛选</button>
+          </form>
+          <section class="stream">
+            <article v-for="decision in page.items" :key="decision.id" class="card">
+              <header><h2>{{ decision.ticker }}<span v-if="decision.ticker_name"> · {{ decision.ticker_name }}</span></h2><span class="pill">{{ decision.status }}</span></header>
+              <p class="muted">{{ decision.direction }} · 决策时间 {{ fmtTime(decision.decided_at) }} · {{ decision.due_date ? `到期 ${decision.due_date}` : "未设期限" }}</p>
+              <p v-if="decision.due_unresolved" class="error">到期未结算，等待共同交易日行情。</p>
+              <p v-if="decision.review_overdue" class="error">已关闭，尚未复盘。</p>
+              <h3>原始论点</h3><pre>{{ decision.thesis_text }}</pre>
+              <h3>证伪条件</h3><pre>{{ decision.invalidation_condition }}</pre>
+              <p v-if="decision.source_post_id"><a :href="`/posts/${decision.source_post_id}`">查看来源帖子证据</a><span v-if="decision.source_version_id" class="muted"> · 版本 {{ decision.source_version_id }}</span></p>
+              <details v-if="decision.position_note || decision.notes"><summary>备注</summary><p>{{ decision.position_note }}</p><p>{{ decision.notes }}</p></details>
+              <div v-if="decision.outcomes.length" class="stream-label"><span class="eyebrow">逐条结算</span></div>
+              <div v-for="outcome in decision.outcomes" :key="outcome.id" class="market-row">
+                <strong>{{ outcome.resolved_at }}</strong>
+                <span>标的 {{ percent(outcome.raw_return) }} · {{ outcome.benchmark_ticker }} {{ percent(outcome.benchmark_return) }} · 超额 {{ percent(outcome.excess_return) }}</span>
+                <small class="muted">{{ outcome.outcome_method_version }}</small>
+              </div>
+              <div v-if="decision.reviews.length" class="stream-label"><span class="eyebrow">复盘记录</span></div>
+              <article v-for="review in decision.reviews" :key="review.id" class="statement"><p class="muted">{{ fmtTime(review.reviewed_at) }}</p><pre>{{ review.retro_text }}</pre><p v-if="review.lesson"><b>经验：</b>{{ review.lesson }}</p></article>
+              <form v-if="decision.status === 'open'" @submit.prevent="submitDecisionClose($event, decision.id)">
+                <label>关闭状态<select name="status" required><option value="closed">closed</option><option value="invalidated">invalidated</option><option value="expired">expired</option></select></label>
+                <label>关闭备注<textarea name="notes"></textarea></label>
+                <button :disabled="busy">人工关闭</button>
+              </form>
+              <form @submit.prevent="submitDecisionReview($event, decision.id)">
+                <label>复盘<textarea name="retro" required></textarea></label>
+                <label>经验<textarea name="lesson"></textarea></label>
+                <button :disabled="busy">追加复盘</button>
+              </form>
+            </article>
+            <p v-if="!page.items.length" class="empty">暂无决策记录。</p>
+          </section>
         </template>
 
         <template v-else-if="page?.view === 'author'">

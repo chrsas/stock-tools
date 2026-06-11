@@ -176,6 +176,58 @@ def _get_json(server: ArchiveHttpServer, path: str) -> dict[str, object]:
     return cast(dict[str, object], json.loads(content))
 
 
+def test_decision_web_flow_and_csrf(web_server: ArchiveHttpServer) -> None:
+    payload = _get_json(web_server, "/api/home?view=decisions")
+    assert payload["view"] == "decisions"
+    assert cast(dict[str, int], payload["counts"])["open"] == 0
+
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        "/decisions/add",
+        {
+            "csrf_token": CSRF_TOKEN,
+            "ticker": "SH688303",
+            "direction": "neutral",
+            "thesis": "观察论点",
+            "invalidation": "证伪条件",
+            "horizon_days": "7",
+        },
+    )
+    assert status == 303
+    payload = _get_json(web_server, "/api/home?view=decisions")
+    item = cast(list[dict[str, object]], payload["items"])[0]
+    assert item["ticker"] == "SH688303"
+    assert item["status"] == "open"
+
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        f"/decisions/{item['id']}/close",
+        {"csrf_token": CSRF_TOKEN, "status": "closed"},
+    )
+    assert status == 303
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        f"/decisions/{item['id']}/review",
+        {"csrf_token": CSRF_TOKEN, "retro": "复盘原文", "lesson": "经验"},
+    )
+    assert status == 303
+    payload = _get_json(web_server, "/api/home?view=decisions")
+    item = cast(list[dict[str, object]], payload["items"])[0]
+    assert item["status"] == "closed"
+    assert cast(list[dict[str, object]], item["reviews"])[0]["retro_text"] == "复盘原文"
+
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        "/decisions/add",
+        {"ticker": "SH688303", "direction": "neutral", "thesis": "x", "invalidation": "y"},
+    )
+    assert status == 403
+
+
 def _enrich_post_one(server: ArchiveHttpServer, **labels: bool) -> None:
     connection = connect_database(server.db_path)
     try:

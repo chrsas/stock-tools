@@ -25,6 +25,10 @@ export function fmtTime(value: unknown): string {
   return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
 }
 
+export function percent(value: unknown): string {
+  return value == null ? "无" : `${Number(value) >= 0 ? "+" : ""}${(Number(value) * 100).toFixed(2)}%`;
+}
+
 export function originalUrl(item: Row): string {
   return /^https?:\/\//.test(String(item.url || "")) ? item.url : "";
 }

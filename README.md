@@ -247,6 +247,7 @@ npm run build
 - `/?view=raw`：原始时间线，始终保留全部帖子证据。
 - `/?view=filtered`：命中任一注意力标签的过滤流。
 - `/?view=pinned`：已钉住帖子。
+- `/?view=decisions`：个人决策日志，可录入原始论点与证伪条件、人工关闭并追加复盘。
 - `/authors/<uid>`：单个博主的观点簇、市场变化与最近帖子。
 - `/posts/<post_id>`：单帖证据卡片。
 
@@ -264,6 +265,19 @@ npm run build
 `queue`、`scorecards`、`timeline --filtered` 默认读取 `llm.enrich_prompt_version`。富化版本迁移期间，
 网页可以通过 `web.enrich_prompt_version` 暂读旧版本；CLI 诊断命令需显式传
 `--prompt-version enrich-v1` 才会读取旧结果。
+
+个人决策日志也提供 CLI。录入必须填写证伪条件，论点字段写入后由数据库触发器锁定；关闭状态与
+复盘均由用户人工记录。`resolve-decisions` 以决策发生日前最后一个共同交易日收盘为起点，以期限
+自然日当天或之后首个共同交易日收盘为终点；缺少起点或终点行情时保持待结算。结果记录基准代码和
+口径版本，写入后不可修改或删除；冲突重算会明确报错。命令不自动判断证伪，也不输出方向性建议：
+
+```powershell
+.\.venv\Scripts\python.exe -m kol_archive add-decision --ticker SH688303 --direction neutral --thesis "原始论点" --invalidation "证伪条件" --horizon-days 30
+.\.venv\Scripts\python.exe -m kol_archive decisions
+.\.venv\Scripts\python.exe -m kol_archive resolve-decisions
+.\.venv\Scripts\python.exe -m kol_archive close-decision 1 --status closed
+.\.venv\Scripts\python.exe -m kol_archive review-decision 1 --retro "复盘原文"
+```
 
 手机访问只走 Tailscale 私网。在被 Git 忽略的 `config/config.local.yml` 中将
 `web.bind_host` 显式覆盖为部署机器的 Tailscale 地址，可按需覆盖 `web.port`。服务拒绝

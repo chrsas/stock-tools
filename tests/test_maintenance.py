@@ -71,6 +71,20 @@ def seed_archive(path: Path) -> None:
             )
         ],
     )
+    decision_id = archive.add_decision(
+        "SH688303",
+        "neutral",
+        "thesis token=decision-secret",
+        "cookie=invalidation-secret",
+        NOW,
+        position_note="api_key=position-secret",
+    )
+    archive.review_decision(
+        decision_id,
+        NOW,
+        "Bearer review-secret",
+        "password=lesson-secret",
+    )
     connection.close()
 
 
@@ -178,6 +192,11 @@ def test_export_writes_json_and_csv_with_credential_redaction(tmp_path: Path) ->
         "api-secret",
         "bearer-secret",
         "meta-secret",
+        "decision-secret",
+        "invalidation-secret",
+        "position-secret",
+        "review-secret",
+        "lesson-secret",
     ):
         assert secret not in exported_text
     assert (result.csv_dir / "posts.csv").is_file()

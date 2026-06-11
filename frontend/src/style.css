@@ -190,6 +190,7 @@ summary:hover { color: var(--accent); }
 button { padding: .55rem .9rem; border-radius: var(--radius-sm); border: 1px solid var(--accent); background: var(--accent);
   color: var(--accent-ink); cursor: pointer; font-weight: 600; transition: filter .12s, border-color .12s, color .12s; }
 button:hover { filter: brightness(1.08); }
+button:disabled { cursor: wait; opacity: .55; filter: none; }
 button.secondary { background: var(--surface); color: var(--ink-2); border-color: var(--line); filter: none; }
 button.secondary:hover { color: var(--ink); border-color: var(--ink-3); }
 .actions { display: flex; gap: .7rem; align-items: center; flex-wrap: wrap; margin: .8rem 0; }
@@ -197,7 +198,8 @@ button.secondary:hover { color: var(--ink); border-color: var(--ink-3); }
 .links a { padding: .5rem .8rem; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); font-weight: 600; font-size: .85rem; }
 .links a:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 form, label { display: grid; gap: .5rem; margin: 1rem 0; }
-textarea { min-height: 6rem; padding: .7rem; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface-2); }
+textarea, input, select { padding: .7rem; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface-2); }
+textarea { min-height: 6rem; }
 
 /* ---------------------------------------------------------------- text bodies */
 pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-sans); line-height: 1.8; margin: .8rem 0 0;

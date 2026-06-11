@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { avatarUrl } from "./format";
+import { avatarUrl, percent } from "./format";
 
 describe("avatarUrl", () => {
   it("mints only known xqimg relative keys", () => {
@@ -30,5 +30,12 @@ describe("avatarUrl", () => {
     expect(avatarUrl("avatar/large.png, community/small.png!50x50.png")).toBe(
       "https://xqimg.imedao.com/community/small.png!50x50.png",
     );
+  });
+});
+
+describe("percent", () => {
+  it("formats descriptive returns", () => {
+    expect(percent(0.0123)).toBe("+1.23%");
+    expect(percent(null)).toBe("无");
   });
 });

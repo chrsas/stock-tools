@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -220,6 +221,48 @@ CREATE TABLE IF NOT EXISTS claim_outcomes (
     notes TEXT
 );
 
+CREATE TABLE IF NOT EXISTS my_decisions (
+    id INTEGER PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('long', 'short', 'neutral')),
+    thesis_text TEXT NOT NULL CHECK(length(trim(thesis_text)) > 0),
+    invalidation_condition TEXT NOT NULL CHECK(length(trim(invalidation_condition)) > 0),
+    horizon_days INTEGER CHECK(horizon_days IS NULL OR horizon_days > 0),
+    position_note TEXT,
+    decided_at TEXT NOT NULL,
+    source_post_id INTEGER REFERENCES posts(id),
+    source_version_id INTEGER REFERENCES post_versions(id),
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK(status IN ('open', 'invalidated', 'expired', 'closed')),
+    closed_at TEXT,
+    notes TEXT,
+    CHECK(
+        (source_version_id IS NULL)
+        OR (source_post_id IS NOT NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS my_decision_outcomes (
+    id INTEGER PRIMARY KEY,
+    decision_id INTEGER NOT NULL REFERENCES my_decisions(id),
+    resolved_at TEXT NOT NULL,
+    raw_return REAL NOT NULL,
+    benchmark_return REAL NOT NULL,
+    excess_return REAL NOT NULL,
+    benchmark_ticker TEXT NOT NULL DEFAULT 'UNKNOWN',
+    outcome_method_version TEXT NOT NULL,
+    notes TEXT,
+    UNIQUE(decision_id, benchmark_ticker, outcome_method_version)
+);
+
+CREATE TABLE IF NOT EXISTS my_decision_reviews (
+    id INTEGER PRIMARY KEY,
+    decision_id INTEGER NOT NULL REFERENCES my_decisions(id),
+    reviewed_at TEXT NOT NULL,
+    retro_text TEXT NOT NULL CHECK(length(trim(retro_text)) > 0),
+    lesson TEXT
+);
+
 CREATE TABLE IF NOT EXISTS prices (
     ticker TEXT NOT NULL,
     date TEXT NOT NULL,
@@ -323,6 +366,62 @@ def _ensure_column(
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
 
+def _rebuild_legacy_decision_outcomes(connection: sqlite3.Connection) -> None:
+    """Remove the temporary resolved-at unique constraint from early phase-5 DBs."""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'my_decision_outcomes'"
+    ).fetchone()
+    if row is None or row["sql"] is None:
+        return
+    normalized = re.sub(r"\s+", "", str(row["sql"]).lower())
+    if "unique(decision_id,resolved_at,outcome_method_version)" not in normalized:
+        return
+    columns = {
+        item["name"] for item in connection.execute("PRAGMA table_info(my_decision_outcomes)")
+    }
+    benchmark_expression = (
+        "COALESCE(benchmark_ticker, 'UNKNOWN')" if "benchmark_ticker" in columns else "'UNKNOWN'"
+    )
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            """
+            CREATE TABLE my_decision_outcomes_rebuilt (
+                id INTEGER PRIMARY KEY,
+                decision_id INTEGER NOT NULL REFERENCES my_decisions(id),
+                resolved_at TEXT NOT NULL,
+                raw_return REAL NOT NULL,
+                benchmark_return REAL NOT NULL,
+                excess_return REAL NOT NULL,
+                benchmark_ticker TEXT NOT NULL DEFAULT 'UNKNOWN',
+                outcome_method_version TEXT NOT NULL,
+                notes TEXT
+            )
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT INTO my_decision_outcomes_rebuilt(
+                id, decision_id, resolved_at, raw_return, benchmark_return, excess_return,
+                benchmark_ticker, outcome_method_version, notes
+            )
+            SELECT
+                id, decision_id, resolved_at, raw_return, benchmark_return, excess_return,
+                {benchmark_expression}, outcome_method_version, notes
+            FROM my_decision_outcomes
+            """
+        )
+        connection.execute("DROP TABLE my_decision_outcomes")
+        connection.execute(
+            "ALTER TABLE my_decision_outcomes_rebuilt RENAME TO my_decision_outcomes"
+        )
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+    else:
+        connection.execute("COMMIT")
+
+
 def _backfill_market_relation(connection: sqlite3.Connection) -> None:
     rows = connection.execute(
         """
@@ -351,6 +450,7 @@ def _backfill_market_relation(connection: sqlite3.Connection) -> None:
 
 def initialize_database(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
+    _rebuild_legacy_decision_outcomes(connection)
     _ensure_column(
         connection,
         "fetch_runs",
@@ -399,12 +499,29 @@ def initialize_database(connection: sqlite3.Connection) -> None:
     # back to a close line when open/high/low are absent.
     for column in ("open", "high", "low", "volume"):
         _ensure_column(connection, "prices", column, f"{column} REAL")
+    _ensure_column(
+        connection,
+        "my_decision_outcomes",
+        "benchmark_ticker",
+        "benchmark_ticker TEXT NOT NULL DEFAULT 'UNKNOWN'",
+    )
     _backfill_market_relation(connection)
     connection.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_enrichments_market_viewpoints
         ON enrichments(prompt_version, post_type, is_market_related, version_id);
         CREATE INDEX IF NOT EXISTS idx_claims_version_id ON claims(version_id);
+        CREATE INDEX IF NOT EXISTS idx_my_decisions_status_due
+        ON my_decisions(status, decided_at, horizon_days);
+        CREATE INDEX IF NOT EXISTS idx_my_decisions_ticker_decided
+        ON my_decisions(ticker, decided_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_my_decision_outcomes_decision
+        ON my_decision_outcomes(decision_id, resolved_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_my_decision_outcomes_method
+        ON my_decision_outcomes(decision_id, benchmark_ticker, outcome_method_version)
+        WHERE benchmark_ticker != 'UNKNOWN';
+        CREATE INDEX IF NOT EXISTS idx_my_decision_reviews_decision
+        ON my_decision_reviews(decision_id, reviewed_at);
         """
     )
     for table in EVIDENCE_TABLES:
@@ -439,6 +556,52 @@ def initialize_database(connection: sqlite3.Connection) -> None:
           OR OLD.first_seen_at IS NOT NEW.first_seen_at
         BEGIN
             SELECT RAISE(ABORT, 'posts identity fields cannot be updated');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_my_decisions_delete
+        BEFORE DELETE ON my_decisions
+        BEGIN
+            SELECT RAISE(ABORT, 'my_decisions cannot be deleted');
+        END;
+
+        DROP TRIGGER IF EXISTS protect_my_decisions_thesis;
+        CREATE TRIGGER protect_my_decisions_thesis
+        BEFORE UPDATE ON my_decisions
+        WHEN OLD.id IS NOT NEW.id
+          OR OLD.ticker IS NOT NEW.ticker
+          OR OLD.direction IS NOT NEW.direction
+          OR OLD.thesis_text IS NOT NEW.thesis_text
+          OR OLD.invalidation_condition IS NOT NEW.invalidation_condition
+          OR OLD.horizon_days IS NOT NEW.horizon_days
+          OR OLD.decided_at IS NOT NEW.decided_at
+          OR OLD.source_post_id IS NOT NEW.source_post_id
+          OR OLD.source_version_id IS NOT NEW.source_version_id
+        BEGIN
+            SELECT RAISE(ABORT, 'my_decisions thesis fields cannot be updated');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_my_decision_reviews_update
+        BEFORE UPDATE ON my_decision_reviews
+        BEGIN
+            SELECT RAISE(ABORT, 'my_decision_reviews is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_my_decision_reviews_delete
+        BEFORE DELETE ON my_decision_reviews
+        BEGIN
+            SELECT RAISE(ABORT, 'my_decision_reviews is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_my_decision_outcomes_update
+        BEFORE UPDATE ON my_decision_outcomes
+        BEGIN
+            SELECT RAISE(ABORT, 'my_decision_outcomes is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_my_decision_outcomes_delete
+        BEFORE DELETE ON my_decision_outcomes
+        BEGIN
+            SELECT RAISE(ABORT, 'my_decision_outcomes is append-only');
         END;
         """
     )

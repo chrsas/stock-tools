@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from difflib import unified_diff
 from typing import Any, cast
 
 from kol_archive.maintenance import redact_text
+from kol_archive.market import common_close_returns
 from kol_archive.models import FeedState, SourceState, WatchMode
 
 _CN_TICKER = re.compile(r"^(?:SH|SZ|BJ)\d{6}$")
@@ -18,7 +19,6 @@ _MARKET_RELATED_VIEWPOINT_SQL = """
 (e.is_market_related = 1
  OR EXISTS (SELECT 1 FROM claims market_claim WHERE market_claim.version_id = e.version_id))
 """
-_A_SHARE_TIMEZONE = timezone(timedelta(hours=8))
 
 
 def _row_dict(
@@ -647,55 +647,19 @@ def _descriptive_market_snapshot(
     benchmark_ticker: str,
 ) -> dict[str, object] | None:
     try:
-        viewpoint_date = (
-            datetime.fromisoformat(str(viewpoint_at))
-            .astimezone(_A_SHARE_TIMEZONE)
-            .date()
-            .isoformat()
-        )
+        snapshot = common_close_returns(connection, ticker, benchmark_ticker, str(viewpoint_at))
     except ValueError:
         return None
-    start = connection.execute(
-        """
-        SELECT asset.date, asset.close AS asset_close, benchmark.close AS benchmark_close
-        FROM prices asset
-        JOIN prices benchmark ON benchmark.date = asset.date AND benchmark.ticker = ?
-        WHERE asset.ticker = ? AND asset.date < ?
-        ORDER BY asset.date DESC
-        LIMIT 1
-        """,
-        (benchmark_ticker, ticker, viewpoint_date),
-    ).fetchone()
-    if start is None:
+    if snapshot is None:
         return None
-    end = connection.execute(
-        """
-        SELECT asset.date, asset.close AS asset_close, benchmark.close AS benchmark_close
-        FROM prices asset
-        JOIN prices benchmark ON benchmark.date = asset.date AND benchmark.ticker = ?
-        WHERE asset.ticker = ? AND asset.date >= ?
-        ORDER BY asset.date DESC
-        LIMIT 1
-        """,
-        (benchmark_ticker, ticker, viewpoint_date),
-    ).fetchone()
-    if end is None:
-        return None
-    if float(start["asset_close"]) == 0 or float(start["benchmark_close"]) == 0:
-        return None
-    raw_return = float(end["asset_close"]) / float(start["asset_close"]) - 1
-    benchmark_return = float(end["benchmark_close"]) / float(start["benchmark_close"]) - 1
     return {
-        "ticker": ticker,
-        "benchmark_ticker": benchmark_ticker,
-        "start_date": start["date"],
-        "end_date": end["date"],
-        "raw_return": raw_return,
-        "benchmark_return": benchmark_return,
-        "excess_return": raw_return - benchmark_return,
-        "method_version": "descriptive-common-close-v1",
+        **snapshot,
         "series": _daily_series(
-            connection, ticker, benchmark_ticker, str(start["date"]), str(end["date"])
+            connection,
+            ticker,
+            benchmark_ticker,
+            str(snapshot["start_date"]),
+            str(snapshot["end_date"]),
         ),
     }
 
