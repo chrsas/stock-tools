@@ -1,4 +1,10 @@
-# KOL 发言追踪工具 开发规范 v8（冻结候选，供 Agent 执行）
+# KOL 发言追踪工具 开发规范 v9（冻结候选，供 Agent 执行）
+
+> v9 变更：新增宪章第 12 条（删帖动机中性）；新增阶段 5–11（自我决策日志、中性变更摘要与通知、
+> lite 结算闭环、关注列表提醒、统计分析层、框架提取、轻量多源信源层），并冻结 UI 视觉迭代。
+> 阶段 1/2/2b/3 与图片证据扩展均已完成，阶段 4 由阶段 7 的 lite 路径渐进实现。
+> 多平台采用**双层定位**：重装存证（双轨监控、删帖检测、结算）只限雪球；其他平台走阶段 11
+> 的轻量摄入层，永不进负面推断与战绩。
 
 > 本文件是交给编码 Agent 的执行规范。Agent 必须先通读「第 0 节 项目宪章」并全程遵守，这些是不可违反的硬约束，优先级高于任何后续任务的便利性。
 >
@@ -25,6 +31,7 @@
 9. **历史回填与实时监控按版本层分离。** 仅 `ingest_mode='live'` 且 `first_observed_at >= live_monitoring_started_at` 的版本对应命题可进入事件研究。
 10. **`claims` 只收原帖明确表达过的可证伪内容；`claim_made_at` 取对应版本首次观察时间。** LLM 改写产物只进 `rewrite_exercises`，禁止流入回测。`horizon_days`、`target_price` 允许为空，LLM 不得补造。
 11. **LLM 只做富化，不参与判定市场结果。GUI 可以展示由已结算命题派生的博主级摘要、筛选和跨人排序，但每项指标必须同时展示样本量、统计时间窗、口径版本、未结算数量，并可下钻到对应 `version_id`、命题和市场结果。禁止隐藏亏损样本、混用不可比口径、用小样本强行排名或生成不透明综合分。工具每阶段独立可用；本地单用户、不对外发布、不暴露公网、温和采集。**
+12. **呈现层对删帖动机与证据层同样保持中性。** 中国监管环境下删帖多为自保、防炫富或日常清理，单次删帖不可定性为「改口」。摘要、周报、UI、通知一律使用中性事实陈述（「删除/编辑/图片变更」），禁止「改口」「心虚」等归因措辞。区分动机只允许走分布层面的版本化统计：选择性检验（被删帖 vs 保留帖事后表现分布）、跨账号同步删帖潮（标注为平台级事件，不记到个人）、删图不删文模式。统计结论必须展示样本量，样本不足只显示「不足」。
 
 ---
 
@@ -204,66 +211,17 @@ prices  (只读)  ticker, date, close, ...
 
 ## 3. 分阶段开发计划
 
-### 阶段 1：平台探针 + 本地追加存档 + 备份导出
+### 已完成阶段（详细规范与 DoD 见 `docs/phases-archive.md`，日常开发无需阅读）
 
-**1a 平台探针（先做，产出书面决策记录参数化后续）**
-实测并记录：稳定持久帖子 ID；分页边界与 `covered_from/covered_to` 计算法；登录态维持与失效表现；编辑暴露方式；feed 中删帖表现；直链复查能否区分 `explicitly_removed / not_found / restricted / reachable`；直链正文能否稳定提取；**feed 与直链的正文能否归一化为相同内容**（不能则按轨标注 `content_fidelity`，feed 摘要型时编辑检测退化为仅 Track B 能力，须写明）；两轨各自频率限制；监控窗口默认天数；旧帖与钉住帖复查策略。**探针结论落地、参数回填后方可动 1b。**
-
-**1b 存档与双轨状态机**
-- 单进程 + SQLite(WAL)，连接级 `PRAGMA foreign_keys=ON`；建全部表、视图、UNIQUE/部分唯一索引、FK。
-- 触发器：六张证据表只追加；`posts` 禁删与身份字段不可改。
-- feed 与直链两任务，各按第 2 节事务顺序原子写入；实现 2.2–2.6 全部规则。
-
-**1c 备份与导出**
-SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JSON/CSV 导出；API 密钥仅环境变量，登录 cookie 可用环境变量或被忽略的本地配置，任何凭据绝不进导出文件。
-
-**DoD**：A→B→A 落三条版本行且各带不同首次观察时间；partial run 中已见在场帖仍存档、但不产生缺席推断；full/preview 正确区分，preview 不触发编辑事件；feed 连续完整健康缺席落 `absent_confirmed` 并入队；健康直链删除占位落 `gone_confirmed` 且后续 404/限权不降级，正文被改可捕获为新版本；退化抓取/复查不动帖子状态与 `source_checked_at`；同一帖至多一条 pending；崩溃注入下事务整体回滚、证据与投影不错位；`posts` 身份字段与删除被触发器拒绝；备份可恢复且经验证。
-
----
-
-### 阶段 2：原始时间线 + 证据卡片 + 关注理由 + 改写训练
-不建批量富化。时间线（三维状态人读标签、删帖强弱信号分级）；证据卡片（无 LLM，单帖观察历史、版本 diff、变迁及证据 run、附注、钉住开关）；`attention_log`（锁 `version_id`、创建即自动钉住）；改写训练（按需单条 LLM 改写写 `rewrite_exercises` 含 `version_id`、创建即自动钉住）。
-**DoD**：原始流与诚实观察时间可见；钉/取消钉遵守 2.6；写理由或改写训练自动钉住并锁版本。
-
-### 阶段 2b：轻量网页界面 + 手机私网访问
-前端源码放在 `frontend/`，构建产物由现有 `serve` 命令托管。网页与 CLI 共用现有 SQLite、
-状态机、展示投影和脱敏逻辑，继续保持单 Python 进程。
-
-**2b1 本机网页闭环**
-- 新增 `serve --config-dir config` 启动命令，默认只监听 `127.0.0.1`。
-- 默认首页展示博主最近市场相关观点；左侧选择博主并展示已结算样本数、未结算数量和可用战绩摘要，右侧展示最近观点簇和已记录市场结果。尚未配置正式结算口径时，只展示已有记录及其原始口径。
-- 已有可用结算口径时，博主列表支持按最近活跃、已结算样本数、命中率、平均超额变化等明确指标排序。低于 `PERFORMANCE_MIN_RESOLVED_SAMPLES` 时默认按最近活跃展示并标注“样本不足”，不得用零样本或小样本制造领先印象。
-- 服务端渲染原始时间线和证据卡片，原文始终可读；手机窄屏下保持可用。
-- 时间线展示三维状态、人读标签、删帖强弱信号、首次观察、最后观察和检测到缺失时间。
-- 证据卡片展示观察历史、版本列表、版本 diff、状态变迁、关联 run、脱敏附注、关注理由、改写训练和钉住状态。
-- 页面提供钉住、取消钉住、写关注理由、单条改写训练和记录人工 verdict 的操作入口；写入继续复用阶段 2 服务层。
-
-**2b2 手机私网访问**
-- 需要手机访问时，在部署机器和手机安装 Tailscale，只通过 tailnet 私网地址访问。
-- 服务监听地址必须显式配置为部署机器的 Tailscale 地址；默认值仍为 `127.0.0.1`，不得默认监听 `0.0.0.0`。
-- 不配置公网端口映射，不开放公网访问，不在页面、日志或异常中输出 cookie、API Key 或本地配置内容。
-- 所有修改状态的网页请求使用 `POST`，并校验 CSRF token；Tailscale ACL 仅允许用户自己的设备访问。
-
-**DoD**：本机浏览器可以完成阶段 2 的查看与操作闭环；已有可用结算口径时，博主摘要与排序同时展示样本量、时间窗和口径说明，且可下钻到对应观点证据；样本不足不会进入默认战绩排序；页面只展示脱敏后的证据；CLI 行为保持兼容；默认监听仅限本机；显式绑定 Tailscale 地址后手机可在 tailnet 内访问；公网无法访问；网页路由、脱敏、CSRF 和关键写操作有自动化测试。
-
-### 阶段 3：LLM 标签 + 标签门过滤（需累积样本）
-批量富化每个 `version` 出 `post_type`、三布尔标签、`rationale`、`evidence_snippet`、`model`、
-`prompt_version`（幂等键 UNIQUE(version_id, prompt_version)）；归档证据另行派生
-`is_market_related`，用于博主观点页减噪。命中任一标签进过滤流按时间排序，原始流一键可达；
-市场相关观点按博主展示，同一明确证券代码在连续 7 天窗口内聚合为观点簇；后期达
-`MIN_SAMPLES` 加 `attention_tier`，按 `prompt_version` 隔离。`attention_tier` 只表达内容关注价值，
-不得替代基于已结算市场结果计算的战绩指标。
-**DoD**：命中标签进过滤流；市场无关观点不进入博主观点页但仍保留在原始流和富化记录；
-观点簇逐条保留原帖证据；原始流始终可达；样本不足不强行分级。
-
-### 图片证据扩展：下载 + OCR + VLM
-帖子版本记录去签名后的有序图片清单哈希，正文不变但换图、增图或删图也生成新版本。
-图片字节按下载尝试追加到 `post_images`；OCR 与 VLM 描述分别进入派生表，不写回证据正文。
-三个 pass 独立按需运行，单图失败不阻断批次；导出保留图片字节和 OCR 原文，对图片来源 URL
-去查询参数，并对 VLM 描述执行启发式脱敏。
-
-**DoD**：图片清单变化可形成新版本；同 URL 字节变化可追溯；下载、OCR、VLM 均可续跑且幂等；
-旧版本 NULL 清单升级后首轮不误报换图；导出不携带图片签名参数。
+- **阶段 1**（探针 + 存档 + 备份导出）：已完成。交付 `probe/`（探针脚本与 `probe_findings.md`）、
+  `kol_archive/`（database/service/collector/models/browser）、`maintenance.py`（备份与脱敏导出）。
+- **阶段 2**（时间线 + 证据卡片 + 关注理由 + 改写训练）：已完成。交付 `presentation.py`、
+  `rewrite.py` 及对应 CLI 命令。
+- **阶段 2b**（Vue 网页 + Tailscale 私网访问）：已完成。交付 `web.py`（serve 命令）+ `frontend/`。
+- **阶段 3**（LLM 标签 + 标签门过滤 + 观点簇）：已完成。交付 `enrich.py`、队列/记分卡视图。
+- **图片证据扩展**（下载/OCR/VLM，适配器 `xueqiu-3`）：已完成。交付 `images.py`、`ocr.py`、
+  `image_enrich.py`。
+- 上述阶段全部 DoD 有自动化测试兜底（`tests/`，当前全套 191 通过）。
 
 ### 阶段 4：事件研究等（占位，按需）
 行情对齐、交易日规则、基准选择、多时间窗口待定。可能冲突候选只摆证据；`claims` +
@@ -281,6 +239,165 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 
 ---
 
+### 阶段 5：自我决策日志（最高优先）
+
+目标函数从「监督 KOL」扩展到「监督自己」：用同一套不可篡改存证 + 价格结算机器记录用户本人的
+投资决策并强制复盘。这是因果链最短、样本积累最快的功能，独立于 KOL 数据可用。
+
+```
+my_decisions          (身份与论点锁定，状态可变投影)
+  id, ticker, direction(long|short|neutral), thesis_text,
+  invalidation_condition, horizon_days(nullable), position_note(nullable),
+  decided_at, source_post_id(nullable FK), source_version_id(nullable FK),
+  status(open|invalidated|expired|closed), closed_at(nullable), notes
+  -- 触发器锁定 ticker/direction/thesis_text/invalidation_condition/decided_at（写一次不可变，
+  --   防事后改论点）；status/closed_at/notes 可变；禁止物理删除。论点写错走新行 + notes 关联。
+my_decision_outcomes  decision_id, resolved_at, raw_return, benchmark_return, excess_return,
+                      outcome_method_version, notes
+my_decision_reviews              [append-only]
+  id, decision_id, reviewed_at, retro_text, lesson(nullable)
+```
+
+- CLI：`add-decision` / `close-decision` / `review-decision` / `decisions`（列表含到期未结算、
+  未复盘清单）。网页提供同等录入与查看入口，写操作 POST + CSRF。
+- `invalidation_condition` 为必填：没有证伪条件的决策拒绝录入。证伪是否触发由人工判定并
+  `close-decision`，工具只展示走势证据与到期提醒，**绝不自动判定证伪、绝不生成买卖建议**。
+- 结算复用 `prices` 共同交易日收盘口径，`outcome_method_version` 版本化（首版可复用
+  `descriptive-common-close-v1` 的对齐规则）；同一决策可按多窗口结算，逐条展示不汇总打分。
+- 复盘视图：按 status/标的/时间过滤，逐条下钻论点原文、走势、复盘记录；展示「逾期未复盘」计数。
+
+**DoD**：论点字段 UPDATE 被触发器拒绝、status 可改、行禁删；无证伪条件录入被拒；结算同口径
+可重算稳定；到期未结算与未复盘清单在 CLI 与网页可见；决策、结果、复盘逐条可下钻；全流程不
+输出任何方向性建议文案。
+
+### 阶段 6：中性变更摘要 + 主动通知基础
+
+把工具从「等用户来查」变成「主动告知」，同时为后续阶段提供推送通道。措辞受宪章 7/12 约束。
+
+- `digest` 命令：给定窗口（默认 7 天）生成 markdown/HTML 摘要，含——
+  - 删除事件：帖子标识、存档正文摘录与图片缩略、首次/最后观察时间（不归因动机）；
+  - 编辑事件：版本 diff 高亮；
+  - 仅图片变更（正文未动、`image_manifest_hash` 变化）单独列出；
+  - 跨账号同步删帖潮：窗口内 ≥ `digest.wave_min_accounts`（默认 3）个账号发生删除事件即整体
+    标注「平台级删帖密集期」，逐条仍列出但不对个人加注；
+  - 涉及观点簇的，附已有的描述性市场变化。
+- 通知通道：摘要落盘 `data/digests/`；可选推送（通道与凭据走环境变量/本地配置）。**推送内容只含
+  摘要标题、条目计数和 tailnet 私网链接，证据正文与截图不出私网**；第三方推送服务只可承载该
+  最小载荷。
+- 采集健康告警：`run-once` 连续失败、CDP 连不上、`login_state=expired` 连续出现达
+  `alerts.failure_streak`（默认 2）即通过同通道告警——证据采集断档不可逆，这是最高优先告警。
+
+**DoD**：摘要措辞无归因词（对模板做断言测试）；删帖潮判定有单测；推送载荷不含正文/图片/凭据；
+采集连续失败可在阈值内触发告警；窗口内无事件时输出「无变更」而非空文件。
+
+### 阶段 7：lite 结算闭环（阶段 4 的最小实现，共享其全部硬约束）
+
+不等完美口径，先跑通「LLM 提议 → 人工确认 → 自动结算 → 逐条展示」。宪章 9/10/11 全部适用。
+
+```
+claim_proposals
+  id, version_id, ticker, direction(long|short|neutral),
+  horizon_days(nullable), target_price(nullable), confidence_phrasing,
+  evidence_snippet, model, prompt_version, created_at,
+  review_state(pending|accepted|rejected), reviewed_at(nullable),
+  claim_id(nullable FK -> claims.id)
+  UNIQUE(version_id, ticker, prompt_version)
+```
+
+- `propose-claims` 命令：仅对 `ingest_mode='live'` 且 `first_observed_at >=
+  live_monitoring_started_at` 的市场相关版本运行；LLM 只允许抽取原文明确表达的内容，
+  `horizon_days`/`target_price` 原文没有就留空，**禁止补造**；幂等键同上。
+- 网页确认页：逐条展示提议 + 原文证据片段 + 一键 accepted/rejected；accepted 即写入 `claims`
+  （`claim_made_at` = 对应版本 `first_observed_at`）。rejected 留痕不删。
+- 自动结算：`resolve-claims` 到期用 `prices` 共同交易日收盘写 `claim_outcomes`，
+  `outcome_method_version` 版本化；无行情数据的标的保持 open 并在列表标注「待行情」。
+- 展示：按博主逐条结果列表（含原帖已删除的特别标注「原帖已不可见，证据见版本」并链至版本）；
+  **达到 `PERFORMANCE_MIN_RESOLVED_SAMPLES` 之前不出现任何排名、命中率百分比或汇总分**。
+
+**DoD**：提议幂等可重跑；未确认提议不进 claims；回填版本提议被拒绝（有测试）；LLM 补造字段被
+拒收；结算可重算稳定；逐条结果可下钻到 version_id 与价格序列；样本不足时页面无排名元素。
+
+### 阶段 8：关注列表交集提醒
+
+- `watchlist` 表：`ticker, name(nullable), added_at, note`；CLI `watch-ticker` / `unwatch-ticker` /
+  `watchlist`，网页可管理。
+- `run-once` 完成后：本轮新增的市场相关版本 × watchlist 交集 → 经阶段 6 通道推送。载荷只含
+  作者名、标的代码和私网帖子链接；同一 `(version_id, ticker)` 只提醒一次（落已提醒表防重）。
+- 与阶段 7 联动（已有时）：确认过 claim 的作者命中交集时在推送中标注「该作者此标的有已结算记录」，
+  但不附结论。
+
+**DoD**：交集命中即提醒、重复运行不重复提醒；正文不出私网；watchlist 增删有测试；推送失败不
+影响采集事务（通知在事务提交后异步执行）。
+
+### 阶段 9：统计分析层（删帖动机区分 + 拥挤度 + 防忽悠卡片）
+
+全部为分布/描述层证据，宪章 12 约束适用：不对单次事件定性，无综合分。
+
+- **选择性删除检验**：按博主比较「被删帖关联标的」与「保留帖关联标的」事后表现分布（共同口径、
+  版本化方法、多窗口）；展示两组样本量；任一组低于 `analysis.min_group_samples`（默认 10）只显示
+  「样本不足」。结果措辞为「分布差异」，不输出「该博主在改口」类结论。
+- **跨博主拥挤度**：滚动窗口内 ≥ `analysis.crowding_min_authors`（默认 3）个账号对同一标的发布
+  同向市场相关观点 → 记一条拥挤事件（append 流水表），事件页展示组成帖子与事后走势回看；
+  不生成买卖暗示。
+- **防忽悠卡片**：单帖证据卡片新增「该作者与本帖标的」面板——同作者同标的的全部历史版本（含已
+  删除版本，照常标注观察语义）、历史观点簇的描述性市场变化、删除/编辑事件记录。无历史时诚实
+  显示「无既往记录」。
+
+**DoD**：两项统计同口径可重算；样本不足时无结论性文案（模板断言测试）；拥挤事件可下钻全部组成
+帖；防忽悠面板包含已删版本且不暗示精确删改时刻；所有新增查询不拖慢单帖页首屏（建必要索引）。
+
+### 阶段 10（可选）：框架提取 enrich-v3
+
+- 对命中 `transferable_framework` 的版本，结构化抽取分析框架：输入变量、逻辑链、结论形态、
+  作者声明的适用/失效条件；存独立派生表（幂等键含 `prompt_version`），不写回证据正文。
+- 框架库页面：按主题/变量聚合浏览，逐条链回原帖版本。
+- prompt 升级遵守现有 `enrich_prompt_version` 迁移机制。
+
+**DoD**：抽取幂等可续跑；框架条目全部可溯源到 version_id；原文不可读时（已删）框架仍可用且
+标注来源版本状态。
+
+### 阶段 11：轻量多源信源层（Tier B 摄入）
+
+把博主分两层：**Tier A（重装存证）只限雪球**，完整双轨监控、删帖检测、版本取证、结算闭环；
+**Tier B（轻量信源）覆盖其他平台**，只做追加式摄入新帖——目标是「方向雷达」（发现值得自己
+研究的方向），不是问责。Tier B 不打反爬攻防战，不承诺发现删帖或编辑。
+
+- `authors` 加 `monitoring_tier('full'|'intake')`，现有雪球账号回填 `full`。schema 本就平台无关
+  （`platform` 字段、适配器边界 6.7），下游复用不动状态机核心。
+- **通用 RSS/JSON feed 适配器**（一个适配器吃多平台）：对接自部署 RSSHub 实例覆盖微博、B站、
+  知乎、部分公众号等；Telegram 频道走官方 Bot API；普通博客直连 RSS。feed 条目映射
+  `NormalizedPost`（`platform_post_id` 取 feed GUID/链接哈希，`content_fidelity` 按源标 full 或
+  preview），原始条目存 `raw_payload`。RSSHub 地址、各源 URL 列表在 `config.local.yml`，
+  凭据走环境变量。
+- **手动入库入口**：对反爬极重的源（如公众号文章），CLI `import-post` + 网页粘贴表单，人工
+  把正文/链接/作者/时间存为 intake 帖，同样进富化管线。
+- 摄入帖照常写 `posts`/`post_versions`/`post_observations`（追加证据：留下「摄入当时的存档副本」
+  本身有价值；两次拉取间内容变化照常落新版本，但**不承诺**捕获）。
+- **Tier B 硬约束（与宪章同级）**：
+  - 永不产生负面推断：无缺席 observation、无 `absent_confirmed`、无 streak、无 `out_of_scope`
+    判定，`source_state` 不参与直链复查承诺（钉住 intake 帖只表达个人关注，不触发 Track B）。
+  - 永不进入 `claim_proposals` / `claims` / 结算 / 任何战绩或排名；阶段 9 的选择性删除检验等
+    统计一律排除 intake 数据（无删帖检测能力，统计无意义）。
+  - UI 与导出明确标注层级（如「轻量信源 · 不监控删改」），不得与 Tier A 的监控语义混排造成
+    「此帖受删帖监控」的错误暗示。
+  - 噪音闸门：intake 帖进入待处理队列与过滤流仍须过现有标签门；原始时间线照常全量可达
+    （防茧房原则不变）。watchlist 交集提醒（阶段 8）对 intake 帖生效——这是 Tier B 的主要
+    变现出口。
+- 依赖：晚于阶段 6（复用推送通道）与阶段 8（watchlist 出口）落地最划算，可与阶段 9/10 并行。
+
+**DoD**：intake 账号任何轮次都不产生缺席 observation 与负面事件（有测试）；intake 版本不出现在
+claim 提议目标、结算与阶段 9 统计中（有测试）；RSS 适配器用离线 fixture 直测（正常条目、缺字段
+降级、GUID 去重）；手动入库可用且进富化管线；UI/导出层级标注可见；RSSHub 不可达只影响 intake
+源采集、不连累雪球轮次。
+
+### 明确不做（v9 冻结）
+
+- 不做多平台**重装存证**（双轨监控、删帖检测、结算只限雪球）；多平台只走阶段 11 的轻量摄入层。
+- 不做小样本排名；不做自动跟单、买卖信号或任何方向性建议输出。
+- UI 视觉/品牌类迭代冻结：阶段 5–11 完成前不接受纯视觉任务，界面改动仅限承载上述功能所必需。
+
+---
+
 ## 4. 给 Agent 的全局提醒
 - 产出以证据和可复算指标帮助用户判断；观点摘要、博主比较和排序必须保留完整下钻路径。
 - 过滤是默认视图但非唯一视图，原始时间线一键可达，防信息茧房。
@@ -295,8 +412,13 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 - 监控窗口天数、缺席阈值 N、直链复查频率、`recent_feed_absent` 与 `llm_candidate` 的 TTL、`MIN_SAMPLES`、`PERFORMANCE_MIN_RESOLVED_SAMPLES`、各轨 `content_fidelity`（多数由探针建议）。
 - `live_monitoring_started_at` 系统自动写入。
 - LLM 供应商/模型/API Key（环境变量，阶段 2 起）。
-- 行情数据源（阶段 4）。
+- 行情数据源（阶段 4/7；日线已可由 `fetch-kline` 抓取）。
 - 部署机器；阶段 2b 如需手机访问，配置 Tailscale 地址、端口和 ACL。
+- 阶段 6+：推送通道及其凭据（环境变量）；`digest.wave_min_accounts`、`alerts.failure_streak`。
+- 阶段 8：初始 watchlist（持仓与研究中标的）。
+- 阶段 9：`analysis.min_group_samples`、`analysis.crowding_min_authors`。
+- 阶段 11：自部署 RSSHub 地址、Tier B 信源清单（平台/账号/feed URL）、Telegram Bot Token
+  （环境变量）、各源拉取频率。
 
 ---
 
