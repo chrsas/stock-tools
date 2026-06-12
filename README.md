@@ -295,6 +295,7 @@ npm run build
 - `/?view=filtered`：命中任一注意力标签的过滤流。
 - `/?view=pinned`：已钉住帖子。
 - `/?view=decisions`：个人决策日志，可录入原始论点与证伪条件、人工关闭并追加复盘。
+- `/?view=watchlist`：关注列表，可增删标的并查看累计提醒次数。
 - `/authors/<uid>`：单个博主的观点簇、市场变化与最近帖子。
 - `/posts/<post_id>`：单帖证据卡片。
 
@@ -312,6 +313,18 @@ npm run build
 `queue`、`scorecards`、`timeline --filtered` 默认读取 `llm.enrich_prompt_version`。富化版本迁移期间，
 网页可以通过 `web.enrich_prompt_version` 暂读旧版本；CLI 诊断命令需显式传
 `--prompt-version enrich-v1` 才会读取旧结果。
+
+关注列表也可通过 CLI 管理：
+
+```powershell
+.\.venv\Scripts\python.exe -m kol_archive watch-ticker SH688303 --name "大全能源" --note "观察"
+.\.venv\Scripts\python.exe -m kol_archive watchlist
+.\.venv\Scripts\python.exe -m kol_archive unwatch-ticker SH688303
+```
+
+每次 `run-once` 成功完成采集后，会把本轮新增 live 版本与关注列表求交集，并复用通知通道发送
+作者名、标的代码和私网帖子链接。同一版本与标的只发送一次；发送失败会保留待发送记录供后续运行
+重试，不影响采集结果。通知未启用或缺少凭据时跳过交集扫描，不生成待发送流水。
 
 个人决策日志也提供 CLI。录入必须填写证伪条件，论点字段写入后由数据库触发器锁定；关闭状态与
 复盘均由用户人工记录。`resolve-decisions` 以决策发生日前最后一个共同交易日收盘为起点，以期限

@@ -40,6 +40,8 @@ EXPORT_QUERIES = {
     "my_decision_reviews": "SELECT * FROM my_decision_reviews",
     "prices": "SELECT * FROM prices",
     "ticker_names": "SELECT * FROM ticker_names",
+    "watchlist": "SELECT * FROM watchlist",
+    "watchlist_alerts": "SELECT * FROM watchlist_alerts",
     "version_sightings": "SELECT * FROM version_sightings",
 }
 JSON_COLUMNS = {
@@ -60,6 +62,7 @@ RELATION_TEXT_REDACTION_COLUMNS = {
     ("my_decisions", "position_note"),
     ("my_decision_reviews", "retro_text"),
     ("my_decision_reviews", "lesson"),
+    ("watchlist", "note"),
 }
 _SNAPSHOT_NAME_RE = re.compile(r"^kol-(\d{8}T\d{12}Z)(?:-(\d+))?\.sqlite3$")
 _SENSITIVE_KEY_PARTS = (

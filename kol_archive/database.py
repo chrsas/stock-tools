@@ -315,6 +315,22 @@ CREATE TABLE IF NOT EXISTS ticker_names (
     name TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS watchlist (
+    ticker TEXT PRIMARY KEY,
+    name TEXT,
+    added_at TEXT NOT NULL,
+    note TEXT
+);
+
+CREATE TABLE IF NOT EXISTS watchlist_alerts (
+    id INTEGER PRIMARY KEY,
+    version_id INTEGER NOT NULL REFERENCES post_versions(id),
+    ticker TEXT NOT NULL,
+    detected_at TEXT NOT NULL,
+    sent_at TEXT,
+    UNIQUE(version_id, ticker)
+);
+
 -- Append-only evidence: one row per image-fetch attempt for a version. A
 -- re-download of the same normalized_url appends a new row (never updates), so a
 -- byte swap behind an unchanged URL stays visible as a second row with a
@@ -576,6 +592,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         WHERE benchmark_ticker != 'UNKNOWN';
         CREATE INDEX IF NOT EXISTS idx_my_decision_reviews_decision
         ON my_decision_reviews(decision_id, reviewed_at);
+        CREATE INDEX IF NOT EXISTS idx_watchlist_alerts_pending
+        ON watchlist_alerts(sent_at, detected_at, id);
         """
     )
     for table in EVIDENCE_TABLES:

@@ -35,6 +35,7 @@ from kol_archive.presentation import (
 )
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
 from kol_archive.service import Archive
+from kol_archive.watchlist import add_watchlist_ticker, list_watchlist, remove_watchlist_ticker
 
 LOGGER = logging.getLogger(__name__)
 MAX_FORM_BYTES = 64 * 1024
@@ -246,6 +247,8 @@ def _home_payload(
                 limit=limit,
             ),
         }
+    if view == "watchlist":
+        return {"view": "watchlist", "items": list_watchlist(connection)}
     authors = author_viewpoint_overview(connection, prompt_version)
     selected_uid = (values.get("author") or [""])[0] or None
     selected = next(
@@ -376,6 +379,12 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if path == "/decisions/add":
                 self._add_decision(form)
                 return
+            if path == "/watchlist/add":
+                self._add_watchlist_ticker(form)
+                return
+            if path == "/watchlist/remove":
+                self._remove_watchlist_ticker(form)
+                return
             proposal_id = self._post_id(path, prefix="/claim-proposals/", suffix="/review")
             if proposal_id is not None:
                 self._review_claim_proposal(proposal_id, form)
@@ -486,6 +495,24 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         self._with_archive(add)
         assert decision_id is not None
         self._mutation_done(decision_id, key="decision_id", location="/?view=decisions")
+
+    def _add_watchlist_ticker(self, form: dict[str, list[str]]) -> None:
+        ticker = self._required_form_value(form, "ticker")
+        self._with_connection(
+            lambda connection: add_watchlist_ticker(
+                connection,
+                ticker,
+                datetime.now(tz=UTC).isoformat(),
+                name=self._form_value(form, "name"),
+                note=self._form_value(form, "note"),
+            )
+        )
+        self._mutation_done(0, key="watchlist_id", location="/?view=watchlist")
+
+    def _remove_watchlist_ticker(self, form: dict[str, list[str]]) -> None:
+        ticker = self._required_form_value(form, "ticker")
+        self._with_connection(lambda connection: remove_watchlist_ticker(connection, ticker))
+        self._mutation_done(0, key="watchlist_id", location="/?view=watchlist")
 
     def _review_claim_proposal(self, proposal_id: int, form: dict[str, list[str]]) -> None:
         self._with_archive(
@@ -628,7 +655,11 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _is_mutation_path(path: str) -> bool:
-        if path.startswith("/decisions/") or path.startswith("/claim-proposals/"):
+        if (
+            path.startswith("/decisions/")
+            or path.startswith("/claim-proposals/")
+            or path.startswith("/watchlist/")
+        ):
             return True
         return any(
             path.endswith(suffix)

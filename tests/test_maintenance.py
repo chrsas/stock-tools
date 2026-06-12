@@ -85,6 +85,13 @@ def seed_archive(path: Path) -> None:
         "Bearer review-secret",
         "password=lesson-secret",
     )
+    connection.execute(
+        """
+        INSERT INTO watchlist(ticker, name, added_at, note)
+        VALUES ('SH688303', '大全能源', ?, 'token=watchlist-secret')
+        """,
+        (NOW,),
+    )
     connection.close()
 
 
@@ -185,6 +192,7 @@ def test_export_writes_json_and_csv_with_credential_redaction(tmp_path: Path) ->
         "headers": {"Authorization": "[REDACTED]"},
     }
     assert payload["relations"]["posts"][0]["raw_meta"] == {"session_token": "[REDACTED]"}
+    assert payload["relations"]["watchlist"][0]["note"] == "token=[REDACTED]"
     assert "content-secret" in exported_text
     for secret in (
         "cookie-secret",
@@ -197,6 +205,7 @@ def test_export_writes_json_and_csv_with_credential_redaction(tmp_path: Path) ->
         "position-secret",
         "review-secret",
         "lesson-secret",
+        "watchlist-secret",
     ):
         assert secret not in exported_text
     assert (result.csv_dir / "posts.csv").is_file()

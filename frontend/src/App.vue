@@ -68,6 +68,11 @@ function submitDecisionReview(event: Event, decisionId: number) {
   action(`/decisions/${decisionId}/review`, Object.fromEntries(new FormData(form).entries()));
 }
 
+function submitWatchTicker(event: Event) {
+  const form = event.currentTarget as HTMLFormElement;
+  action("/watchlist/add", Object.fromEntries(new FormData(form).entries()));
+}
+
 function hasMarketFeedback(clusters: Row[]): boolean {
   return clusters.some((cluster) => cluster.market_snapshot
     || cluster.viewpoints?.some((viewpoint: Row) => viewpoint.market_outcomes?.length));
@@ -98,6 +103,7 @@ onMounted(() => { applyTheme(); refresh(); });
         <li><a class="nav-item" :class="{ on: navActive('filtered') }" href="/?view=filtered"><svg viewBox="0 0 24 24" class="ico"><path d="M4 5h16l-6 7v6l-4 2v-8z" /></svg>标签过滤流</a></li>
         <li><a class="nav-item" :class="{ on: navActive('claims') }" href="/?view=claims"><svg viewBox="0 0 24 24" class="ico"><path d="M5 4h14v16H5z" /><path d="M8 9h8M8 13h5" /></svg>命题确认</a></li>
         <li><a class="nav-item" :class="{ on: navActive('decisions') }" href="/?view=decisions"><svg viewBox="0 0 24 24" class="ico"><path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>我的决策</a></li>
+        <li><a class="nav-item" :class="{ on: navActive('watchlist') }" href="/?view=watchlist"><svg viewBox="0 0 24 24" class="ico"><path d="M12 3v18M3 12h18" /><circle cx="12" cy="12" r="8" /></svg>关注列表</a></li>
       </ul>
       <div class="sidebar-foot">
         <span class="eyebrow">prompt 版本</span>
@@ -258,6 +264,28 @@ onMounted(() => { applyTheme(); refresh(); });
               </div>
             </article>
             <p v-if="!page.items.length" class="empty">暂无命题提议。</p>
+          </section>
+        </template>
+
+        <template v-else-if="page?.view === 'watchlist'">
+          <div class="page-title"><div><h1>关注列表</h1><p class="sub">新市场相关版本命中标的后，通过私网链接提醒。</p></div></div>
+          <section class="panel">
+            <h2>添加关注标的</h2>
+            <form @submit.prevent="submitWatchTicker">
+              <label>标的代码<input name="ticker" placeholder="SH688303" required></label>
+              <label>名称<input name="name"></label>
+              <label>备注<textarea name="note"></textarea></label>
+              <button :disabled="busy">添加或更新</button>
+            </form>
+          </section>
+          <section class="stream">
+            <article v-for="item in page.items" :key="item.ticker" class="card">
+              <header><h2>{{ item.ticker }}<span v-if="item.name"> · {{ item.name }}</span></h2><span class="pill">已提醒 {{ item.alert_count }}</span></header>
+              <p class="muted">加入时间 {{ fmtTime(item.added_at) }}</p>
+              <p v-if="item.note">{{ item.note }}</p>
+              <button class="secondary" :disabled="busy" @click="action('/watchlist/remove', { ticker: item.ticker })">移除</button>
+            </article>
+            <p v-if="!page.items.length" class="empty">暂无关注标的。</p>
           </section>
         </template>
 

@@ -11,6 +11,7 @@ from kol_archive.__main__ import (
     _collection_failure_reason,
     _record_run_health_safely,
     _run_once_command,
+    _send_watchlist_alerts,
 )
 from kol_archive.alerts import AlertSettings, load_alert_settings, record_run_health
 from kol_archive.database import connect_database, initialize_database
@@ -20,6 +21,7 @@ from kol_archive.notifications import (
     load_notification_settings,
     send_notification,
 )
+from kol_archive.watchlist import add_watchlist_ticker
 
 
 def test_notification_payload_is_minimal_and_credential_stays_outside(
@@ -176,10 +178,139 @@ def test_run_once_command_loads_config_once(
     monkeypatch.setattr(
         "kol_archive.__main__._record_run_health_safely", lambda *args, **kwargs: None
     )
+    monkeypatch.setattr("kol_archive.__main__._send_watchlist_alerts", lambda *args: None)
 
     _run_once_command(argparse.Namespace(config_dir=tmp_path))
 
     assert loads == 1
+
+
+def test_watchlist_notification_failure_retries_without_affecting_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "archive.sqlite3"
+    connection = connect_database(db_path)
+    initialize_database(connection)
+    author = connection.execute(
+        """
+        INSERT INTO authors(platform, platform_uid, live_monitoring_started_at, notes)
+        VALUES ('xueqiu', 'one', '2026-06-01T00:00:00+00:00', '测试作者')
+        """
+    )
+    post = connection.execute(
+        """
+        INSERT INTO posts(
+            author_id, platform, platform_post_id, first_seen_at, feed_state,
+            source_state, watch_mode, ingest_mode
+        ) VALUES (?, 'xueqiu', 'post-1', '2026-06-12T01:00:00+00:00',
+            'present', 'reachable', 'recent_window', 'live')
+        """,
+        (author.lastrowid,),
+    )
+    connection.execute(
+        """
+        INSERT INTO post_versions(
+            post_id, content_text, content_hash, first_observed_at, ingest_mode, raw_payload
+        ) VALUES (?, '正文 SH688303', 'hash', '2026-06-12T01:00:00+00:00', 'live',
+            '{"user":{"screen_name":"测试作者"}}')
+        """,
+        (post.lastrowid,),
+    )
+    add_watchlist_ticker(connection, "SH688303", "2026-06-01T00:00:00+00:00")
+    connection.close()
+    attempts: list[NotificationPayload] = []
+
+    def notify(settings: NotificationSettings, payload: NotificationPayload) -> bool:
+        attempts.append(payload)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("offline")
+        return True
+
+    monkeypatch.setattr("kol_archive.__main__.send_notification", notify)
+    monkeypatch.setenv("KOL_NOTIFICATION_WEBHOOK_URL", "https://notify.example/test")
+    config: dict[str, object] = {
+        "notifications": {
+            "enabled": True,
+            "private_base_url": "http://127.0.0.1:8765",
+        }
+    }
+
+    _send_watchlist_alerts(config, db_path, "2026-06-12T00:00:00+00:00")
+    connection = connect_database(db_path)
+    assert connection.execute("SELECT COUNT(*) FROM post_versions").fetchone()[0] == 1
+    assert (
+        connection.execute(
+            "SELECT COUNT(*) FROM watchlist_alerts WHERE sent_at IS NULL"
+        ).fetchone()[0]
+        == 1
+    )
+    connection.close()
+
+    _send_watchlist_alerts(config, db_path, "2026-06-12T02:00:00+00:00")
+    connection = connect_database(db_path)
+    assert (
+        connection.execute(
+            "SELECT COUNT(*) FROM watchlist_alerts WHERE sent_at IS NOT NULL"
+        ).fetchone()[0]
+        == 1
+    )
+    connection.close()
+    assert len(attempts) == 2
+    assert attempts[0].link == "http://127.0.0.1:8765/posts/1"
+
+
+@pytest.mark.parametrize(
+    "notifications",
+    [
+        {"enabled": False},
+        {"enabled": True, "private_base_url": "http://127.0.0.1:8765"},
+    ],
+)
+def test_disabled_or_unconfigured_notifications_do_not_stage_watchlist_alerts(
+    tmp_path: Path,
+    notifications: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KOL_NOTIFICATION_WEBHOOK_URL", raising=False)
+    monkeypatch.setattr(
+        "kol_archive.__main__.send_notification",
+        lambda *args, **kwargs: pytest.fail("disabled or unconfigured notifications were scanned"),
+    )
+    db_path = tmp_path / "archive.sqlite3"
+    connection = connect_database(db_path)
+    initialize_database(connection)
+    author = connection.execute(
+        """
+        INSERT INTO authors(platform, platform_uid, live_monitoring_started_at)
+        VALUES ('xueqiu', 'one', '2026-06-01T00:00:00+00:00')
+        """
+    )
+    post = connection.execute(
+        """
+        INSERT INTO posts(
+            author_id, platform, platform_post_id, first_seen_at, feed_state,
+            source_state, watch_mode, ingest_mode
+        ) VALUES (?, 'xueqiu', 'post-1', '2026-06-12T01:00:00+00:00',
+            'present', 'reachable', 'recent_window', 'live')
+        """,
+        (author.lastrowid,),
+    )
+    connection.execute(
+        """
+        INSERT INTO post_versions(
+            post_id, content_text, content_hash, first_observed_at, ingest_mode, raw_payload
+        ) VALUES (?, '正文 SH688303', 'hash', '2026-06-12T01:00:00+00:00', 'live', '{}')
+        """,
+        (post.lastrowid,),
+    )
+    add_watchlist_ticker(connection, "SH688303", "2026-06-01T00:00:00+00:00")
+    connection.close()
+
+    _send_watchlist_alerts({"notifications": notifications}, db_path, "2026-06-12T00:00:00+00:00")
+
+    connection = connect_database(db_path)
+    assert connection.execute("SELECT COUNT(*) FROM watchlist_alerts").fetchone()[0] == 0
+    connection.close()
 
 
 def test_notification_settings_reject_explicit_zero_timeout() -> None:

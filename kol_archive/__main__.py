@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sqlite3
 import sys
 from dataclasses import replace
@@ -73,6 +74,16 @@ from kol_archive.prices import import_prices_csv, import_ticker_names_csv
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
 from kol_archive.service import Archive
 from kol_archive.time import parse_utc_timestamp
+from kol_archive.watchlist import (
+    add_watchlist_ticker,
+    list_watchlist,
+    mark_watchlist_alert_sent,
+    pending_watchlist_alerts,
+    remove_watchlist_ticker,
+    stage_watchlist_alerts,
+    watchlist_match_link,
+    watchlist_match_title,
+)
 from kol_archive.web import load_web_settings, serve_archive
 
 LOGGER = logging.getLogger(__name__)
@@ -459,11 +470,52 @@ def _run_once_command(args: argparse.Namespace) -> None:
         )
         raise
     collection_reason = _collection_failure_reason(_resolve_db_path(None, config), started_at)
+    _send_watchlist_alerts(config, _resolve_db_path(None, config), started_at)
     _record_run_health_safely(
         config,
         healthy=collection_reason is None,
         reason=collection_reason,
     )
+
+
+def _send_watchlist_alerts(config: dict[str, Any], db_path: Path, observed_since: str) -> None:
+    try:
+        settings = load_notification_settings(config)
+        if not settings.enabled:
+            return
+        if not os.environ.get(settings.webhook_url_env):
+            LOGGER.warning("watchlist alert processing skipped: notification credential missing")
+            return
+        connection, _ = _connect_existing_archive(db_path)
+        try:
+            stage_watchlist_alerts(
+                connection,
+                observed_since,
+                datetime.now(tz=UTC).isoformat(),
+            )
+            for match in pending_watchlist_alerts(connection):
+                try:
+                    sent = send_notification(
+                        settings,
+                        NotificationPayload(
+                            title=watchlist_match_title(match),
+                            count=1,
+                            link=watchlist_match_link(settings.private_base_url, match),
+                        ),
+                    )
+                except Exception:
+                    LOGGER.warning("watchlist notification failed alert_id=%s", match.alert_id)
+                    continue
+                if sent:
+                    mark_watchlist_alert_sent(
+                        connection,
+                        match.alert_id,
+                        datetime.now(tz=UTC).isoformat(),
+                    )
+        finally:
+            connection.close()
+    except Exception:
+        LOGGER.warning("watchlist alert processing failed")
 
 
 def _backfill_command(args: argparse.Namespace) -> None:
@@ -947,6 +999,38 @@ def _decisions_command(args: argparse.Namespace) -> None:
         connection.close()
 
 
+def _watch_ticker_command(args: argparse.Namespace) -> None:
+    connection, _ = _connect_existing_archive(_configured_db_path(args.path, args.config_dir))
+    try:
+        add_watchlist_ticker(
+            connection,
+            args.ticker,
+            datetime.now(tz=UTC).isoformat(),
+            name=args.name,
+            note=args.note,
+        )
+        _print_json({"ticker": args.ticker.strip().upper(), "watched": True})
+    finally:
+        connection.close()
+
+
+def _unwatch_ticker_command(args: argparse.Namespace) -> None:
+    connection, _ = _connect_existing_archive(_configured_db_path(args.path, args.config_dir))
+    try:
+        removed = remove_watchlist_ticker(connection, args.ticker)
+        _print_json({"ticker": args.ticker.strip().upper(), "removed": removed})
+    finally:
+        connection.close()
+
+
+def _watchlist_command(args: argparse.Namespace) -> None:
+    connection, _ = _connect_existing_archive(_configured_db_path(args.path, args.config_dir))
+    try:
+        _print_json(list_watchlist(connection))
+    finally:
+        connection.close()
+
+
 def _resolve_decisions_command(args: argparse.Namespace) -> None:
     config = load_config(args.config_dir)
     benchmark = str((config.get("prices") or {}).get("benchmark_ticker") or "SH000300").upper()
@@ -1361,6 +1445,26 @@ def main() -> None:
     decisions_parser.add_argument("--path", type=Path)
     decisions_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     decisions_parser.set_defaults(handler=_decisions_command)
+    watch_ticker_parser = subparsers.add_parser(
+        "watch-ticker", help="add or update one ticker in the watchlist"
+    )
+    watch_ticker_parser.add_argument("ticker")
+    watch_ticker_parser.add_argument("--name")
+    watch_ticker_parser.add_argument("--note")
+    watch_ticker_parser.add_argument("--path", type=Path)
+    watch_ticker_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    watch_ticker_parser.set_defaults(handler=_watch_ticker_command)
+    unwatch_ticker_parser = subparsers.add_parser(
+        "unwatch-ticker", help="remove one ticker from the watchlist"
+    )
+    unwatch_ticker_parser.add_argument("ticker")
+    unwatch_ticker_parser.add_argument("--path", type=Path)
+    unwatch_ticker_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    unwatch_ticker_parser.set_defaults(handler=_unwatch_ticker_command)
+    watchlist_parser = subparsers.add_parser("watchlist", help="list watched tickers")
+    watchlist_parser.add_argument("--path", type=Path)
+    watchlist_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    watchlist_parser.set_defaults(handler=_watchlist_command)
     resolve_decisions_parser = subparsers.add_parser(
         "resolve-decisions", help="settle due personal decisions from imported prices"
     )

@@ -228,6 +228,41 @@ def test_decision_web_flow_and_csrf(web_server: ArchiveHttpServer) -> None:
     assert status == 403
 
 
+def test_watchlist_web_flow_and_csrf(web_server: ArchiveHttpServer) -> None:
+    payload = _get_json(web_server, "/api/home?view=watchlist")
+    assert payload["view"] == "watchlist"
+    assert payload["items"] == []
+
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        "/watchlist/add",
+        {
+            "csrf_token": CSRF_TOKEN,
+            "ticker": "SH688303",
+            "name": "大全能源",
+            "note": "观察",
+        },
+    )
+    assert status == 303
+    payload = _get_json(web_server, "/api/home?view=watchlist")
+    [item] = cast(list[dict[str, object]], payload["items"])
+    assert item["ticker"] == "SH688303"
+    assert item["name"] == "大全能源"
+
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        "/watchlist/remove",
+        {"csrf_token": CSRF_TOKEN, "ticker": "SH688303"},
+    )
+    assert status == 303
+    assert _get_json(web_server, "/api/home?view=watchlist")["items"] == []
+
+    status, _, _ = _request(web_server, "POST", "/watchlist/add", {"ticker": "SH688303"})
+    assert status == 403
+
+
 def test_claim_proposal_web_review_creates_claim(web_server: ArchiveHttpServer) -> None:
     _enrich_post_one(web_server)
     connection = connect_database(web_server.db_path)
