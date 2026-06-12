@@ -363,6 +363,43 @@ CREATE TABLE IF NOT EXISTS crowding_event_members (
     PRIMARY KEY(event_id, claim_id)
 );
 
+-- Derived framework library (enrich-v3, phase 10): the structured shape of an
+-- analysis framework the author stated in one observed version. Inference, not
+-- evidence — it never writes back into version text, and every row links to its
+-- source version_id so the framework stays usable (with provenance) even after
+-- the original post is gone. Idempotency mirrors enrichments via
+-- UNIQUE(version_id, prompt_version).
+CREATE TABLE IF NOT EXISTS framework_extractions (
+    id INTEGER PRIMARY KEY,
+    post_id INTEGER NOT NULL REFERENCES posts(id),
+    version_id INTEGER NOT NULL REFERENCES post_versions(id),
+    topic TEXT NOT NULL CHECK(length(trim(topic)) > 0),
+    summary TEXT NOT NULL CHECK(length(trim(summary)) > 0),
+    input_variables TEXT NOT NULL CHECK(json_valid(input_variables)),
+    logic_chain TEXT NOT NULL CHECK(length(trim(logic_chain)) > 0),
+    conclusion_shape TEXT NOT NULL CHECK(length(trim(conclusion_shape)) > 0),
+    applicability_conditions TEXT NOT NULL DEFAULT '',
+    invalidation_conditions TEXT NOT NULL DEFAULT '',
+    evidence_snippet TEXT NOT NULL CHECK(length(trim(evidence_snippet)) > 0),
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(version_id, prompt_version)
+);
+
+-- One row per (version, prompt_version) scanned for a framework, including
+-- scans that found none — without it a "no framework stated" verdict would be
+-- retried forever. Mirrors claim_proposal_scans.
+CREATE TABLE IF NOT EXISTS framework_extraction_scans (
+    id INTEGER PRIMARY KEY,
+    version_id INTEGER NOT NULL REFERENCES post_versions(id),
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    extraction_count INTEGER NOT NULL CHECK(extraction_count IN (0, 1)),
+    created_at TEXT NOT NULL,
+    UNIQUE(version_id, prompt_version)
+);
+
 -- Append-only evidence: one row per image-fetch attempt for a version. A
 -- re-download of the same normalized_url appends a new row (never updates), so a
 -- byte swap behind an unchanged URL stays visible as a second row with a
@@ -681,6 +718,10 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         ON crowding_events(window_end DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_crowding_members_event
         ON crowding_event_members(event_id, author_id);
+        CREATE INDEX IF NOT EXISTS idx_framework_extractions_topic
+        ON framework_extractions(prompt_version, topic, id);
+        CREATE INDEX IF NOT EXISTS idx_framework_scans_version
+        ON framework_extraction_scans(version_id, prompt_version);
         """
     )
     _create_index_if_columns(

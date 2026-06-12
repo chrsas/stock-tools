@@ -105,6 +105,7 @@ onMounted(() => { applyTheme(); refresh(); });
         <li><a class="nav-item" :class="{ on: navActive('decisions') }" href="/?view=decisions"><svg viewBox="0 0 24 24" class="ico"><path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>我的决策</a></li>
         <li><a class="nav-item" :class="{ on: navActive('watchlist') }" href="/?view=watchlist"><svg viewBox="0 0 24 24" class="ico"><path d="M12 3v18M3 12h18" /><circle cx="12" cy="12" r="8" /></svg>关注列表</a></li>
         <li><a class="nav-item" :class="{ on: navActive('analysis') }" href="/?view=analysis"><svg viewBox="0 0 24 24" class="ico"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" /></svg>统计分析</a></li>
+        <li><a class="nav-item" :class="{ on: navActive('frameworks') }" href="/?view=frameworks"><svg viewBox="0 0 24 24" class="ico"><path d="M4 4h7v7H4z" /><path d="M13 4h7v7h-7z" /><path d="M4 13h7v7H4z" /><path d="M13 13h7v7h-7z" /></svg>框架库</a></li>
       </ul>
       <div class="sidebar-foot">
         <span class="eyebrow">prompt 版本</span>
@@ -314,6 +315,34 @@ onMounted(() => { applyTheme(); refresh(); });
               </div>
             </article>
             <p v-if="!page.crowding_events.length" class="empty">暂无达到门槛的拥挤事件。</p>
+          </section>
+        </template>
+
+        <template v-else-if="page?.view === 'frameworks'">
+          <div class="page-title"><div><h1>框架库</h1><p class="sub">作者明确表达过的分析框架，逐条链回原帖版本。prompt 版本 {{ page.prompt_version }}</p></div></div>
+          <div class="toolbar">
+            <a :class="{ on: !page.topic }" href="/?view=frameworks">全部 {{ page.topics.reduce((sum: number, item: Row) => sum + item.count, 0) }}</a>
+            <a v-for="item in page.topics" :key="item.topic" :class="{ on: page.topic === item.topic }" :href="`/?view=frameworks&topic=${encodeURIComponent(item.topic)}`">{{ item.topic }} {{ item.count }}</a>
+          </div>
+          <div v-if="page.variables.length" class="toolbar">
+            <span class="muted small">输入变量：</span>
+            <a v-for="item in page.variables.slice(0, 20)" :key="item.variable" :class="{ on: page.variable === item.variable }" :href="`/?view=frameworks&variable=${encodeURIComponent(item.variable)}`">{{ item.variable }} {{ item.count }}</a>
+          </div>
+          <section class="stream">
+            <article v-for="item in page.items" :key="item.id" class="card">
+              <header><h2>{{ item.topic }} · {{ item.conclusion_shape }}</h2><span class="pill">{{ item.author_display_name || item.author_platform_uid }}</span></header>
+              <p class="muted">版本 {{ item.version_id }} · 首次观察 {{ fmtTime(item.version_first_observed_at) }} · {{ item.source_status_label }}</p>
+              <p v-if="!item.source_readable" class="error">原帖当前不可读，以下框架来自首次观察时的存档版本。</p>
+              <p>{{ item.summary }}</p>
+              <p><b>输入变量：</b><span v-for="name in item.input_variables" :key="name" class="pill">{{ name }}</span></p>
+              <h3>逻辑链</h3><pre>{{ item.logic_chain }}</pre>
+              <p v-if="item.applicability_conditions"><b>作者声明的适用条件：</b>{{ item.applicability_conditions }}</p>
+              <p v-if="item.invalidation_conditions"><b>作者声明的失效条件：</b>{{ item.invalidation_conditions }}</p>
+              <blockquote>{{ item.evidence_snippet }}</blockquote>
+              <details><summary>查看存档原文</summary><pre>{{ item.content_text }}</pre></details>
+              <p><a :href="`/posts/${item.post_id}`">查看版本证据</a></p>
+            </article>
+            <p v-if="!page.items.length" class="empty">暂无已抽取的分析框架。先运行 extract-frameworks。</p>
           </section>
         </template>
 

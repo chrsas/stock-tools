@@ -1,7 +1,8 @@
-"""LLM enrichment labels and falsifiable claim proposals/outcomes."""
+"""LLM enrichment labels, framework extraction, and claim proposals/outcomes."""
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 from kol_archive.claims import validate_claim_proposal_result
@@ -11,6 +12,8 @@ from kol_archive.models import (
     ClaimProposalTarget,
     EnrichmentResult,
     EnrichmentTarget,
+    FrameworkExtractionResult,
+    FrameworkTarget,
 )
 from kol_archive.time import parse_utc_timestamp
 
@@ -105,6 +108,122 @@ class EnrichmentMixin(ArchiveBase):
             if cursor.rowcount == 0:
                 return None
         return _required_lastrowid(cursor)
+
+    def framework_targets(
+        self, framework_prompt_version: str, *, limit: int | None = None
+    ) -> list[FrameworkTarget]:
+        """Versions labelled transferable_framework not yet scanned for this prompt.
+
+        The gate is any enrichment (whatever its prompt version) that hit
+        ``label_transferable_framework`` — an enrich prompt upgrade naturally
+        widens the candidate pool. The scan table (not the extraction table)
+        drives exclusion so "no framework stated" verdicts are not retried,
+        which keeps the batch idempotent and resumable.
+        """
+        if not framework_prompt_version.strip():
+            raise ValueError("prompt_version must not be empty")
+        query = """
+            SELECT v.post_id, v.id AS version_id, v.content_text
+            FROM post_versions v
+            WHERE EXISTS (
+                  SELECT 1 FROM enrichments e
+                  WHERE e.version_id = v.id AND e.label_transferable_framework = 1
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM framework_extraction_scans scan
+                  WHERE scan.version_id = v.id AND scan.prompt_version = ?
+              )
+            ORDER BY v.first_observed_at, v.id
+        """
+        params: list[object] = [framework_prompt_version.strip()]
+        if limit is not None:
+            if limit <= 0:
+                raise ValueError("limit must be positive")
+            query += " LIMIT ?"
+            params.append(limit)
+        return [
+            FrameworkTarget(
+                post_id=int(row["post_id"]),
+                version_id=int(row["version_id"]),
+                original_text=str(row["content_text"]),
+            )
+            for row in self.connection.execute(query, params).fetchall()
+        ]
+
+    def add_framework_extraction(
+        self,
+        target: FrameworkTarget,
+        result: FrameworkExtractionResult | None,
+        model: str,
+        prompt_version: str,
+        created_at: str,
+    ) -> int | None:
+        """Record one framework scan (and its extraction when one was stated).
+
+        Returns the extraction id, or ``None`` when the scan found no framework
+        or the version was already scanned for ``prompt_version`` (idempotent
+        rerun — the scan row, not the extraction, is the dedupe key).
+        """
+        if not model.strip():
+            raise ValueError("model must not be empty")
+        if not prompt_version.strip():
+            raise ValueError("prompt_version must not be empty")
+        extraction_id: int | None = None
+        with self._transaction():
+            self._get_post_version(target.post_id, target.version_id)
+            if (
+                self.connection.execute(
+                    """
+                    SELECT 1 FROM framework_extraction_scans
+                    WHERE version_id = ? AND prompt_version = ?
+                    """,
+                    (target.version_id, prompt_version.strip()),
+                ).fetchone()
+                is not None
+            ):
+                return None
+            if result is not None:
+                cursor = self.connection.execute(
+                    """
+                    INSERT INTO framework_extractions(
+                        post_id, version_id, topic, summary, input_variables,
+                        logic_chain, conclusion_shape, applicability_conditions,
+                        invalidation_conditions, evidence_snippet, model,
+                        prompt_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        target.post_id,
+                        target.version_id,
+                        result.topic.strip(),
+                        result.summary.strip(),
+                        json.dumps(list(result.input_variables), ensure_ascii=False),
+                        result.logic_chain.strip(),
+                        result.conclusion_shape.strip(),
+                        result.applicability_conditions.strip(),
+                        result.invalidation_conditions.strip(),
+                        result.evidence_snippet.strip(),
+                        model.strip(),
+                        prompt_version.strip(),
+                        created_at,
+                    ),
+                )
+                extraction_id = _required_lastrowid(cursor)
+            self.connection.execute(
+                """
+                INSERT INTO framework_extraction_scans(
+                    version_id, model, prompt_version, extraction_count, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    target.version_id,
+                    model.strip(),
+                    prompt_version.strip(),
+                    int(result is not None),
+                    created_at,
+                ),
+            )
+        return extraction_id
 
     def claim_proposal_targets(
         self, prompt_version: str, *, limit: int | None = None

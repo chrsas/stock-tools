@@ -19,6 +19,7 @@ from kol_archive.claims import (
 )
 from kol_archive.config import load_config
 from kol_archive.enrich import load_enrich_settings, request_enrichment
+from kol_archive.framework import load_framework_settings, request_framework_extraction
 from kol_archive.market import OUTCOME_METHOD_VERSION
 
 from .common import configured_db_path, connect_existing_archive, print_json, resolve_db_path
@@ -63,6 +64,53 @@ def _enrich_command(args: argparse.Namespace) -> None:
                 "model": settings.model,
                 "candidates": len(targets),
                 "enriched": enriched,
+                "skipped": skipped,
+                "failed": failed,
+            }
+        )
+    finally:
+        connection.close()
+
+
+def _extract_frameworks_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    settings = load_framework_settings(config)
+    if args.prompt_version:
+        settings = replace(settings, prompt_version=args.prompt_version)
+    connection, archive = connect_existing_archive(resolve_db_path(args.path, config))
+    try:
+        targets = archive.framework_targets(settings.prompt_version, limit=args.limit)
+        extracted = none_found = skipped = failed = 0
+        for target in targets:
+            try:
+                result = request_framework_extraction(settings, target.original_text)
+            except (httpx.HTTPError, ValueError) as error:
+                # A failed version stays unscanned, so a later run retries it.
+                failed += 1
+                LOGGER.warning(
+                    "framework extraction failed for version %s: %s", target.version_id, error
+                )
+                continue
+            extraction_id = archive.add_framework_extraction(
+                target,
+                result,
+                settings.model,
+                settings.prompt_version,
+                datetime.now(tz=UTC).isoformat(),
+            )
+            if result is None:
+                none_found += 1
+            elif extraction_id is None:
+                skipped += 1
+            else:
+                extracted += 1
+        print_json(
+            {
+                "prompt_version": settings.prompt_version,
+                "model": settings.model,
+                "candidates": len(targets),
+                "extracted": extracted,
+                "none_found": none_found,
                 "skipped": skipped,
                 "failed": failed,
             }
@@ -201,6 +249,19 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     enrich_parser.add_argument("--path", type=Path)
     enrich_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     enrich_parser.set_defaults(handler=_enrich_command)
+    extract_frameworks_parser = subparsers.add_parser(
+        "extract-frameworks",
+        help="structurally extract stated analysis frameworks from labelled versions",
+    )
+    extract_frameworks_parser.add_argument(
+        "--limit", type=int, help="cap versions scanned this run"
+    )
+    extract_frameworks_parser.add_argument(
+        "--prompt-version", help="override llm.framework_prompt_version for this run"
+    )
+    extract_frameworks_parser.add_argument("--path", type=Path)
+    extract_frameworks_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    extract_frameworks_parser.set_defaults(handler=_extract_frameworks_command)
     propose_claims_parser = subparsers.add_parser(
         "propose-claims", help="extract falsifiable claim proposals from eligible live versions"
     )

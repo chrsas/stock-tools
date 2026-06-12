@@ -278,6 +278,29 @@ class EnrichmentResult:
 
 
 @dataclass(frozen=True)
+class FrameworkTarget:
+    """A version labelled transferable_framework still lacking a framework scan."""
+
+    post_id: int
+    version_id: int
+    original_text: str
+
+
+@dataclass(frozen=True)
+class FrameworkExtractionResult:
+    """One structured analysis framework extracted from an observed version."""
+
+    topic: str
+    summary: str
+    input_variables: tuple[str, ...]
+    logic_chain: str
+    conclusion_shape: str
+    applicability_conditions: str
+    invalidation_conditions: str
+    evidence_snippet: str
+
+
+@dataclass(frozen=True)
 class ClaimProposalTarget:
     """One eligible live version awaiting claim extraction."""
 

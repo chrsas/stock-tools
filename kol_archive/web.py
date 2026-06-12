@@ -34,6 +34,7 @@ from kol_archive.presentation import (
     author_recent_viewpoint_clusters,
     author_viewpoint_overview,
     build_evidence_card,
+    framework_library,
     list_attention_queue,
     list_filtered_timeline,
     list_pinned_versions,
@@ -58,6 +59,7 @@ class WebSettings:
     market_benchmark_ticker: str = "SH000300"
     viewpoint_cluster_window_days: int = 7
     analysis_min_group_samples: int = 10
+    framework_prompt_version: str = "framework-v1"
 
 
 class ArchiveHttpServer(ThreadingHTTPServer):
@@ -70,6 +72,7 @@ class ArchiveHttpServer(ThreadingHTTPServer):
     market_benchmark_ticker: str
     viewpoint_cluster_window_days: int
     analysis_min_group_samples: int
+    framework_prompt_version: str
 
 
 def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
@@ -105,6 +108,8 @@ def load_web_settings(
             else web["viewpoint_cluster_window_days"]
         ),
         analysis_min_group_samples=load_analysis_settings(config).min_group_samples,
+        framework_prompt_version=str(llm.get("framework_prompt_version") or "framework-v1").strip()
+        or "framework-v1",
     )
     if not settings.bind_host or settings.bind_host in {"0.0.0.0", "::", "[::]"}:
         raise ValueError("web.bind_host must be a loopback or explicit tailnet address")
@@ -147,6 +152,7 @@ def create_server(
     server.market_benchmark_ticker = settings.market_benchmark_ticker
     server.viewpoint_cluster_window_days = settings.viewpoint_cluster_window_days
     server.analysis_min_group_samples = settings.analysis_min_group_samples
+    server.framework_prompt_version = settings.framework_prompt_version
     return server
 
 
@@ -203,6 +209,7 @@ def _home_payload(
     benchmark_ticker: str = "SH000300",
     cluster_window_days: int = 7,
     analysis_min_group_samples: int = 10,
+    framework_prompt_version: str = "framework-v1",
 ) -> dict[str, object]:
     values = parse_qs(query)
     view = (values.get("view") or ["authors"])[0]
@@ -260,6 +267,19 @@ def _home_payload(
         }
     if view == "watchlist":
         return {"view": "watchlist", "items": list_watchlist(connection)}
+    if view == "frameworks":
+        topic_values = values.get("topic")
+        variable_values = values.get("variable")
+        return {
+            "view": "frameworks",
+            **framework_library(
+                connection,
+                framework_prompt_version,
+                topic=topic_values[0] if topic_values else None,
+                variable=variable_values[0] if variable_values else None,
+                limit=limit,
+            ),
+        }
     if view == "analysis":
         return {
             "view": "analysis",
@@ -316,6 +336,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                                 self.server.market_benchmark_ticker,
                                 self.server.viewpoint_cluster_window_days,
                                 self.server.analysis_min_group_samples,
+                                self.server.framework_prompt_version,
                             ),
                             "csrf_token": self.server.csrf_token,
                         },
