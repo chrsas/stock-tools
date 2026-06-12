@@ -23,6 +23,12 @@ from kol_archive.browser import (
     create_xueqiu_browser_client,
     start_dedicated_browser,
 )
+from kol_archive.claims import (
+    common_close_claim_outcome,
+    list_claim_proposals,
+    load_claim_settings,
+    request_claim_proposals,
+)
 from kol_archive.collector import (
     HEADERS,
     CollectorSettings,
@@ -747,6 +753,124 @@ def _enrich_command(args: argparse.Namespace) -> None:
         connection.close()
 
 
+def _propose_claims_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    settings = load_claim_settings(config)
+    if args.prompt_version:
+        settings = replace(settings, prompt_version=args.prompt_version)
+    connection, archive = _connect_existing_archive(_resolve_db_path(args.path, config))
+    try:
+        targets = archive.claim_proposal_targets(settings.prompt_version, limit=args.limit)
+        proposed = empty = failed = 0
+        for target in targets:
+            try:
+                results = request_claim_proposals(settings, target.original_text)
+            except (httpx.HTTPError, ValueError) as error:
+                failed += 1
+                LOGGER.warning("claim proposal failed for version %s: %s", target.version_id, error)
+                continue
+            row_ids = archive.add_claim_proposals(
+                target,
+                results,
+                settings.model,
+                settings.prompt_version,
+                datetime.now(tz=UTC).isoformat(),
+            )
+            proposed += len(row_ids)
+            empty += int(not results)
+        _print_json(
+            {
+                "prompt_version": settings.prompt_version,
+                "model": settings.model,
+                "candidates": len(targets),
+                "proposed": proposed,
+                "empty": empty,
+                "failed": failed,
+            }
+        )
+    finally:
+        connection.close()
+
+
+def _claim_proposals_command(args: argparse.Namespace) -> None:
+    connection, _ = _connect_existing_archive(_configured_db_path(args.path, args.config_dir))
+    try:
+        _print_json(
+            list_claim_proposals(connection, review_state=args.review_state, limit=args.limit)
+        )
+    finally:
+        connection.close()
+
+
+def _review_claim_proposal_command(args: argparse.Namespace) -> None:
+    connection, archive = _connect_existing_archive(_configured_db_path(args.path, args.config_dir))
+    try:
+        claim_id = archive.review_claim_proposal(
+            args.proposal_id, args.review_state, datetime.now(tz=UTC).isoformat()
+        )
+        _print_json(
+            {
+                "proposal_id": args.proposal_id,
+                "review_state": args.review_state,
+                "claim_id": claim_id,
+            }
+        )
+    finally:
+        connection.close()
+
+
+def _resolve_claims_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    benchmark = str((config.get("prices") or {}).get("benchmark_ticker") or "SH000300").upper()
+    connection, archive = _connect_existing_archive(_resolve_db_path(args.path, config))
+    resolved = pending = 0
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, ticker, claim_made_at, horizon_days
+            FROM claims
+            WHERE status = 'open' AND horizon_days IS NOT NULL
+              AND date(claim_made_at, '+8 hours', '+' || horizon_days || ' days')
+                  <= date('now', '+8 hours')
+              AND NOT EXISTS (SELECT 1 FROM claim_outcomes o WHERE o.claim_id = claims.id)
+            ORDER BY claim_made_at, id
+            """
+        ).fetchall()
+        for row in rows:
+            outcome = common_close_claim_outcome(
+                connection,
+                str(row["ticker"]),
+                benchmark,
+                str(row["claim_made_at"]),
+                int(row["horizon_days"]),
+            )
+            if outcome is None:
+                pending += 1
+                continue
+            resolved += int(
+                archive.add_claim_outcome(
+                    int(row["id"]),
+                    str(outcome["resolved_at"]),
+                    cast(float, outcome["raw_return"]),
+                    cast(float, outcome["benchmark_return"]),
+                    cast(float, outcome["excess_return"]),
+                    benchmark,
+                    OUTCOME_METHOD_VERSION,
+                    str(outcome["notes"]),
+                )
+            )
+        _print_json(
+            {
+                "resolved": resolved,
+                "pending_prices": pending,
+                "method_version": OUTCOME_METHOD_VERSION,
+                "benchmark_ticker": benchmark,
+            }
+        )
+    finally:
+        connection.close()
+
+
 def _import_prices_command(args: argparse.Namespace) -> None:
     config = load_config(args.config_dir)
     connection, _ = _connect_existing_archive(_resolve_db_path(args.path, config))
@@ -1149,6 +1273,40 @@ def main() -> None:
     enrich_parser.add_argument("--path", type=Path)
     enrich_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     enrich_parser.set_defaults(handler=_enrich_command)
+    propose_claims_parser = subparsers.add_parser(
+        "propose-claims", help="extract falsifiable claim proposals from eligible live versions"
+    )
+    propose_claims_parser.add_argument("--limit", type=int, help="cap versions proposed this run")
+    propose_claims_parser.add_argument("--prompt-version", help="override llm.claim_prompt_version")
+    propose_claims_parser.add_argument("--path", type=Path)
+    propose_claims_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    propose_claims_parser.set_defaults(handler=_propose_claims_command)
+    claim_proposals_parser = subparsers.add_parser(
+        "claim-proposals", help="list extracted claim proposals and review state"
+    )
+    claim_proposals_parser.add_argument(
+        "--review-state", choices=["pending", "accepted", "rejected"]
+    )
+    claim_proposals_parser.add_argument("--limit", type=int, default=100)
+    claim_proposals_parser.add_argument("--path", type=Path)
+    claim_proposals_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    claim_proposals_parser.set_defaults(handler=_claim_proposals_command)
+    review_claim_parser = subparsers.add_parser(
+        "review-claim-proposal", help="accept or reject one claim proposal"
+    )
+    review_claim_parser.add_argument("proposal_id", type=int)
+    review_claim_parser.add_argument(
+        "--review-state", choices=["accepted", "rejected"], required=True
+    )
+    review_claim_parser.add_argument("--path", type=Path)
+    review_claim_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    review_claim_parser.set_defaults(handler=_review_claim_proposal_command)
+    resolve_claims_parser = subparsers.add_parser(
+        "resolve-claims", help="settle due accepted claims from imported prices"
+    )
+    resolve_claims_parser.add_argument("--path", type=Path)
+    resolve_claims_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    resolve_claims_parser.set_defaults(handler=_resolve_claims_command)
     import_prices_parser = subparsers.add_parser(
         "import-prices", help="import ticker,date,close[,name] CSV rows"
     )

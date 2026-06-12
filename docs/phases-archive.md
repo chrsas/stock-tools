@@ -122,3 +122,26 @@ my_decision_reviews              [append-only]
 
 **DoD**：摘要措辞无归因词（对模板做断言测试）；删帖潮判定有单测；推送载荷不含正文、图片或
 凭据；采集连续失败可在阈值内触发告警；窗口内无事件时输出「无变更」而非空文件。
+
+### 阶段 7：lite 结算闭环
+
+跑通「LLM 提议 → 人工确认 → 自动结算 → 逐条展示」。宪章 9/10/11 全部适用。
+
+```
+claim_proposals
+  id, version_id, ticker, direction(long|short|neutral),
+  horizon_days(nullable), target_price(nullable), confidence_phrasing,
+  evidence_snippet, model, prompt_version, created_at,
+  review_state(pending|accepted|rejected), reviewed_at(nullable),
+  claim_id(nullable FK -> claims.id)
+  UNIQUE(version_id, ticker, prompt_version)
+```
+
+- `propose-claims` 仅对实时监控起点后的市场相关 live 版本运行；LLM 只能抽取原文明示字段；
+  `claim_proposal_scans` 记录含零提议在内的扫描结果，避免重复调用。
+- 网页确认页和 CLI 支持 accepted/rejected；accepted 与写入 `claims` 同事务，rejected 留痕。
+- `resolve-claims` 到期用共同交易日收盘写入不可变 `claim_outcomes`，记录基准代码和口径版本。
+- 博主观点页逐条展示结果，原帖不可见时明确指向归档版本；不生成小样本排名或命中率汇总。
+
+**DoD**：提议幂等可重跑；未确认提议不进 claims；监控起点前版本被排除；LLM 补造字段被拒收；
+接受与 claims 写入原子提交；结算结果不可变且可重算稳定；逐条结果可下钻到版本证据。

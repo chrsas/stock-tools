@@ -228,6 +228,41 @@ def test_decision_web_flow_and_csrf(web_server: ArchiveHttpServer) -> None:
     assert status == 403
 
 
+def test_claim_proposal_web_review_creates_claim(web_server: ArchiveHttpServer) -> None:
+    _enrich_post_one(web_server)
+    connection = connect_database(web_server.db_path)
+    try:
+        archive = Archive(connection)
+        [target] = archive.claim_proposal_targets("claim-v1")
+        cursor = connection.execute(
+            """
+            INSERT INTO claim_proposals(
+                version_id, ticker, direction, evidence_snippet, model, prompt_version, created_at
+            ) VALUES (?, 'SH000001', 'neutral', '原始正文 A', 'test-model', 'claim-v1', ?)
+            """,
+            (target.version_id, BASE_TIME),
+        )
+        assert cursor.lastrowid is not None
+        proposal_id = int(cursor.lastrowid)
+    finally:
+        connection.close()
+
+    payload = _get_json(web_server, "/api/home?view=claims&state=pending")
+    assert cast(dict[str, int], payload["counts"])["pending"] == 1
+    [item] = cast(list[dict[str, object]], payload["items"])
+    assert item["id"] == proposal_id
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        f"/claim-proposals/{proposal_id}/review",
+        {"csrf_token": CSRF_TOKEN, "review_state": "accepted"},
+    )
+    assert status == 303
+    payload = _get_json(web_server, "/api/home?view=claims&state=accepted")
+    [item] = cast(list[dict[str, object]], payload["items"])
+    assert item["claim_id"] is not None
+
+
 def _enrich_post_one(server: ArchiveHttpServer, **labels: bool) -> None:
     connection = connect_database(server.db_path)
     try:

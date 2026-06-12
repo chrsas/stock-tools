@@ -212,12 +212,48 @@ CREATE TABLE IF NOT EXISTS claims (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS claim_proposals (
+    id INTEGER PRIMARY KEY,
+    version_id INTEGER NOT NULL REFERENCES post_versions(id),
+    ticker TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('long', 'short', 'neutral')),
+    horizon_days INTEGER CHECK(horizon_days IS NULL OR horizon_days > 0),
+    target_price REAL CHECK(target_price IS NULL OR target_price > 0),
+    confidence_phrasing TEXT,
+    evidence_snippet TEXT NOT NULL CHECK(length(trim(evidence_snippet)) > 0),
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    review_state TEXT NOT NULL DEFAULT 'pending'
+        CHECK(review_state IN ('pending', 'accepted', 'rejected')),
+    reviewed_at TEXT,
+    claim_id INTEGER REFERENCES claims(id),
+    UNIQUE(version_id, ticker, prompt_version),
+    CHECK(
+        (review_state = 'pending' AND reviewed_at IS NULL AND claim_id IS NULL)
+        OR (review_state = 'accepted' AND reviewed_at IS NOT NULL AND claim_id IS NOT NULL)
+        OR (review_state = 'rejected' AND reviewed_at IS NOT NULL AND claim_id IS NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS claim_proposal_scans (
+    id INTEGER PRIMARY KEY,
+    version_id INTEGER NOT NULL REFERENCES post_versions(id),
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    proposal_count INTEGER NOT NULL CHECK(proposal_count >= 0),
+    created_at TEXT NOT NULL,
+    UNIQUE(version_id, prompt_version)
+);
+
 CREATE TABLE IF NOT EXISTS claim_outcomes (
     claim_id INTEGER PRIMARY KEY REFERENCES claims(id),
     resolved_at TEXT NOT NULL,
     raw_return REAL,
     benchmark_return REAL,
     excess_return REAL,
+    benchmark_ticker TEXT NOT NULL DEFAULT 'UNKNOWN',
+    outcome_method_version TEXT NOT NULL DEFAULT 'legacy-unknown',
     notes TEXT
 );
 
@@ -505,12 +541,30 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         "benchmark_ticker",
         "benchmark_ticker TEXT NOT NULL DEFAULT 'UNKNOWN'",
     )
+    _ensure_column(
+        connection,
+        "claim_outcomes",
+        "benchmark_ticker",
+        "benchmark_ticker TEXT NOT NULL DEFAULT 'UNKNOWN'",
+    )
+    _ensure_column(
+        connection,
+        "claim_outcomes",
+        "outcome_method_version",
+        "outcome_method_version TEXT NOT NULL DEFAULT 'legacy-unknown'",
+    )
     _backfill_market_relation(connection)
     connection.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_enrichments_market_viewpoints
         ON enrichments(prompt_version, post_type, is_market_related, version_id);
         CREATE INDEX IF NOT EXISTS idx_claims_version_id ON claims(version_id);
+        CREATE INDEX IF NOT EXISTS idx_claim_proposals_review
+        ON claim_proposals(review_state, created_at, id);
+        CREATE INDEX IF NOT EXISTS idx_claim_proposal_scans_version
+        ON claim_proposal_scans(version_id, prompt_version);
+        CREATE INDEX IF NOT EXISTS idx_claims_status_due
+        ON claims(status, claim_made_at, horizon_days);
         CREATE INDEX IF NOT EXISTS idx_my_decisions_status_due
         ON my_decisions(status, decided_at, horizon_days);
         CREATE INDEX IF NOT EXISTS idx_my_decisions_ticker_decided
@@ -602,6 +656,53 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         BEFORE DELETE ON my_decision_outcomes
         BEGIN
             SELECT RAISE(ABORT, 'my_decision_outcomes is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_claim_proposals_delete
+        BEFORE DELETE ON claim_proposals
+        BEGIN
+            SELECT RAISE(ABORT, 'claim_proposals cannot be deleted');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_claim_proposals_content
+        BEFORE UPDATE ON claim_proposals
+        WHEN OLD.id IS NOT NEW.id
+          OR OLD.version_id IS NOT NEW.version_id
+          OR OLD.ticker IS NOT NEW.ticker
+          OR OLD.direction IS NOT NEW.direction
+          OR OLD.horizon_days IS NOT NEW.horizon_days
+          OR OLD.target_price IS NOT NEW.target_price
+          OR OLD.confidence_phrasing IS NOT NEW.confidence_phrasing
+          OR OLD.evidence_snippet IS NOT NEW.evidence_snippet
+          OR OLD.model IS NOT NEW.model
+          OR OLD.prompt_version IS NOT NEW.prompt_version
+          OR OLD.created_at IS NOT NEW.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'claim_proposals content cannot be updated');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_claim_proposal_scans_update
+        BEFORE UPDATE ON claim_proposal_scans
+        BEGIN
+            SELECT RAISE(ABORT, 'claim_proposal_scans is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_claim_proposal_scans_delete
+        BEFORE DELETE ON claim_proposal_scans
+        BEGIN
+            SELECT RAISE(ABORT, 'claim_proposal_scans is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_claim_outcomes_update
+        BEFORE UPDATE ON claim_outcomes
+        BEGIN
+            SELECT RAISE(ABORT, 'claim_outcomes is append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS protect_claim_outcomes_delete
+        BEFORE DELETE ON claim_outcomes
+        BEGIN
+            SELECT RAISE(ABORT, 'claim_outcomes is append-only');
         END;
         """
     )

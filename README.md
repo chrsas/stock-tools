@@ -178,6 +178,26 @@ $env:LLM_API_KEY = "<本地密钥>"
 当前带立场摘要的契约使用 `enrich-v2`。迁移期间可用 `web.enrich_prompt_version` 让网页继续读取旧版本，
 待新版本富化完成后再切换。
 
+## 命题提议、人工确认与结算
+
+阶段 7 只从实时监控开始后的市场相关版本抽取可证伪命题。LLM 产物先进入 `claim_proposals`，
+必须在网页“命题确认”页或 CLI 人工接受后才写入 `claims`；拒绝记录保留。期限、目标价和置信措辞
+只允许来自原文，缺失时保持为空。无提议版本也会写入 `claim_proposal_scans`，避免重复调用模型。
+修改提取契约时升级 `llm.claim_prompt_version`。
+
+```powershell
+$env:LLM_API_KEY = "<本地密钥>"
+.\.venv\Scripts\python.exe -m kol_archive propose-claims --config-dir config
+.\.venv\Scripts\python.exe -m kol_archive claim-proposals --review-state pending
+.\.venv\Scripts\python.exe -m kol_archive review-claim-proposal 1 --review-state accepted
+.\.venv\Scripts\python.exe -m kol_archive resolve-claims --config-dir config
+```
+
+`resolve-claims` 仅结算原文明示了期限且已到期的 accepted claim。目标日后 14 个自然日内仍无共同
+交易日行情时保持 open，避免长期停牌或行情缺口被远期收盘价错误结算；
+结果记录基准代码和口径版本，写入后不可修改或删除。网页按博主逐条展示结果，不生成小样本排名或
+命中率汇总。
+
 博主观点页只展示 `post_type=观点` 且具备明确市场关联的当前版本。市场关联由归档证据确定：
 
 - 正文出现明确 A 股代码，例如 `SH600000`、`SZ000001` 或 `BJ430047`。

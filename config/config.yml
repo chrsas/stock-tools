@@ -104,6 +104,7 @@ llm:
   api_key_env: LLM_API_KEY     # API Key 仅从环境变量读取
   prompt_version: rewrite-v1   # 阶段 2 改写训练 prompt 版本
   enrich_prompt_version: enrich-v2   # 输出契约或判断逻辑变化必须升版本
+  claim_prompt_version: claim-v1     # 可证伪命题提取契约版本
   # 图片 VLM 描述（enrich-images，推断产物，不进证据正文）：
   vision_model: ""             # 留空则复用上面的 model；建议填多模态模型 id
   vision_prompt_version: vision-v1   # 按版本隔离 image_enrichments

@@ -483,6 +483,7 @@ def author_recent_viewpoints(
             p.id AS post_id,
             p.platform_post_id,
             p.url,
+            p.source_state,
             p.posted_at_claimed,
             p.first_seen_at,
             COALESCE(p.posted_at_claimed, v.first_observed_at, p.first_seen_at) AS viewpoint_at,
@@ -530,6 +531,8 @@ def author_recent_viewpoints(
                 o.raw_return,
                 o.benchmark_return,
                 o.excess_return,
+                o.benchmark_ticker,
+                o.outcome_method_version,
                 o.notes AS outcome_notes
             FROM claims c
             LEFT JOIN claim_outcomes o ON o.claim_id = c.id

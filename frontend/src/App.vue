@@ -96,6 +96,7 @@ onMounted(() => { applyTheme(); refresh(); });
         <li><a class="nav-item" :class="{ on: navActive('pinned') }" href="/?view=pinned"><svg viewBox="0 0 24 24" class="ico"><path d="M12 17v5" /><path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6z" /></svg>已钉住</a></li>
         <li><a class="nav-item" :class="{ on: navActive('raw') }" href="/?view=raw"><svg viewBox="0 0 24 24" class="ico"><path d="M4 7h16" /><path d="M4 12h16" /><path d="M4 17h10" /></svg>原始时间线</a></li>
         <li><a class="nav-item" :class="{ on: navActive('filtered') }" href="/?view=filtered"><svg viewBox="0 0 24 24" class="ico"><path d="M4 5h16l-6 7v6l-4 2v-8z" /></svg>标签过滤流</a></li>
+        <li><a class="nav-item" :class="{ on: navActive('claims') }" href="/?view=claims"><svg viewBox="0 0 24 24" class="ico"><path d="M5 4h14v16H5z" /><path d="M8 9h8M8 13h5" /></svg>命题确认</a></li>
         <li><a class="nav-item" :class="{ on: navActive('decisions') }" href="/?view=decisions"><svg viewBox="0 0 24 24" class="ico"><path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>我的决策</a></li>
       </ul>
       <div class="sidebar-foot">
@@ -230,6 +231,33 @@ onMounted(() => { applyTheme(); refresh(); });
               </form>
             </article>
             <p v-if="!page.items.length" class="empty">暂无决策记录。</p>
+          </section>
+        </template>
+
+        <template v-else-if="page?.view === 'claims'">
+          <div class="page-title"><div><h1>命题确认</h1><p class="sub">核对原文证据后接受或拒绝 LLM 提议。</p></div></div>
+          <div class="toolbar">
+            <a href="/?view=claims&state=pending">待确认 {{ page.counts.pending }}</a>
+            <a href="/?view=claims&state=accepted">已接受 {{ page.counts.accepted }}</a>
+            <a href="/?view=claims&state=rejected">已拒绝 {{ page.counts.rejected }}</a>
+          </div>
+          <section class="stream">
+            <article v-for="proposal in page.items" :key="proposal.id" class="card">
+              <header>
+                <h2>{{ proposal.ticker }}<span v-if="proposal.ticker_name"> · {{ proposal.ticker_name }}</span></h2>
+                <span class="pill">{{ proposal.review_state }}</span>
+              </header>
+              <p class="muted">{{ proposal.direction }} · 版本 {{ proposal.version_id }} · 首次观察 {{ fmtTime(proposal.first_observed_at) }}</p>
+              <p class="muted">期限 {{ proposal.horizon_days ? `${proposal.horizon_days} 天` : "原文未说明" }} · 目标价 {{ proposal.target_price || "原文未说明" }}</p>
+              <blockquote>{{ proposal.evidence_snippet }}</blockquote>
+              <details><summary>查看完整原文</summary><pre>{{ proposal.content_text }}</pre></details>
+              <p><a :href="`/posts/${proposal.post_id}`">查看版本证据</a></p>
+              <div v-if="proposal.review_state === 'pending'" class="actions">
+                <button :disabled="busy" @click="action(`/claim-proposals/${proposal.id}/review`, { review_state: 'accepted' })">接受</button>
+                <button class="secondary" :disabled="busy" @click="action(`/claim-proposals/${proposal.id}/review`, { review_state: 'rejected' })">拒绝</button>
+              </div>
+            </article>
+            <p v-if="!page.items.length" class="empty">暂无命题提议。</p>
           </section>
         </template>
 

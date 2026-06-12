@@ -224,7 +224,9 @@ prices  (只读)  ticker, date, close, ...
 - **阶段 5**（自我决策日志）：已完成。交付决策论点锁定、逐条结算、CLI 与网页录入/关闭/复盘闭环。
 - **阶段 6**（中性变更摘要 + 主动通知基础）：已完成。交付 `digest.py`、`notifications.py`、
   `alerts.py`、`digest` 命令与 `run-once` 健康告警。
-- 上述阶段全部 DoD 有自动化测试兜底（`tests/`，当前全套 219 通过）。
+- **阶段 7**（lite 结算闭环）：已完成。交付 `claim_proposals`、命题提议与人工确认、
+  `resolve-claims` 共同收盘结算及逐条结果展示。
+- 上述阶段全部 DoD 有自动化测试兜底（`tests/`，当前全套 231 通过）。
 
 ### 阶段 4：事件研究等（占位，按需）
 行情对齐、交易日规则、基准选择、多时间窗口待定。可能冲突候选只摆证据；`claims` +
@@ -241,33 +243,6 @@ prices  (只读)  ticker, date, close, ...
 回填命题、未结算命题和不可比口径不会污染战绩比较。
 
 ---
-
-### 阶段 7：lite 结算闭环（阶段 4 的最小实现，共享其全部硬约束）
-
-不等完美口径，先跑通「LLM 提议 → 人工确认 → 自动结算 → 逐条展示」。宪章 9/10/11 全部适用。
-
-```
-claim_proposals
-  id, version_id, ticker, direction(long|short|neutral),
-  horizon_days(nullable), target_price(nullable), confidence_phrasing,
-  evidence_snippet, model, prompt_version, created_at,
-  review_state(pending|accepted|rejected), reviewed_at(nullable),
-  claim_id(nullable FK -> claims.id)
-  UNIQUE(version_id, ticker, prompt_version)
-```
-
-- `propose-claims` 命令：仅对 `ingest_mode='live'` 且 `first_observed_at >=
-  live_monitoring_started_at` 的市场相关版本运行；LLM 只允许抽取原文明确表达的内容，
-  `horizon_days`/`target_price` 原文没有就留空，**禁止补造**；幂等键同上。
-- 网页确认页：逐条展示提议 + 原文证据片段 + 一键 accepted/rejected；accepted 即写入 `claims`
-  （`claim_made_at` = 对应版本 `first_observed_at`）。rejected 留痕不删。
-- 自动结算：`resolve-claims` 到期用 `prices` 共同交易日收盘写 `claim_outcomes`，
-  `outcome_method_version` 版本化；无行情数据的标的保持 open 并在列表标注「待行情」。
-- 展示：按博主逐条结果列表（含原帖已删除的特别标注「原帖已不可见，证据见版本」并链至版本）；
-  **达到 `PERFORMANCE_MIN_RESOLVED_SAMPLES` 之前不出现任何排名、命中率百分比或汇总分**。
-
-**DoD**：提议幂等可重跑；未确认提议不进 claims；回填版本提议被拒绝（有测试）；LLM 补造字段被
-拒收；结算可重算稳定；逐条结果可下钻到 version_id 与价格序列；样本不足时页面无排名元素。
 
 ### 阶段 8：关注列表交集提醒
 

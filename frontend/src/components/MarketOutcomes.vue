@@ -22,9 +22,10 @@ defineProps<{ outcomes?: Row[]; snapshot?: Row | null }>();
   <div v-for="outcome in outcomes" :key="outcome.claim_id" class="market-row">
     <strong>{{ outcome.ticker }} · {{ outcome.direction }} · {{ outcome.horizon_days == null ? "未设期限" : `${outcome.horizon_days} 天` }}</strong>
     <span v-if="outcome.resolved_at">
-      标的变化 {{ percent(outcome.raw_return) }} · 基准变化 {{ percent(outcome.benchmark_return) }} ·
+      标的变化 {{ percent(outcome.raw_return) }} · {{ outcome.benchmark_ticker || "基准" }} {{ percent(outcome.benchmark_return) }} ·
       <b :class="{ positive: outcome.excess_return > 0, negative: outcome.excess_return < 0 }">超额变化 {{ percent(outcome.excess_return) }}</b>
     </span>
     <span v-else class="muted">等待结果</span>
+    <small v-if="outcome.outcome_method_version" class="muted">{{ outcome.outcome_method_version }}</small>
   </div>
 </template>

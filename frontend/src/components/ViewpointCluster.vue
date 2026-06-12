@@ -23,6 +23,7 @@ defineProps<{ cluster: Row }>();
       <summary>展开 {{ cluster.statement_count }} 条相关发言</summary>
       <section v-for="viewpoint in cluster.viewpoints" :key="viewpoint.post_id" class="statement">
         <h3><a :href="`/posts/${viewpoint.post_id}`">{{ postTitle(viewpoint) }}</a></h3>
+        <p v-if="viewpoint.source_state === 'gone_confirmed'" class="error">原帖已不可见，证据见版本 {{ viewpoint.version_id }}</p>
         <MarketOutcomes :outcomes="viewpoint.market_outcomes" />
         <PostLinks :item="viewpoint" />
         <pre>{{ viewpoint.current_text }}</pre>

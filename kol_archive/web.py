@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
+from kol_archive.claims import list_claim_proposals
 from kol_archive.config import load_config
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.decisions import list_decisions
@@ -235,6 +236,16 @@ def _home_payload(
                 limit=limit,
             ),
         }
+    if view == "claims":
+        state_values = values.get("state")
+        return {
+            "view": "claims",
+            **list_claim_proposals(
+                connection,
+                review_state=state_values[0] if state_values else None,
+                limit=limit,
+            ),
+        }
     authors = author_viewpoint_overview(connection, prompt_version)
     selected_uid = (values.get("author") or [""])[0] or None
     selected = next(
@@ -365,6 +376,10 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if path == "/decisions/add":
                 self._add_decision(form)
                 return
+            proposal_id = self._post_id(path, prefix="/claim-proposals/", suffix="/review")
+            if proposal_id is not None:
+                self._review_claim_proposal(proposal_id, form)
+                return
             decision_id = self._post_id(path, prefix="/decisions/", suffix="/close")
             if decision_id is not None:
                 self._close_decision(decision_id, form)
@@ -471,6 +486,16 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         self._with_archive(add)
         assert decision_id is not None
         self._mutation_done(decision_id, key="decision_id", location="/?view=decisions")
+
+    def _review_claim_proposal(self, proposal_id: int, form: dict[str, list[str]]) -> None:
+        self._with_archive(
+            lambda archive: archive.review_claim_proposal(
+                proposal_id,
+                self._required_form_value(form, "review_state"),
+                datetime.now(tz=UTC).isoformat(),
+            )
+        )
+        self._mutation_done(proposal_id, key="proposal_id", location="/?view=claims")
 
     def _close_decision(self, decision_id: int, form: dict[str, list[str]]) -> None:
         self._with_archive(
@@ -603,7 +628,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _is_mutation_path(path: str) -> bool:
-        if path.startswith("/decisions/"):
+        if path.startswith("/decisions/") or path.startswith("/claim-proposals/"):
             return True
         return any(
             path.endswith(suffix)

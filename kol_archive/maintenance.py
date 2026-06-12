@@ -31,6 +31,8 @@ EXPORT_QUERIES = {
     "post_images": "SELECT * FROM post_images",
     "image_ocr": "SELECT * FROM image_ocr",
     "image_enrichments": "SELECT * FROM image_enrichments",
+    "claim_proposal_scans": "SELECT * FROM claim_proposal_scans",
+    "claim_proposals": "SELECT * FROM claim_proposals",
     "claims": "SELECT * FROM claims",
     "claim_outcomes": "SELECT * FROM claim_outcomes",
     "my_decisions": "SELECT * FROM my_decisions",

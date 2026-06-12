@@ -275,3 +275,24 @@ class EnrichmentResult:
     rationale: str
     evidence_snippet: str
     stance_summary: str = ""
+
+
+@dataclass(frozen=True)
+class ClaimProposalTarget:
+    """One eligible live version awaiting claim extraction."""
+
+    post_id: int
+    version_id: int
+    original_text: str
+
+
+@dataclass(frozen=True)
+class ClaimProposalResult:
+    """One falsifiable claim extracted from an observed version."""
+
+    ticker: str
+    direction: str
+    horizon_days: int | None
+    target_price: float | None
+    confidence_phrasing: str | None
+    evidence_snippet: str
