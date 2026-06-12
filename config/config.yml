@@ -69,6 +69,16 @@ digest:
   output_dir: data/digests
   wave_min_accounts: 3                 # 窗口内发生确证删除事件的账号数达到此值时标注平台级密集期
 
+# ── 主动通知与采集健康告警（阶段 6）──────────────────────────────
+notifications:
+  enabled: false                       # 在 config.local.yml 启用
+  webhook_url_env: KOL_NOTIFICATION_WEBHOOK_URL
+  private_base_url: ""                 # 启用时填写 Tailscale 私网网页地址
+  timeout_seconds: 10
+alerts:
+  failure_streak: 2
+  state_path: data/alerts/run-health.json
+
 # ── 采集通道（findings §14：雪球 WAF/滑块，httpx 直连已被封死）─────────
 # 数据路径二选一：专用真实浏览器(CDP) 或 httpx 直连。
 browser:

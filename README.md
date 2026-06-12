@@ -104,6 +104,19 @@ API Key 和授权头执行启发式脱敏。帖子正文等证据字段保持原
 正文编辑和仅图片变更；已有存档图片会导出为摘要缩略图。窗口内发生确证删除事件的账号数达到
 `digest.wave_min_accounts` 时，摘要整体标注为平台级删帖密集期，逐条内容保持中性事实陈述。
 
+可在 `config/config.local.yml` 启用通用 JSON webhook：
+
+```yaml
+notifications:
+  enabled: true
+  private_base_url: http://<Tailscale-IP>:8765
+```
+
+再设置 `$env:KOL_NOTIFICATION_WEBHOOK_URL`。第三方服务收到的载荷固定只含 `title`、`count` 和
+`link`，不含正文、图片、异常详情或凭据。`digest` 完成后推送摘要元数据；`run-once` 异常、
+本轮采集失败或登录态失效连续达到 `alerts.failure_streak` 时推送健康告警。健康计数保存在
+`data/alerts/run-health.json`，成功轮次会重置。
+
 归档相关命令默认从 `config/config.yml` 与 `config/config.local.yml` 合并后的
 `storage.db_path` 读取数据库。需要临时操作其他归档时，统一使用 `--path <数据库路径>` 覆盖。
 

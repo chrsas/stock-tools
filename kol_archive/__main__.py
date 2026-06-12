@@ -14,10 +14,12 @@ from typing import Any, cast
 
 import httpx
 
+from kol_archive.alerts import load_alert_settings, record_run_health
 from kol_archive.browser import (
     DEFAULT_CDP_URL,
     DEFAULT_LANDING_URL,
     DEFAULT_PROFILE_DIR,
+    BrowserError,
     create_xueqiu_browser_client,
     start_dedicated_browser,
 )
@@ -48,6 +50,11 @@ from kol_archive.maintenance import (
 )
 from kol_archive.market import OUTCOME_METHOD_VERSION
 from kol_archive.models import ArchiveSettings, QueueReason
+from kol_archive.notifications import (
+    NotificationPayload,
+    load_notification_settings,
+    send_notification,
+)
 from kol_archive.ocr import run_ocr, select_engine
 from kol_archive.presentation import (
     author_scorecards,
@@ -161,8 +168,80 @@ def _current_version_id(archive: Archive, post_id: int, version_id: int | None) 
     return archive.current_version_id(post_id) if version_id is None else version_id
 
 
+def _collection_failure_reason(db_path: Path, started_at: str) -> str | None:
+    if not db_path.is_file():
+        return "run-once 执行失败"
+    connection = connect_database(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                EXISTS(
+                    SELECT 1 FROM fetch_runs
+                    WHERE started_at >= ? AND login_state = 'expired'
+                    UNION ALL
+                    SELECT 1 FROM probe_runs
+                    WHERE started_at >= ? AND login_state = 'expired'
+                ) AS has_expired_login,
+                EXISTS(
+                    SELECT 1 FROM fetch_runs
+                    WHERE started_at >= ?
+                      AND (
+                        status = 'failed' OR login_state != 'valid'
+                        OR rate_limited = 1 OR http_error_count > 0
+                      )
+                    UNION ALL
+                    SELECT 1 FROM probe_runs
+                    WHERE started_at >= ?
+                      AND (status = 'failed' OR login_state != 'valid' OR rate_limited = 1)
+                ) AS has_failure
+            """,
+            (started_at, started_at, started_at, started_at),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is not None and bool(row["has_expired_login"]):
+        return "登录状态连续失效"
+    if row is not None and bool(row["has_failure"]):
+        return "run-once 连续失败"
+    return None
+
+
+def _record_run_health_safely(
+    config: dict[str, Any],
+    *,
+    healthy: bool,
+    reason: str | None,
+) -> None:
+    try:
+        alert_settings = load_alert_settings(config)
+        try:
+            notification_settings = load_notification_settings(config)
+        except Exception:
+            LOGGER.warning("notification configuration invalid")
+            notification_settings = None
+        record_run_health(
+            alert_settings,
+            healthy=healthy,
+            reason=reason,
+            private_link=(
+                "" if notification_settings is None else notification_settings.private_base_url
+            ),
+            notify=lambda payload: (
+                False
+                if notification_settings is None
+                else send_notification(notification_settings, payload)
+            ),
+        )
+    except Exception:
+        LOGGER.warning("run health state update failed")
+
+
 def run_once(conf_dir: Path) -> None:
-    config = load_config(conf_dir)
+    _run_once_with_config(load_config(conf_dir))
+
+
+def _run_once_with_config(config: dict[str, Any]) -> None:
     storage = _section(config, "storage")
     monitoring = _section(config, "monitoring")
     polling = _section(config, "polling")
@@ -360,7 +439,25 @@ def _login_command(args: argparse.Namespace) -> None:
 
 
 def _run_once_command(args: argparse.Namespace) -> None:
-    run_once(args.config_dir)
+    config = load_config(args.config_dir)
+    started_at = datetime.now(tz=UTC).isoformat()
+
+    try:
+        _run_once_with_config(config)
+    except Exception as error:
+        failure_reason = "CDP 连接失败" if isinstance(error, BrowserError) else "run-once 执行失败"
+        _record_run_health_safely(
+            config,
+            healthy=False,
+            reason=failure_reason,
+        )
+        raise
+    collection_reason = _collection_failure_reason(_resolve_db_path(None, config), started_at)
+    _record_run_health_safely(
+        config,
+        healthy=collection_reason is None,
+        reason=collection_reason,
+    )
 
 
 def _backfill_command(args: argparse.Namespace) -> None:
@@ -432,6 +529,18 @@ def _digest_command(args: argparse.Namespace) -> None:
             output_dir,
             wave_min_accounts=wave_min_accounts,
         )
+        try:
+            notification_settings = load_notification_settings(config)
+            send_notification(
+                notification_settings,
+                NotificationPayload(
+                    title=result.title,
+                    count=len(result.events),
+                    link=notification_settings.private_base_url,
+                ),
+            )
+        except Exception:
+            LOGGER.warning("digest notification failed")
         _print_json(
             {
                 "title": result.title,
