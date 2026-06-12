@@ -10,7 +10,7 @@ from difflib import unified_diff
 from typing import Any, cast
 
 from kol_archive.maintenance import redact_text
-from kol_archive.market import common_close_returns
+from kol_archive.market import OUTCOME_METHOD_VERSION, common_close_returns, local_market_date
 from kol_archive.models import FeedState, SourceState, WatchMode
 
 _CN_TICKER = re.compile(r"^(?:SH|SZ|BJ)\d{6}$")
@@ -662,6 +662,138 @@ def _descriptive_market_snapshot(
             str(snapshot["end_date"]),
         ),
     }
+
+
+def version_descriptive_market_snapshots(
+    connection: sqlite3.Connection,
+    version_ids: set[int],
+    prompt_version: str,
+    benchmark_ticker: str,
+) -> dict[int, dict[str, object]]:
+    """Return existing descriptive market snapshots for enriched viewpoint versions."""
+    if not version_ids:
+        return {}
+    if not prompt_version.strip():
+        raise ValueError("prompt_version must not be empty")
+    placeholders = ",".join("?" for _ in version_ids)
+    rows = connection.execute(
+        f"""
+        SELECT
+            v.id AS version_id,
+            v.content_text AS current_text,
+            v.raw_payload,
+            v.first_observed_at AS viewpoint_at,
+            (
+                SELECT json_group_array(c.ticker)
+                FROM claims c
+                WHERE c.version_id = v.id
+            ) AS claim_tickers
+        FROM post_versions v
+        JOIN enrichments e ON e.version_id = v.id AND e.prompt_version = ?
+        WHERE v.id IN ({placeholders})
+          AND e.post_type = '观点'
+          AND {_MARKET_RELATED_VIEWPOINT_SQL}
+        ORDER BY v.id
+        """,
+        (prompt_version.strip(), *sorted(version_ids)),
+    ).fetchall()
+    targets: list[tuple[int, str, str, str | None]] = []
+    for row in rows:
+        claim_tickers = json.loads(str(row["claim_tickers"] or "[]"))
+        viewpoint = {
+            "current_text": row["current_text"],
+            "raw_payload": row["raw_payload"],
+            "viewpoint_at": row["viewpoint_at"],
+            "market_outcomes": [{"ticker": ticker} for ticker in claim_tickers],
+        }
+        ticker = _viewpoint_ticker(viewpoint)
+        if ticker is None:
+            continue
+        targets.append(
+            (
+                int(row["version_id"]),
+                ticker,
+                local_market_date(str(row["viewpoint_at"])).isoformat(),
+                _viewpoint_ticker_name(viewpoint, ticker),
+            )
+        )
+    if not targets:
+        return {}
+    values = ",".join("(?, ?, ?, ?)" for _ in targets)
+    parameters: list[object] = []
+    for version_id, ticker, observed_date, payload_name in targets:
+        parameters.extend((version_id, ticker, observed_date, payload_name))
+    price_rows = connection.execute(
+        f"""
+        WITH targets(version_id, ticker, observed_date, payload_name) AS (
+            VALUES {values}
+        )
+        SELECT
+            targets.version_id,
+            targets.ticker,
+            COALESCE(targets.payload_name, names.name) AS ticker_name,
+            start.date AS start_date,
+            start.asset_close AS asset_start,
+            start.benchmark_close AS benchmark_start,
+            finish.date AS end_date,
+            finish.asset_close AS asset_end,
+            finish.benchmark_close AS benchmark_end
+        FROM targets
+        LEFT JOIN ticker_names names ON names.ticker = targets.ticker
+        LEFT JOIN (
+            SELECT t.version_id, asset.date, asset.close AS asset_close,
+                   benchmark.close AS benchmark_close
+            FROM targets t
+            JOIN prices asset ON asset.ticker = t.ticker
+            JOIN prices benchmark
+                ON benchmark.ticker = ? AND benchmark.date = asset.date
+            WHERE asset.date = (
+                SELECT MAX(prior.date) FROM prices prior
+                JOIN prices prior_benchmark
+                    ON prior_benchmark.ticker = ? AND prior_benchmark.date = prior.date
+                WHERE prior.ticker = t.ticker AND prior.date < t.observed_date
+            )
+        ) start ON start.version_id = targets.version_id
+        LEFT JOIN (
+            SELECT t.version_id, asset.date, asset.close AS asset_close,
+                   benchmark.close AS benchmark_close
+            FROM targets t
+            JOIN prices asset ON asset.ticker = t.ticker
+            JOIN prices benchmark
+                ON benchmark.ticker = ? AND benchmark.date = asset.date
+            WHERE asset.date = (
+                SELECT MAX(latest.date) FROM prices latest
+                JOIN prices latest_benchmark
+                    ON latest_benchmark.ticker = ? AND latest_benchmark.date = latest.date
+                WHERE latest.ticker = t.ticker AND latest.date >= t.observed_date
+            )
+        ) finish ON finish.version_id = targets.version_id
+        ORDER BY targets.version_id
+        """,
+        (*parameters, benchmark_ticker, benchmark_ticker, benchmark_ticker, benchmark_ticker),
+    ).fetchall()
+    snapshots: dict[int, dict[str, object]] = {}
+    for row in price_rows:
+        if row["start_date"] is None or row["end_date"] is None:
+            continue
+        asset_start = float(row["asset_start"])
+        benchmark_start = float(row["benchmark_start"])
+        if asset_start == 0 or benchmark_start == 0:
+            continue
+        raw_return = float(row["asset_end"]) / asset_start - 1
+        benchmark_return = float(row["benchmark_end"]) / benchmark_start - 1
+        snapshots[int(row["version_id"])] = {
+            "ticker": row["ticker"],
+            "ticker_name": row["ticker_name"],
+            "benchmark_ticker": benchmark_ticker,
+            "start_date": row["start_date"],
+            "end_date": row["end_date"],
+            "raw_return": raw_return,
+            "benchmark_return": benchmark_return,
+            "excess_return": raw_return - benchmark_return,
+            "method_version": OUTCOME_METHOD_VERSION,
+        }
+    return snapshots
 
 
 def _daily_series(

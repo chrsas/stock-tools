@@ -103,6 +103,8 @@ API Key 和授权头执行启发式脱敏。帖子正文等证据字段保持原
 摘要同时写入 Markdown 和 HTML，默认位于 `data/digests/<时间戳>/`。内容区分确证删除事件、
 正文编辑和仅图片变更；已有存档图片会导出为摘要缩略图。窗口内发生确证删除事件的账号数达到
 `digest.wave_min_accounts` 时，摘要整体标注为平台级删帖密集期，逐条内容保持中性事实陈述。
+涉及当前 `llm.enrich_prompt_version` 下市场相关观点的条目，会沿用 `prices.benchmark_ticker`
+口径附加已有描述性市场变化；行情不足时不展示该段。
 
 可在 `config/config.local.yml` 启用通用 JSON webhook：
 

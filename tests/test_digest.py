@@ -5,10 +5,12 @@ from pathlib import Path
 
 from kol_archive.__main__ import _digest_settings
 from kol_archive.database import connect_database, initialize_database
-from kol_archive.digest import collect_digest_events, generate_digest
+from kol_archive.digest import DigestResult, collect_digest_events, generate_digest
 
 START = "2026-06-01T00:00:00+00:00"
 END = "2026-06-08T00:00:00+00:00"
+PROMPT_VERSION = "enrich-v2"
+BENCHMARK_TICKER = "SH000300"
 
 
 def _lastrowid(cursor: sqlite3.Cursor) -> int:
@@ -88,9 +90,46 @@ def _event(
     )
 
 
+def _enrich_viewpoint(
+    connection: sqlite3.Connection, post_id: int, version_id: int, prompt_version: str = "enrich-v2"
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO enrichments(
+            post_id, version_id, post_type, label_first_hand_info,
+            label_transferable_framework, label_reasoned_non_consensus,
+            is_market_related, rationale, evidence_snippet, stance_summary,
+            model, prompt_version, created_at
+        ) VALUES (?, ?, '观点', 0, 0, 0, 1, '理由', '片段', '立场', 'test', ?, ?)
+        """,
+        (post_id, version_id, prompt_version, END),
+    )
+
+
+def _price(connection: sqlite3.Connection, ticker: str, date: str, close: float) -> None:
+    connection.execute(
+        "INSERT INTO prices(ticker, date, close) VALUES (?, ?, ?)",
+        (ticker, date, close),
+    )
+
+
+def _generate(
+    connection: sqlite3.Connection, output_dir: Path, *, wave_min_accounts: int = 3
+) -> DigestResult:
+    return generate_digest(
+        connection,
+        START,
+        END,
+        output_dir,
+        prompt_version=PROMPT_VERSION,
+        benchmark_ticker=BENCHMARK_TICKER,
+        wave_min_accounts=wave_min_accounts,
+    )
+
+
 def test_digest_writes_no_change_files(tmp_path: Path) -> None:
     connection = _archive(tmp_path)
-    result = generate_digest(connection, START, END, tmp_path / "digests")
+    result = _generate(connection, tmp_path / "digests")
 
     assert result.events == ()
     assert "无变更" in result.markdown_path.read_text(encoding="utf-8")
@@ -166,7 +205,7 @@ def test_digest_classifies_edit_and_image_only_change(tmp_path: Path) -> None:
         to_version_id=image_version,
     )
 
-    result = generate_digest(connection, START, END, tmp_path / "digests")
+    result = _generate(connection, tmp_path / "digests")
     markdown = result.markdown_path.read_text(encoding="utf-8")
 
     assert result.edit_count == 1
@@ -185,7 +224,7 @@ def test_digest_marks_cross_account_deletion_wave_with_neutral_copy(tmp_path: Pa
         post_id, _ = _post(connection, _author(connection, uid), f"post-{uid}", "存档正文")
         _event(connection, post_id, "source_state", "gone_confirmed")
 
-    result = generate_digest(connection, START, END, tmp_path / "digests", wave_min_accounts=3)
+    result = _generate(connection, tmp_path / "digests", wave_min_accounts=3)
     markdown = result.markdown_path.read_text(encoding="utf-8")
 
     assert result.deletion_count == 3
@@ -221,7 +260,7 @@ def test_digest_escapes_markdown_and_uses_longer_diff_fence(tmp_path: Path) -> N
         to_version_id=edited_version,
     )
 
-    result = generate_digest(connection, START, END, tmp_path / "digests")
+    result = _generate(connection, tmp_path / "digests")
     markdown = result.markdown_path.read_text(encoding="utf-8")
 
     assert "## 编辑事件 · \\# 作者 \\[链接\\]\\(坏\\)" in markdown
@@ -240,17 +279,132 @@ def test_digest_configuration_preserves_explicit_falsy_values() -> None:
     assert wave_min_accounts == 0
 
 
-def test_digest_event_collection_uses_fixed_read_query_count(tmp_path: Path) -> None:
+def test_digest_event_collection_query_count_stays_bounded_with_market_versions(
+    tmp_path: Path,
+) -> None:
     connection = _archive(tmp_path)
-    for uid in ("one", "two", "three"):
-        post_id, _ = _post(connection, _author(connection, uid), f"post-{uid}", "存档正文")
-        _event(connection, post_id, "source_state", "gone_confirmed")
+    for index, uid in enumerate(("one", "two", "three"), start=1):
+        post_id, first_version = _post(connection, _author(connection, uid), f"post-{uid}", "原始")
+        ticker = f"SH60000{index}"
+        cursor = connection.execute(
+            """
+            INSERT INTO post_versions(
+                post_id, content_text, content_hash, image_manifest_hash, first_observed_at,
+                ingest_mode, raw_payload
+            ) VALUES (?, ?, ?, 'images-a', '2026-06-06T00:00:00+00:00', 'live', '{}')
+            """,
+            (post_id, f"$测试{index}({ticker})$ 观点", f"hash-{index}"),
+        )
+        version_id = _lastrowid(cursor)
+        _enrich_viewpoint(connection, post_id, version_id)
+        _event(
+            connection,
+            post_id,
+            "content",
+            str(version_id),
+            from_version_id=first_version,
+            to_version_id=version_id,
+        )
+        for symbol, before, after in (
+            (ticker, 10.0, 11.0),
+            (BENCHMARK_TICKER, 100.0, 105.0),
+        ):
+            connection.execute(
+                "INSERT OR IGNORE INTO prices(ticker, date, close) VALUES (?, ?, ?)",
+                (symbol, "2026-06-05", before),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO prices(ticker, date, close) VALUES (?, ?, ?)",
+                (symbol, "2026-06-08", after),
+            )
     statements: list[str] = []
     connection.set_trace_callback(statements.append)
 
-    events = collect_digest_events(connection, START, END, tmp_path / "assets")
+    events = collect_digest_events(
+        connection,
+        START,
+        END,
+        tmp_path / "assets",
+        prompt_version=PROMPT_VERSION,
+        benchmark_ticker=BENCHMARK_TICKER,
+    )
 
     connection.set_trace_callback(None)
     reads = [statement for statement in statements if statement.lstrip().startswith("SELECT")]
     assert len(events) == 3
-    assert len(reads) == 2
+    assert all(event.market_snapshot is not None for event in events)
+    assert len(reads) == 3
+
+
+def test_digest_includes_existing_descriptive_market_snapshot(tmp_path: Path) -> None:
+    connection = _archive(tmp_path)
+    author_id = _author(connection, "market")
+    post_id, first_version = _post(connection, author_id, "post-market", "原始正文")
+    cursor = connection.execute(
+        """
+        INSERT INTO post_versions(
+            post_id, content_text, content_hash, image_manifest_hash, first_observed_at,
+            ingest_mode, raw_payload
+        ) VALUES (?, '$测试股份(SH600000)$ 后续观点', 'hash-market', 'images-a',
+            '2026-06-06T00:00:00+00:00', 'live', '{}')
+        """,
+        (post_id,),
+    )
+    market_version = _lastrowid(cursor)
+    _enrich_viewpoint(connection, post_id, market_version)
+    _event(
+        connection,
+        post_id,
+        "content",
+        str(market_version),
+        from_version_id=first_version,
+        to_version_id=market_version,
+    )
+    for ticker, before, after in (
+        ("SH600000", 10.0, 11.0),
+        ("SH000300", 100.0, 105.0),
+    ):
+        _price(connection, ticker, "2026-06-05", before)
+        _price(connection, ticker, "2026-06-08", after)
+
+    result = _generate(connection, tmp_path / "digests")
+    markdown = result.markdown_path.read_text(encoding="utf-8")
+    rendered_html = result.html_path.read_text(encoding="utf-8")
+
+    assert result.events[0].market_snapshot is not None
+    assert "series" not in result.events[0].market_snapshot
+    assert "描述性市场变化：测试股份（SH600000） \\+10\\.00%" in markdown
+    assert "SH000300 \\+5\\.00%" in markdown
+    assert "超额 \\+5\\.00%" in markdown
+    assert "描述性市场变化：测试股份（SH600000） +10.00%" in rendered_html
+
+
+def test_digest_omits_market_snapshot_without_prices(tmp_path: Path) -> None:
+    connection = _archive(tmp_path)
+    author_id = _author(connection, "market")
+    post_id, first_version = _post(connection, author_id, "post-market", "原始正文")
+    cursor = connection.execute(
+        """
+        INSERT INTO post_versions(
+            post_id, content_text, content_hash, image_manifest_hash, first_observed_at,
+            ingest_mode, raw_payload
+        ) VALUES (?, '$测试股份(SH600000)$ 后续观点', 'hash-market', 'images-a',
+            '2026-06-06T00:00:00+00:00', 'live', '{}')
+        """,
+        (post_id,),
+    )
+    market_version = _lastrowid(cursor)
+    _enrich_viewpoint(connection, post_id, market_version)
+    _event(
+        connection,
+        post_id,
+        "content",
+        str(market_version),
+        from_version_id=first_version,
+        to_version_id=market_version,
+    )
+
+    result = _generate(connection, tmp_path / "digests")
+
+    assert result.events[0].market_snapshot is None
+    assert "描述性市场变化" not in result.markdown_path.read_text(encoding="utf-8")

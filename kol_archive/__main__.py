@@ -518,6 +518,9 @@ def _digest_command(args: argparse.Namespace) -> None:
         raise ValueError("days must be positive")
     config = load_config(args.config_dir)
     output_dir, wave_min_accounts = _digest_settings(config, args.output_dir)
+    prices = _section(config, "prices")
+    benchmark_ticker = str(prices.get("benchmark_ticker") or "SH000300")
+    prompt_version = _enrich_prompt_version(config, None)
     end = datetime.now(tz=UTC)
     start = end - timedelta(days=args.days)
     connection, _ = _connect_existing_archive(_resolve_db_path(args.path, config))
@@ -528,6 +531,8 @@ def _digest_command(args: argparse.Namespace) -> None:
             end.isoformat(),
             output_dir,
             wave_min_accounts=wave_min_accounts,
+            prompt_version=prompt_version,
+            benchmark_ticker=benchmark_ticker,
         )
         try:
             notification_settings = load_notification_settings(config)

@@ -10,6 +10,8 @@ from datetime import datetime
 from difflib import unified_diff
 from pathlib import Path
 
+from kol_archive.presentation import version_descriptive_market_snapshots
+
 
 @dataclass(frozen=True)
 class DigestEvent:
@@ -25,6 +27,7 @@ class DigestEvent:
     excerpt: str
     diff: str | None = None
     image_paths: tuple[str, ...] = ()
+    market_snapshot: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -185,12 +188,18 @@ def collect_digest_events(
     start_at: str,
     end_at: str,
     assets_dir: Path,
+    *,
+    prompt_version: str,
+    benchmark_ticker: str,
 ) -> tuple[DigestEvent, ...]:
     rows = _event_rows(connection, start_at, end_at)
     image_version_ids = {
         version_id for row in rows if (version_id := _event_image_version_id(row)) is not None
     }
     images_by_version = _image_rows_by_version(connection, image_version_ids)
+    snapshots_by_version = version_descriptive_market_snapshots(
+        connection, image_version_ids, prompt_version, benchmark_ticker
+    )
     events: list[DigestEvent] = []
     for row in rows:
         kind = "deletion" if row["dimension"] == "source_state" else _content_kind(row)
@@ -216,6 +225,9 @@ def collect_digest_events(
                     assets_dir,
                     int(row["event_id"]),
                 ),
+                market_snapshot=(
+                    snapshots_by_version.get(int(version_id)) if version_id is not None else None
+                ),
             )
         )
     return tuple(events)
@@ -237,6 +249,23 @@ def _markdown_diff(diff: str) -> list[str]:
     longest_run = max((len(match) for match in re.findall(r"`+", diff)), default=0)
     fence = "`" * max(3, longest_run + 1)
     return [f"{fence}diff", diff.rstrip(), fence, ""]
+
+
+def _percent(value: object) -> str:
+    return f"{float(str(value)):+.2%}"
+
+
+def _market_text(snapshot: dict[str, object]) -> str:
+    ticker = str(snapshot["ticker"])
+    ticker_name = str(snapshot.get("ticker_name") or "").strip()
+    label = f"{ticker_name}（{ticker}）" if ticker_name else ticker
+    return (
+        f"描述性市场变化：{label} {_percent(snapshot['raw_return'])}，"
+        f"{snapshot['benchmark_ticker']} {_percent(snapshot['benchmark_return'])}，"
+        f"超额 {_percent(snapshot['excess_return'])}；"
+        f"{snapshot['start_date']} 至 {snapshot['end_date']}，"
+        f"口径 {snapshot['method_version']}"
+    )
 
 
 def _render_markdown(
@@ -264,6 +293,8 @@ def _render_markdown(
         )
         for image_path in event.image_paths:
             lines.extend([f"![存档图片缩略]({image_path})", ""])
+        if event.market_snapshot:
+            lines.extend([_markdown_text(_market_text(event.market_snapshot)), ""])
         if event.diff:
             lines.extend(_markdown_diff(event.diff))
     return "\n".join(lines)
@@ -282,6 +313,11 @@ def _render_html(
             f'<img src="{html.escape(path)}" alt="存档图片缩略">' for path in event.image_paths
         )
         diff = f"<pre>{html.escape(event.diff)}</pre>" if event.diff else ""
+        market = (
+            f"<p>{html.escape(_market_text(event.market_snapshot))}</p>"
+            if event.market_snapshot
+            else ""
+        )
         blocks.append(
             "<article>"
             f"<h2>{html.escape(_kind_label(event.kind))} · {html.escape(event.author_name)}</h2>"
@@ -289,7 +325,7 @@ def _render_html(
             f"<p>首次观察：{html.escape(event.first_seen_at)}<br>"
             f"最后观察：{html.escape(event.last_observed_at or '暂无')}<br>"
             f"检测到变更：{html.escape(event.detected_at)}</p>"
-            f"<p>{html.escape(event.excerpt or '无正文摘录')}</p>{images}{diff}</article>"
+            f"<p>{html.escape(event.excerpt or '无正文摘录')}</p>{images}{market}{diff}</article>"
         )
     return (
         '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
@@ -309,13 +345,22 @@ def generate_digest(
     output_dir: Path,
     *,
     wave_min_accounts: int = 3,
+    prompt_version: str,
+    benchmark_ticker: str,
 ) -> DigestResult:
     if wave_min_accounts < 0:
         raise ValueError("wave_min_accounts must not be negative")
     end = datetime.fromisoformat(end_at.replace("Z", "+00:00"))
     bundle_dir = output_dir / end.strftime("%Y%m%dT%H%M%SZ")
     assets_dir = bundle_dir / "assets"
-    events = collect_digest_events(connection, start_at, end_at, assets_dir)
+    events = collect_digest_events(
+        connection,
+        start_at,
+        end_at,
+        assets_dir,
+        prompt_version=prompt_version,
+        benchmark_ticker=benchmark_ticker,
+    )
     deletion_authors = {event.author_id for event in events if event.kind == "deletion"}
     wave = len(deletion_authors) >= wave_min_accounts
     title = f"KOL 变更摘要 {end.strftime('%Y-%m-%d')}"
