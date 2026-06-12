@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import json
-import re
 import sqlite3
 from dataclasses import dataclass
 from urllib.parse import quote
 
+from kol_archive.market import extract_market_tickers, is_a_share_ticker
 from kol_archive.time import parse_utc_timestamp
-
-_A_SHARE_TICKER = re.compile(r"(?<![A-Z0-9])(?:SH|SZ|BJ)\d{6}(?![A-Z0-9])")
 
 
 @dataclass(frozen=True)
@@ -25,40 +22,9 @@ class WatchlistMatch:
 
 def validated_watchlist_ticker(value: str) -> str:
     ticker = value.strip().upper()
-    if not _A_SHARE_TICKER.fullmatch(ticker):
+    if not is_a_share_ticker(ticker):
         raise ValueError("watchlist ticker must be an A-share ticker")
     return ticker
-
-
-def extract_market_tickers(content_text: str, raw_payload: str | None) -> set[str]:
-    tickers = set(_A_SHARE_TICKER.findall(content_text))
-    if not raw_payload:
-        return tickers
-    try:
-        payload = json.loads(raw_payload)
-    except json.JSONDecodeError:
-        return tickers
-
-    def visit(value: object) -> None:
-        if isinstance(value, dict):
-            correlation = value.get("stockCorrelation")
-            if isinstance(correlation, list):
-                for item in correlation:
-                    if _A_SHARE_TICKER.fullmatch(str(item)):
-                        tickers.add(str(item))
-                    elif isinstance(item, dict):
-                        for key in ("symbol", "ticker", "code"):
-                            candidate = str(item.get(key) or "")
-                            if _A_SHARE_TICKER.fullmatch(candidate):
-                                tickers.add(candidate)
-            for child in value.values():
-                visit(child)
-        elif isinstance(value, list):
-            for child in value:
-                visit(child)
-
-    visit(payload)
-    return tickers
 
 
 def add_watchlist_ticker(

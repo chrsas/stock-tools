@@ -9,9 +9,13 @@ from datetime import date, timedelta, timezone
 
 from kol_archive.time import parse_utc_timestamp
 
-_A_SHARE_TICKER = re.compile(r"(?:SH|SZ|BJ)\d{6}")
+_A_SHARE_TICKER = re.compile(r"(?<![A-Z0-9])(?:SH|SZ|BJ)\d{6}(?![A-Z0-9])")
 A_SHARE_TIMEZONE = timezone(timedelta(hours=8))
 OUTCOME_METHOD_VERSION = "descriptive-common-close-v1"
+
+
+def is_a_share_ticker(value: str) -> bool:
+    return _A_SHARE_TICKER.fullmatch(value) is not None
 
 
 def has_explicit_market_relation(content_text: str, raw_payload: str | None) -> bool:
@@ -43,6 +47,38 @@ def has_explicit_market_relation(content_text: str, raw_payload: str | None) -> 
         return False
 
     return visit(payload)
+
+
+def extract_market_tickers(content_text: str, raw_payload: str | None) -> set[str]:
+    """Return every explicit A-share ticker in text or stockCorrelation."""
+    tickers = set(_A_SHARE_TICKER.findall(content_text))
+    if not raw_payload:
+        return tickers
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return tickers
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            correlation = value.get("stockCorrelation")
+            if isinstance(correlation, list):
+                for item in correlation:
+                    if _A_SHARE_TICKER.fullmatch(str(item)):
+                        tickers.add(str(item))
+                    elif isinstance(item, dict):
+                        for key in ("symbol", "ticker", "code"):
+                            candidate = str(item.get(key) or "")
+                            if _A_SHARE_TICKER.fullmatch(candidate):
+                                tickers.add(candidate)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(payload)
+    return tickers
 
 
 def local_market_date(timestamp: str) -> date:

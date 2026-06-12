@@ -6,7 +6,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from kol_archive.market import has_explicit_market_relation
+from kol_archive.market import extract_market_tickers, has_explicit_market_relation
 
 EVIDENCE_TABLES = (
     "fetch_runs",
@@ -16,6 +16,7 @@ EVIDENCE_TABLES = (
     "post_events",
     "post_images",
 )
+DERIVED_APPEND_ONLY_TABLES = ("crowding_events", "crowding_event_members")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS authors (
@@ -331,6 +332,37 @@ CREATE TABLE IF NOT EXISTS watchlist_alerts (
     UNIQUE(version_id, ticker)
 );
 
+CREATE TABLE IF NOT EXISTS version_tickers (
+    version_id INTEGER NOT NULL REFERENCES post_versions(id),
+    ticker TEXT NOT NULL,
+    PRIMARY KEY(version_id, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS version_ticker_scans (
+    version_id INTEGER PRIMARY KEY REFERENCES post_versions(id)
+);
+
+CREATE TABLE IF NOT EXISTS crowding_events (
+    id INTEGER PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('long', 'short', 'neutral')),
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    detected_at TEXT NOT NULL,
+    author_count INTEGER NOT NULL CHECK(author_count >= 1),
+    method_version TEXT NOT NULL,
+    UNIQUE(ticker, direction, window_start, window_end, method_version)
+);
+
+CREATE TABLE IF NOT EXISTS crowding_event_members (
+    event_id INTEGER NOT NULL REFERENCES crowding_events(id),
+    claim_id INTEGER NOT NULL REFERENCES claims(id),
+    author_id INTEGER NOT NULL REFERENCES authors(id),
+    post_id INTEGER NOT NULL REFERENCES posts(id),
+    version_id INTEGER NOT NULL REFERENCES post_versions(id),
+    PRIMARY KEY(event_id, claim_id)
+);
+
 -- Append-only evidence: one row per image-fetch attempt for a version. A
 -- re-download of the same normalized_url appends a new row (never updates), so a
 -- byte swap behind an unchanged URL stays visible as a second row with a
@@ -418,6 +450,21 @@ def _ensure_column(
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
 
+def _create_index_if_columns(
+    connection: sqlite3.Connection,
+    index_name: str,
+    table: str,
+    columns: tuple[str, ...],
+) -> None:
+    existing = {
+        str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if all(column in existing for column in columns):
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS {index_name} ON {table}({', '.join(columns)})"
+        )
+
+
 def _rebuild_legacy_decision_outcomes(connection: sqlite3.Connection) -> None:
     """Remove the temporary resolved-at unique constraint from early phase-5 DBs."""
     row = connection.execute(
@@ -500,6 +547,35 @@ def _backfill_market_relation(connection: sqlite3.Connection) -> None:
     )
 
 
+def _backfill_version_tickers(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT v.id, v.content_text, v.raw_payload
+        FROM post_versions v
+        WHERE NOT EXISTS (
+            SELECT 1 FROM version_ticker_scans scan WHERE scan.version_id = v.id
+        )
+        """
+    ).fetchall()
+    connection.executemany(
+        "INSERT OR IGNORE INTO version_tickers(version_id, ticker) VALUES (?, ?)",
+        (
+            (int(row["id"]), ticker)
+            for row in rows
+            for ticker in sorted(
+                extract_market_tickers(
+                    str(row["content_text"]),
+                    str(row["raw_payload"]) if row["raw_payload"] is not None else None,
+                )
+            )
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO version_ticker_scans(version_id) VALUES (?)",
+        ((int(row["id"]),) for row in rows),
+    )
+
+
 def initialize_database(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
     _rebuild_legacy_decision_outcomes(connection)
@@ -570,6 +646,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         "outcome_method_version TEXT NOT NULL DEFAULT 'legacy-unknown'",
     )
     _backfill_market_relation(connection)
+    _backfill_version_tickers(connection)
     connection.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_enrichments_market_viewpoints
@@ -594,9 +671,25 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         ON my_decision_reviews(decision_id, reviewed_at);
         CREATE INDEX IF NOT EXISTS idx_watchlist_alerts_pending
         ON watchlist_alerts(sent_at, detected_at, id);
+        CREATE INDEX IF NOT EXISTS idx_version_tickers_ticker
+        ON version_tickers(ticker, version_id);
+        CREATE INDEX IF NOT EXISTS idx_posts_author
+        ON posts(author_id, id);
+        CREATE INDEX IF NOT EXISTS idx_post_events_post
+        ON post_events(post_id, dimension, id);
+        CREATE INDEX IF NOT EXISTS idx_crowding_events_recent
+        ON crowding_events(window_end DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_crowding_members_event
+        ON crowding_event_members(event_id, author_id);
         """
     )
-    for table in EVIDENCE_TABLES:
+    _create_index_if_columns(
+        connection,
+        "idx_post_versions_post",
+        "post_versions",
+        ("post_id", "id"),
+    )
+    for table in (*EVIDENCE_TABLES, *DERIVED_APPEND_ONLY_TABLES):
         connection.executescript(
             f"""
             CREATE TRIGGER IF NOT EXISTS protect_{table}_update

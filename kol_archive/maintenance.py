@@ -42,6 +42,10 @@ EXPORT_QUERIES = {
     "ticker_names": "SELECT * FROM ticker_names",
     "watchlist": "SELECT * FROM watchlist",
     "watchlist_alerts": "SELECT * FROM watchlist_alerts",
+    "version_tickers": "SELECT * FROM version_tickers",
+    "version_ticker_scans": "SELECT * FROM version_ticker_scans",
+    "crowding_events": "SELECT * FROM crowding_events",
+    "crowding_event_members": "SELECT * FROM crowding_event_members",
     "version_sightings": "SELECT * FROM version_sightings",
 }
 JSON_COLUMNS = {

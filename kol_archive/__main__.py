@@ -16,6 +16,12 @@ from typing import Any, cast
 import httpx
 
 from kol_archive.alerts import load_alert_settings, record_run_health
+from kol_archive.analysis import (
+    list_crowding_events,
+    load_analysis_settings,
+    selective_deletion_analysis,
+    stage_crowding_events,
+)
 from kol_archive.browser import (
     DEFAULT_CDP_URL,
     DEFAULT_LANDING_URL,
@@ -1031,6 +1037,31 @@ def _watchlist_command(args: argparse.Namespace) -> None:
         connection.close()
 
 
+def _analyze_command(args: argparse.Namespace) -> None:
+    if args.limit < 1:
+        raise ValueError("limit must be positive")
+    config = load_config(args.config_dir)
+    settings = load_analysis_settings(config)
+    connection, _ = _connect_existing_archive(_resolve_db_path(args.path, config))
+    try:
+        staged = stage_crowding_events(
+            connection,
+            settings,
+            datetime.now(tz=UTC).isoformat(),
+        )
+        _print_json(
+            {
+                "staged_crowding_events": staged,
+                "selective_deletion": selective_deletion_analysis(
+                    connection, settings.min_group_samples
+                ),
+                "crowding_events": list_crowding_events(connection, limit=args.limit),
+            }
+        )
+    finally:
+        connection.close()
+
+
 def _resolve_decisions_command(args: argparse.Namespace) -> None:
     config = load_config(args.config_dir)
     benchmark = str((config.get("prices") or {}).get("benchmark_ticker") or "SH000300").upper()
@@ -1465,6 +1496,13 @@ def main() -> None:
     watchlist_parser.add_argument("--path", type=Path)
     watchlist_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     watchlist_parser.set_defaults(handler=_watchlist_command)
+    analyze_parser = subparsers.add_parser(
+        "analyze", help="stage crowding events and print neutral distribution analysis"
+    )
+    analyze_parser.add_argument("--limit", type=int, default=50)
+    analyze_parser.add_argument("--path", type=Path)
+    analyze_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    analyze_parser.set_defaults(handler=_analyze_command)
     resolve_decisions_parser = subparsers.add_parser(
         "resolve-decisions", help="settle due personal decisions from imported prices"
     )

@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from typing import cast
 
 from kol_archive.claims import validate_claim_proposal_result
-from kol_archive.market import has_explicit_market_relation
+from kol_archive.market import extract_market_tickers, has_explicit_market_relation
 from kol_archive.models import (
     BACKFILL_PAGES_NOTE,
     TIMELINE_PARSE_FAILED_NOTE,
@@ -1692,7 +1692,21 @@ class Archive:
                 _json(post.raw_payload),
             ),
         )
-        return _required_lastrowid(cursor), True
+        version_id = _required_lastrowid(cursor)
+        self.connection.executemany(
+            "INSERT INTO version_tickers(version_id, ticker) VALUES (?, ?)",
+            (
+                (version_id, ticker)
+                for ticker in sorted(
+                    extract_market_tickers(post.content_text, _json(post.raw_payload))
+                )
+            ),
+        )
+        self.connection.execute(
+            "INSERT INTO version_ticker_scans(version_id) VALUES (?)",
+            (version_id,),
+        )
+        return version_id, True
 
     def _insert_probe_run(self, run: ProbeRun, version_id: int | None) -> int:
         cursor = self.connection.execute(

@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
+from kol_archive.analysis import (
+    list_crowding_events,
+    load_analysis_settings,
+    post_ticker_history,
+    selective_deletion_analysis,
+)
 from kol_archive.claims import list_claim_proposals
 from kol_archive.config import load_config
 from kol_archive.database import connect_database, initialize_database
@@ -51,6 +57,7 @@ class WebSettings:
     enrich_prompt_version: str = "enrich-v2"
     market_benchmark_ticker: str = "SH000300"
     viewpoint_cluster_window_days: int = 7
+    analysis_min_group_samples: int = 10
 
 
 class ArchiveHttpServer(ThreadingHTTPServer):
@@ -62,6 +69,7 @@ class ArchiveHttpServer(ThreadingHTTPServer):
     enrich_prompt_version: str
     market_benchmark_ticker: str
     viewpoint_cluster_window_days: int
+    analysis_min_group_samples: int
 
 
 def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
@@ -96,6 +104,7 @@ def load_web_settings(
             if web.get("viewpoint_cluster_window_days") is None
             else web["viewpoint_cluster_window_days"]
         ),
+        analysis_min_group_samples=load_analysis_settings(config).min_group_samples,
     )
     if not settings.bind_host or settings.bind_host in {"0.0.0.0", "::", "[::]"}:
         raise ValueError("web.bind_host must be a loopback or explicit tailnet address")
@@ -137,6 +146,7 @@ def create_server(
     server.enrich_prompt_version = settings.enrich_prompt_version
     server.market_benchmark_ticker = settings.market_benchmark_ticker
     server.viewpoint_cluster_window_days = settings.viewpoint_cluster_window_days
+    server.analysis_min_group_samples = settings.analysis_min_group_samples
     return server
 
 
@@ -192,6 +202,7 @@ def _home_payload(
     query: str,
     benchmark_ticker: str = "SH000300",
     cluster_window_days: int = 7,
+    analysis_min_group_samples: int = 10,
 ) -> dict[str, object]:
     values = parse_qs(query)
     view = (values.get("view") or ["authors"])[0]
@@ -249,6 +260,14 @@ def _home_payload(
         }
     if view == "watchlist":
         return {"view": "watchlist", "items": list_watchlist(connection)}
+    if view == "analysis":
+        return {
+            "view": "analysis",
+            "selective_deletion": selective_deletion_analysis(
+                connection, analysis_min_group_samples
+            ),
+            "crowding_events": list_crowding_events(connection, limit=limit),
+        }
     authors = author_viewpoint_overview(connection, prompt_version)
     selected_uid = (values.get("author") or [""])[0] or None
     selected = next(
@@ -296,6 +315,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                                 parsed.query,
                                 self.server.market_benchmark_ticker,
                                 self.server.viewpoint_cluster_window_days,
+                                self.server.analysis_min_group_samples,
                             ),
                             "csrf_token": self.server.csrf_token,
                         },
@@ -328,7 +348,15 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                         HTTPStatus.OK,
                         {
                             "view": "post",
-                            "card": build_evidence_card(connection, post_id),
+                            "card": {
+                                **build_evidence_card(connection, post_id),
+                                "ticker_history": post_ticker_history(
+                                    connection,
+                                    post_id,
+                                    self.server.enrich_prompt_version,
+                                    self.server.market_benchmark_ticker,
+                                ),
+                            },
                             "csrf_token": self.server.csrf_token,
                         },
                     )

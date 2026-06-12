@@ -104,6 +104,7 @@ onMounted(() => { applyTheme(); refresh(); });
         <li><a class="nav-item" :class="{ on: navActive('claims') }" href="/?view=claims"><svg viewBox="0 0 24 24" class="ico"><path d="M5 4h14v16H5z" /><path d="M8 9h8M8 13h5" /></svg>命题确认</a></li>
         <li><a class="nav-item" :class="{ on: navActive('decisions') }" href="/?view=decisions"><svg viewBox="0 0 24 24" class="ico"><path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>我的决策</a></li>
         <li><a class="nav-item" :class="{ on: navActive('watchlist') }" href="/?view=watchlist"><svg viewBox="0 0 24 24" class="ico"><path d="M12 3v18M3 12h18" /><circle cx="12" cy="12" r="8" /></svg>关注列表</a></li>
+        <li><a class="nav-item" :class="{ on: navActive('analysis') }" href="/?view=analysis"><svg viewBox="0 0 24 24" class="ico"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" /></svg>统计分析</a></li>
       </ul>
       <div class="sidebar-foot">
         <span class="eyebrow">prompt 版本</span>
@@ -289,6 +290,33 @@ onMounted(() => { applyTheme(); refresh(); });
           </section>
         </template>
 
+        <template v-else-if="page?.view === 'analysis'">
+          <div class="page-title"><div><h1>统计分析</h1><p class="sub">仅展示分布与组成证据，不对单次事件归因。</p></div></div>
+          <div class="stream-label"><span class="eyebrow">选择性删除检验</span></div>
+          <section class="stream">
+            <article v-for="item in page.selective_deletion" :key="`${item.author_id}-${item.horizon_days}-${item.benchmark_ticker}-${item.outcome_method_version}`" class="card">
+              <header><h2>{{ item.author_name }} · {{ item.horizon_days }} 天</h2><span class="pill">{{ item.comparison_label }}</span></header>
+              <p class="muted">{{ item.benchmark_ticker }} · {{ item.outcome_method_version }} · 每组门槛 {{ item.min_group_samples }}</p>
+              <div class="market-row"><strong>来源页明确已移除</strong><span>样本 {{ item.removed.sample_count }}<template v-if="item.sufficient_samples"> · 中位超额 {{ percent(item.removed.median_excess_return) }} · 平均超额 {{ percent(item.removed.mean_excess_return) }}</template></span></div>
+              <div class="market-row"><strong>未观察到明确移除</strong><span>样本 {{ item.retained.sample_count }}<template v-if="item.sufficient_samples"> · 中位超额 {{ percent(item.retained.median_excess_return) }} · 平均超额 {{ percent(item.retained.mean_excess_return) }}</template></span></div>
+            </article>
+            <p v-if="!page.selective_deletion.length" class="empty">暂无可比较的已结算命题。</p>
+          </section>
+          <div class="stream-label"><span class="eyebrow">跨博主拥挤事件</span></div>
+          <section class="stream">
+            <article v-for="event in page.crowding_events" :key="event.id" class="card">
+              <header><h2>{{ event.ticker_name || event.ticker }} · {{ event.direction }}</h2><span class="pill">{{ event.author_count }} 位作者</span></header>
+              <p class="muted">{{ fmtTime(event.window_start) }} 至 {{ fmtTime(event.window_end) }} · {{ event.method_version }}</p>
+              <div v-for="member in event.members" :key="member.claim_id" class="market-row">
+                <a :href="`/posts/${member.post_id}`">{{ member.author_name }} · 命题 {{ member.claim_id }} · 版本 {{ member.version_id }}</a>
+                <span v-if="member.resolved_at">事后标的 {{ percent(member.raw_return) }} · 超额 {{ percent(member.excess_return) }}</span>
+                <span v-else class="muted">尚未结算</span>
+              </div>
+            </article>
+            <p v-if="!page.crowding_events.length" class="empty">暂无达到门槛的拥挤事件。</p>
+          </section>
+        </template>
+
         <template v-else-if="page?.view === 'author'">
           <div class="page-title"><AuthorBadge :item="page.profile.author" /><h1>{{ authorName(page.profile.author) }}</h1></div>
           <p class="bio">{{ page.profile.author.author_description }}</p>
@@ -311,6 +339,17 @@ onMounted(() => { applyTheme(); refresh(); });
               <label>关注理由<textarea name="reason" required></textarea></label><label>我的预期<textarea name="expectation"></textarea></label><button>记录关注理由并钉住</button>
             </form>
             <button v-if="page.card.post.current_version_id" @click="action(`/posts/${page.card.post.id}/rewrite`, { version_id: page.card.post.current_version_id })">生成单条改写训练</button>
+          </section>
+          <section>
+            <div class="stream-label"><span class="eyebrow">该作者与本帖标的</span></div>
+            <p v-if="page.card.ticker_history.empty_label" class="empty">{{ page.card.ticker_history.empty_label }}</p>
+            <article v-for="item in page.card.ticker_history.items" :key="`${item.version_id}-${item.ticker}`" class="card">
+              <header><h3>{{ item.ticker }} · 版本 {{ item.version_id }}</h3><span class="pill">{{ item.has_removal_event ? "来源页曾明确已移除" : item.source_state }}</span></header>
+              <p class="muted">首次观察 {{ fmtTime(item.first_observed_at) }} · <a :href="`/posts/${item.post_id}`">查看帖子证据</a></p>
+              <pre>{{ item.content_text }}</pre>
+              <div v-if="item.market_snapshot" class="market-row"><strong>描述性市场变化</strong><span>标的 {{ percent(item.market_snapshot.raw_return) }} · 超额 {{ percent(item.market_snapshot.excess_return) }}</span></div>
+              <p v-for="event in item.events" :key="`${event.detected_at}-${event.dimension}`" class="muted">{{ event.detected_at }} · {{ event.dimension }}：{{ event.from_value || "无" }} → {{ event.to_value }}</p>
+            </article>
           </section>
           <section><div class="stream-label"><span class="eyebrow">观察版本</span></div><article v-for="version in page.card.versions" :key="version.version_id" class="card"><h3>观察版本 {{ version.version_id }}</h3><p class="muted">首次 {{ fmtTime(version.first_observed_at) }} · 最后 {{ fmtTime(version.last_observed_at) }}</p><pre>{{ version.content_text }}</pre><details><summary>相对上一版本 diff</summary><pre>{{ version.diff_from_prior_observed_version || "首个观察版本" }}</pre></details></article></section>
           <section v-for="name in ['feed_observations', 'direct_probes', 'events', 'attention_log', 'rewrite_exercises', 'enrichments']" :key="name"><div class="stream-label"><span class="eyebrow">{{ name }}</span></div><pre class="data">{{ JSON.stringify(page.card[name], null, 2) }}</pre></section>

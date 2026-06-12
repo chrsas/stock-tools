@@ -614,6 +614,9 @@ def test_read_routes_return_redacted_timeline_and_evidence_card(
     assert cast(dict[str, object], card["post"])["platform_post_id"] == "post-1 & qa"
     assert "测试作者 & QA" in card_text
     assert "cookie=[REDACTED]" in card_text
+    ticker_history = cast(dict[str, object], card["ticker_history"])
+    assert ticker_history["tickers"] == ["SH000001"]
+    assert len(cast(list[object], ticker_history["items"])) == 1
     assert payload["csrf_token"] == CSRF_TOKEN
     for secret in ("feed-secret", "meta-secret", "payload-secret", "raw_meta", "raw_payload"):
         assert secret not in card_text
@@ -627,6 +630,11 @@ def test_read_routes_return_redacted_timeline_and_evidence_card(
     assert cast(dict[str, object], profile["author"])["author_description"] == "作者简介"
     assert cast(list[object], profile["viewpoint_clusters"]) == []
     assert len(cast(list[object], profile["posts"])) == 1
+
+    analysis = _get_json(web_server, "/api/home?view=analysis")
+    assert analysis["view"] == "analysis"
+    assert analysis["selective_deletion"] == []
+    assert analysis["crowding_events"] == []
 
 
 def test_author_route_decodes_encoded_uid_segment() -> None:
