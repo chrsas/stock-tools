@@ -30,6 +30,7 @@ from kol_archive.collector import (
 from kol_archive.config import load_config, resolve_cookie
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.decisions import common_close_outcome, list_decisions
+from kol_archive.digest import generate_digest
 from kol_archive.enrich import load_enrich_settings, request_enrichment
 from kol_archive.image_enrich import load_vision_settings, run_image_enrichment
 from kol_archive.images import ImageDownloader, ImageDownloadSettings
@@ -398,6 +399,52 @@ def _restore_backup_command(args: argparse.Namespace) -> None:
 def _export_command(args: argparse.Namespace) -> None:
     result = export_archive(_configured_db_path(args.path, args.config_dir), args.output_dir)
     LOGGER.info("credential-safe export created path=%s", result.bundle_dir)
+
+
+def _digest_settings(config: dict[str, Any], output_dir: Path | None) -> tuple[Path, int]:
+    digest = _section(config, "digest")
+    configured_output_dir = digest.get("output_dir")
+    resolved_output_dir = (
+        output_dir
+        if output_dir is not None
+        else Path("data/digests" if configured_output_dir is None else str(configured_output_dir))
+    )
+    configured_wave_min_accounts = digest.get("wave_min_accounts")
+    wave_min_accounts = (
+        3 if configured_wave_min_accounts is None else int(configured_wave_min_accounts)
+    )
+    return resolved_output_dir, wave_min_accounts
+
+
+def _digest_command(args: argparse.Namespace) -> None:
+    if args.days < 1:
+        raise ValueError("days must be positive")
+    config = load_config(args.config_dir)
+    output_dir, wave_min_accounts = _digest_settings(config, args.output_dir)
+    end = datetime.now(tz=UTC)
+    start = end - timedelta(days=args.days)
+    connection, _ = _connect_existing_archive(_resolve_db_path(args.path, config))
+    try:
+        result = generate_digest(
+            connection,
+            start.isoformat(),
+            end.isoformat(),
+            output_dir,
+            wave_min_accounts=wave_min_accounts,
+        )
+        _print_json(
+            {
+                "title": result.title,
+                "markdown_path": str(result.markdown_path),
+                "html_path": str(result.html_path),
+                "deletion_count": result.deletion_count,
+                "edit_count": result.edit_count,
+                "image_change_count": result.image_change_count,
+                "deletion_wave": result.deletion_wave,
+            }
+        )
+    finally:
+        connection.close()
 
 
 def _enrich_prompt_version(config: dict[str, Any], override: str | None) -> str:
@@ -900,6 +947,12 @@ def main() -> None:
     export_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     export_parser.add_argument("--output-dir", type=Path, default=Path("data/exports"))
     export_parser.set_defaults(handler=_export_command)
+    digest_parser = subparsers.add_parser("digest", help="write a neutral change digest")
+    digest_parser.add_argument("--path", type=Path)
+    digest_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    digest_parser.add_argument("--days", type=int, default=7)
+    digest_parser.add_argument("--output-dir", type=Path)
+    digest_parser.set_defaults(handler=_digest_command)
     timeline_parser = subparsers.add_parser("timeline", help="show the raw observed timeline")
     timeline_parser.add_argument("--path", type=Path)
     timeline_parser.add_argument("--config-dir", type=Path, default=Path("config"))
