@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kol_archive.__main__ import _backup_retention_count
+from kol_archive.cli.common import backup_retention_count
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.maintenance import (
     create_verified_backup,
@@ -163,7 +163,7 @@ def test_zero_backup_retention_is_rejected_without_creating_snapshot(tmp_path: P
         create_verified_backup(source_path, backup_dir, retention_count=0)
 
     assert not backup_dir.exists()
-    assert _backup_retention_count({"backup_retention_count": 0}) == 0
+    assert backup_retention_count({"backup_retention_count": 0}) == 0
 
 
 def test_export_writes_json_and_csv_with_credential_redaction(tmp_path: Path) -> None:

@@ -14,7 +14,7 @@ from typing import cast
 import httpx
 import pytest
 
-from kol_archive import __main__ as kol_main
+from kol_archive.cli import claims as kol_main
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.enrich import EnrichSettings, load_enrich_settings, request_enrichment
 from kol_archive.models import (

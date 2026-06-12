@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from kol_archive.__main__ import _digest_settings
+from kol_archive.cli.reporting import digest_settings
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.digest import DigestResult, collect_digest_events, generate_digest
 
@@ -271,7 +271,7 @@ def test_digest_escapes_markdown_and_uses_longer_diff_fence(tmp_path: Path) -> N
 
 
 def test_digest_configuration_preserves_explicit_falsy_values() -> None:
-    output_dir, wave_min_accounts = _digest_settings(
+    output_dir, wave_min_accounts = digest_settings(
         {"digest": {"output_dir": "", "wave_min_accounts": 0}}, None
     )
 

@@ -10,7 +10,7 @@ from typing import cast
 import httpx
 import pytest
 
-from kol_archive.__main__ import _configure_stdout_utf8, _print_json, _resolve_db_path
+from kol_archive.cli.common import configure_stdout_utf8, print_json, resolve_db_path
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.models import (
     ContentFidelity,
@@ -340,19 +340,19 @@ def test_llm_rewrite_reads_key_from_environment_and_parses_structured_response(
 def test_explicit_database_path_overrides_configured_storage_path() -> None:
     config = {"storage": {"db_path": "data/custom.sqlite3"}}
 
-    assert _resolve_db_path(None, config) == Path("data/custom.sqlite3")
-    assert _resolve_db_path(Path("data/override.sqlite3"), config) == Path("data/override.sqlite3")
+    assert resolve_db_path(None, config) == Path("data/custom.sqlite3")
+    assert resolve_db_path(Path("data/override.sqlite3"), config) == Path("data/override.sqlite3")
 
 
-def test_configure_stdout_utf8_supports_emoji_json_output(
+def testconfigure_stdout_utf8_supports_emoji_json_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw = io.BytesIO()
     stdout = io.TextIOWrapper(raw, encoding="gbk")
     monkeypatch.setattr(sys, "stdout", stdout)
 
-    _configure_stdout_utf8()
-    _print_json({"text": "🥚"})
+    configure_stdout_utf8()
+    print_json({"text": "🥚"})
     stdout.flush()
 
     assert json.loads(raw.getvalue().decode("utf-8")) == {"text": "🥚"}

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kol_archive.__main__ import init_db
+from kol_archive.cli.common import init_db
 from kol_archive.database import EVIDENCE_TABLES, connect_database, initialize_database
 from kol_archive.models import (
     ArchiveSettings,
@@ -404,7 +404,7 @@ def test_run_log_contains_health_metadata_without_notes(
 ) -> None:
     run = replace(make_feed_run(), notes="cookie=secret-value")
 
-    with caplog.at_level(logging.INFO, logger="kol_archive.service"):
+    with caplog.at_level(logging.INFO, logger="kol_archive.archive"):
         archive.record_feed_run(run, [make_post()])
 
     assert "feed_run archived run_id=1 author_id=1 status=ok healthy=True" in caplog.text

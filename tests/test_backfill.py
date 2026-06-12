@@ -404,7 +404,7 @@ def read_run_once_counts(db_path: Path) -> tuple[int, int, int]:
 
 def make_run_once_client(monkeypatch: pytest.MonkeyPatch, handle: Handler) -> list[str]:
     """Route run_once's collector client to ``handle`` and return a call log it appends to."""
-    from kol_archive import __main__ as kol_main
+    from kol_archive.cli import collect as kol_main
 
     calls: list[str] = []
 
@@ -426,7 +426,7 @@ def test_run_once_live_429_stops_account_loop_and_probes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A rate-limited live poll ends the whole account loop — the session is blocked."""
-    from kol_archive import __main__ as kol_main
+    from kol_archive.cli import collect as kol_main
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -452,7 +452,7 @@ def test_run_once_backfill_429_stops_account_loop_and_probes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A 429 during auto-backfill is also session-wide: stop the loop, skip probes."""
-    from kol_archive import __main__ as kol_main
+    from kol_archive.cli import collect as kol_main
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -495,7 +495,7 @@ def test_run_once_skips_backfill_when_live_reaches_timeline_end(
     Without the reached_timeline_end signal the auto-backfill would request the
     out-of-range next page forever and the baseline would stay pending.
     """
-    from kol_archive import __main__ as kol_main
+    from kol_archive.cli import collect as kol_main
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -538,7 +538,7 @@ def test_run_once_skips_backfill_when_live_last_page_degraded(
     its page count cannot be trusted to locate the real end. The baseline stays pending
     for a later clean run instead of requesting the out-of-range page 2.
     """
-    from kol_archive import __main__ as kol_main
+    from kol_archive.cli import collect as kol_main
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -577,7 +577,7 @@ def test_run_once_honors_explicit_zero_on_add_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """on_add_pages: 0 must disable auto-backfill, not fall back to the default."""
-    from kol_archive import __main__ as kol_main
+    from kol_archive.cli import collect as kol_main
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -610,7 +610,7 @@ def test_run_once_rejects_negative_on_add_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A negative on_add_pages is a misconfiguration -> error, not a silent disable."""
-    from kol_archive import __main__ as kol_main
+    from kol_archive.cli import collect as kol_main
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -627,7 +627,7 @@ def test_run_backfill_honors_explicit_zero_command_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """command_pages: 0 must be passed through (and rejected), not defaulted to 10."""
-    from kol_archive import __main__ as kol_main
+    from kol_archive.cli import collect as kol_main
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -652,7 +652,7 @@ def test_run_backfill_validates_inputs_before_side_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Bad inputs are rejected before the DB is created or the client is built."""
-    from kol_archive import __main__ as kol_main
+    from kol_archive.cli import collect as kol_main
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()

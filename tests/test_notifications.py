@@ -7,13 +7,13 @@ from pathlib import Path
 import httpx
 import pytest
 
-from kol_archive.__main__ import (
+from kol_archive.alerts import AlertSettings, load_alert_settings, record_run_health
+from kol_archive.cli.collect import (
     _collection_failure_reason,
     _record_run_health_safely,
     _run_once_command,
     _send_watchlist_alerts,
 )
-from kol_archive.alerts import AlertSettings, load_alert_settings, record_run_health
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.notifications import (
     NotificationPayload,
@@ -173,12 +173,12 @@ def test_run_once_command_loads_config_once(
         loads += 1
         return config
 
-    monkeypatch.setattr("kol_archive.__main__.load_config", load_once)
-    monkeypatch.setattr("kol_archive.__main__._run_once_with_config", lambda loaded: None)
+    monkeypatch.setattr("kol_archive.cli.collect.load_config", load_once)
+    monkeypatch.setattr("kol_archive.cli.collect._run_once_with_config", lambda loaded: None)
     monkeypatch.setattr(
-        "kol_archive.__main__._record_run_health_safely", lambda *args, **kwargs: None
+        "kol_archive.cli.collect._record_run_health_safely", lambda *args, **kwargs: None
     )
-    monkeypatch.setattr("kol_archive.__main__._send_watchlist_alerts", lambda *args: None)
+    monkeypatch.setattr("kol_archive.cli.collect._send_watchlist_alerts", lambda *args: None)
 
     _run_once_command(argparse.Namespace(config_dir=tmp_path))
 
@@ -226,7 +226,7 @@ def test_watchlist_notification_failure_retries_without_affecting_archive(
             raise httpx.ConnectError("offline")
         return True
 
-    monkeypatch.setattr("kol_archive.__main__.send_notification", notify)
+    monkeypatch.setattr("kol_archive.cli.collect.send_notification", notify)
     monkeypatch.setenv("KOL_NOTIFICATION_WEBHOOK_URL", "https://notify.example/test")
     config: dict[str, object] = {
         "notifications": {
@@ -273,7 +273,7 @@ def test_disabled_or_unconfigured_notifications_do_not_stage_watchlist_alerts(
 ) -> None:
     monkeypatch.delenv("KOL_NOTIFICATION_WEBHOOK_URL", raising=False)
     monkeypatch.setattr(
-        "kol_archive.__main__.send_notification",
+        "kol_archive.cli.collect.send_notification",
         lambda *args, **kwargs: pytest.fail("disabled or unconfigured notifications were scanned"),
     )
     db_path = tmp_path / "archive.sqlite3"
