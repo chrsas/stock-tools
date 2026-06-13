@@ -228,6 +228,39 @@ def test_decision_web_flow_and_csrf(web_server: ArchiveHttpServer) -> None:
     assert status == 403
 
 
+def test_add_account_web_flow(web_server: ArchiveHttpServer) -> None:
+    status, headers, content = _request(
+        web_server,
+        "POST",
+        "/accounts/add",
+        {"csrf_token": CSRF_TOKEN, "account": "https://xueqiu.com/u/1234567890", "note": "测试"},
+    )
+    assert status == 303
+    assert headers["Location"] == "/"
+
+    config_dir = web_server.config_dir
+    managed = config_dir.joinpath("accounts.local.yml").read_text(encoding="utf-8")
+    assert "1234567890" in managed
+
+    # CSRF is enforced like every other mutation.
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        "/accounts/add",
+        {"account": "https://xueqiu.com/u/1234567890"},
+    )
+    assert status == 403
+
+    # An unparseable input is rejected with a 400 rather than writing a garbage entry.
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        "/accounts/add",
+        {"csrf_token": CSRF_TOKEN, "account": "https://example.com/not-xueqiu"},
+    )
+    assert status == 400
+
+
 def test_watchlist_web_flow_and_csrf(web_server: ArchiveHttpServer) -> None:
     payload = _get_json(web_server, "/api/home?view=watchlist")
     assert payload["view"] == "watchlist"

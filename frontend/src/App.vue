@@ -11,6 +11,7 @@ import ViewpointCluster from "./components/ViewpointCluster.vue";
 const page = ref<Row | null>(null);
 const error = ref("");
 const busy = ref(false);
+const addAuthorNotice = ref("");
 const theme = ref(localStorage.getItem("kol-theme") || "system");
 
 function applyTheme() {
@@ -66,6 +67,26 @@ function submitDecisionClose(event: Event, decisionId: number) {
 function submitDecisionReview(event: Event, decisionId: number) {
   const form = event.currentTarget as HTMLFormElement;
   action(`/decisions/${decisionId}/review`, Object.fromEntries(new FormData(form).entries()));
+}
+
+async function submitAddAuthor(event: Event) {
+  if (!page.value || busy.value) return;
+  const form = event.currentTarget as HTMLFormElement;
+  const values = Object.fromEntries(new FormData(form).entries()) as Row;
+  busy.value = true;
+  error.value = "";
+  addAuthorNotice.value = "";
+  try {
+    const result = await mutate("/accounts/add", page.value.csrf_token, values);
+    addAuthorNotice.value = result.status === "exists"
+      ? `博主 ${result.uid} 已在追踪列表中。`
+      : `已登记博主 ${result.uid}，下次采集（run-once）起生效。`;
+    form.reset();
+    await refresh();
+  } catch (reason) {
+    error.value = String(reason);
+    busy.value = false;
+  }
 }
 
 function submitWatchTicker(event: Event) {
@@ -130,6 +151,16 @@ onMounted(() => { applyTheme(); refresh(); });
 
         <template v-if="page?.view === 'authors'">
           <div class="page-title"><div><h1>博主最近观点</h1><p class="sub">选择博主，查看最近市场相关观点和后续变化。</p></div></div>
+          <details class="panel">
+            <summary>+ 添加博主</summary>
+            <form @submit.prevent="submitAddAuthor">
+              <label>雪球主页 URL 或数字 uid<input name="account" placeholder="https://xueqiu.com/u/1234567890" required></label>
+              <label>备注<input name="note"></label>
+              <button :disabled="busy">登记博主</button>
+            </form>
+            <p class="muted small">仅登记到追踪列表，下次运行 run-once 起开始采集（首轮自动回填基线）。</p>
+            <p v-if="addAuthorNotice" class="notice">{{ addAuthorNotice }}</p>
+          </details>
           <div class="author-layout">
             <aside class="panel roster">
               <div class="roster-head"><span class="eyebrow">博主</span><small class="muted">{{ page.authors.length }} 位在档</small></div>

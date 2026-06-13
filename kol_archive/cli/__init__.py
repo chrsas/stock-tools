@@ -1,5 +1,6 @@
 """Command-line entry points, grouped by domain.
 
+* :mod:`.accounts` — register tracked bloggers by profile URL or uid
 * :mod:`.collect` — login, run-once, backfill, run-health alerting
 * :mod:`.storage` — backup/verify/restore/export
 * :mod:`.reporting` — digest, timeline, queue, scorecards, evidence cards, serve
@@ -15,7 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 
-from . import claims, collect, curation, decisions, images, market, reporting, storage
+from . import accounts, claims, collect, curation, decisions, images, market, reporting, storage
 from .common import configure_stdout_utf8
 
 
@@ -24,7 +25,17 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="KOL evidence archive")
     subparsers = parser.add_subparsers(required=True)
-    for module in (collect, storage, reporting, curation, claims, decisions, market, images):
+    for module in (
+        accounts,
+        collect,
+        storage,
+        reporting,
+        curation,
+        claims,
+        decisions,
+        market,
+        images,
+    ):
         module.register(subparsers)
     args = parser.parse_args()
 

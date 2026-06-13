@@ -12,7 +12,7 @@ export async function loadPage(): Promise<Row> {
   return response.json();
 }
 
-export async function mutate(path: string, csrfToken: string, values: Row = {}): Promise<void> {
+export async function mutate(path: string, csrfToken: string, values: Row = {}): Promise<Row> {
   const body = new URLSearchParams({ csrf_token: csrfToken, ...values });
   const response = await fetch(path, {
     method: "POST",
@@ -23,4 +23,6 @@ export async function mutate(path: string, csrfToken: string, values: Row = {}):
     body,
   });
   if (!response.ok) throw new Error(await response.text());
+  const text = await response.text();
+  return text ? (JSON.parse(text) as Row) : {};
 }

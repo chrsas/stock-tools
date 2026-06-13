@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
+from kol_archive.accounts import add_account
 from kol_archive.analysis import (
     list_crowding_events,
     load_analysis_settings,
@@ -428,6 +429,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if path == "/decisions/add":
                 self._add_decision(form)
                 return
+            if path == "/accounts/add":
+                self._add_account(form)
+                return
             if path == "/watchlist/add":
                 self._add_watchlist_ticker(form)
                 return
@@ -544,6 +548,19 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         self._with_archive(add)
         assert decision_id is not None
         self._mutation_done(decision_id, key="decision_id", location="/?view=decisions")
+
+    def _add_account(self, form: dict[str, list[str]]) -> None:
+        result = add_account(
+            self.server.config_dir,
+            self._required_form_value(form, "account"),
+            note=self._form_value(form, "note"),
+        )
+        if "application/json" in self.headers.get("Accept", ""):
+            self._send_json(HTTPStatus.OK, {"ok": True, "uid": result.uid, "status": result.status})
+            return
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", "/")
+        self.end_headers()
 
     def _add_watchlist_ticker(self, form: dict[str, list[str]]) -> None:
         ticker = self._required_form_value(form, "ticker")
@@ -708,6 +725,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             path.startswith("/decisions/")
             or path.startswith("/claim-proposals/")
             or path.startswith("/watchlist/")
+            or path.startswith("/accounts/")
         ):
             return True
         return any(
