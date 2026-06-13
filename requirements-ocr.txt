@@ -3,5 +3,5 @@
 # 跨平台兜底 tesseract，需另装 tesseract 二进制并配好中文语言包(chi_sim)。
 -r requirements.txt
 Pillow>=10,<12
-winocr>=0.0.16 ; sys_platform == "win32"
+winocr>=0.0.15 ; sys_platform == "win32"
 pytesseract>=0.3.10

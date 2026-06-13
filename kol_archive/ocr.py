@@ -48,14 +48,18 @@ class WinOcrEngine:
     name = "winocr"
 
     def __init__(self, lang: str = "zh-Hans") -> None:
-        import winocr  # type: ignore[import-not-found]  # noqa: PLC0415
+        import winocr  # noqa: PLC0415
 
         self._winocr = winocr
         self._lang = lang
         self.version = str(getattr(winocr, "__version__", "unknown"))
 
     def recognize(self, image_bytes: bytes) -> str:
-        result = self._winocr.recognize_pil_sync(_load_image(image_bytes), self._lang)
+        import asyncio  # noqa: PLC0415
+
+        # winocr's ``recognize_pil_sync`` wrapper silently yields empty text on
+        # Python 3.14; drive the underlying async API directly instead.
+        result = asyncio.run(self._winocr.recognize_pil(_load_image(image_bytes), self._lang))
         return str(getattr(result, "text", "") or "").strip()
 
 
@@ -65,7 +69,7 @@ class TesseractEngine:
     name = "tesseract"
 
     def __init__(self, lang: str = "chi_sim+eng") -> None:
-        import pytesseract  # type: ignore[import-not-found]  # noqa: PLC0415
+        import pytesseract  # noqa: PLC0415
 
         self._pytesseract = pytesseract
         self._lang = lang
