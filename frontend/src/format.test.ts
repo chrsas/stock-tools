@@ -17,12 +17,21 @@ describe("avatarUrl", () => {
     expect(avatarUrl("community/avatar bad.png")).toBe("");
   });
 
-  it("keeps valid absolute and protocol-relative URLs", () => {
+  it("rewrites the xqimg host on absolute and protocol-relative URLs", () => {
     expect(avatarUrl("https://xqimg.imedao.com/avatar/a.png")).toBe(
-      "https://xqimg.imedao.com/avatar/a.png",
+      "https://xavatar.imedao.com/avatar/a.png",
     );
     expect(avatarUrl("//xqimg.imedao.com/avatar/a.png")).toBe(
-      "https://xqimg.imedao.com/avatar/a.png",
+      "https://xavatar.imedao.com/avatar/a.png",
+    );
+  });
+
+  it("passes through absolute URLs on other hosts unchanged", () => {
+    expect(avatarUrl("https://xavatar.imedao.com/avatar/a.png")).toBe(
+      "https://xavatar.imedao.com/avatar/a.png",
+    );
+    expect(avatarUrl("https://cdn.example.com/avatar/a.png")).toBe(
+      "https://cdn.example.com/avatar/a.png",
     );
   });
 

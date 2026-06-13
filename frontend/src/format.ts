@@ -9,8 +9,12 @@ export function avatarUrl(value: unknown): string {
   if (!candidates.length) return "";
   const raw = candidates.find((part) => part.includes("50x50")) || candidates[0];
   if (/\s/.test(raw)) return "";
-  if (/^https?:\/\//.test(raw)) return raw;
-  if (raw.startsWith("//")) return `https:${raw}`;
+  // Avatars live on xavatar.imedao.com; the xqimg.imedao.com post-image CDN 404s on
+  // avatar paths, so rewrite that host wherever it appears (relative, absolute, or
+  // protocol-relative). Other hosts pass through untouched.
+  const fixHost = (url: string) => url.replace(/^(https?:\/\/)xqimg\.imedao\.com\//, "$1xavatar.imedao.com/");
+  if (/^https?:\/\//.test(raw)) return fixHost(raw);
+  if (raw.startsWith("//")) return fixHost(`https:${raw}`);
   const key = raw.replace(/^\/+/, "");
   return /^(community|avatar|cube|users)\//.test(key) ? `https://xavatar.imedao.com/${key}` : "";
 }
