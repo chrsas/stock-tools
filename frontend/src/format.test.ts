@@ -3,11 +3,11 @@ import { describe, expect, it } from "vitest";
 import { avatarUrl, percent } from "./format";
 
 describe("avatarUrl", () => {
-  it("mints only known xqimg relative keys", () => {
+  it("mints only known xavatar relative keys", () => {
     expect(avatarUrl("community/avatar.jpg!50x50.png")).toBe(
-      "https://xqimg.imedao.com/community/avatar.jpg!50x50.png",
+      "https://xavatar.imedao.com/community/avatar.jpg!50x50.png",
     );
-    expect(avatarUrl("/users/avatar.png")).toBe("https://xqimg.imedao.com/users/avatar.png");
+    expect(avatarUrl("/users/avatar.png")).toBe("https://xavatar.imedao.com/users/avatar.png");
     expect(avatarUrl("other-cdn/avatar.jpg")).toBe("");
   });
 
@@ -28,7 +28,7 @@ describe("avatarUrl", () => {
 
   it("prefers the 50x50 candidate", () => {
     expect(avatarUrl("avatar/large.png, community/small.png!50x50.png")).toBe(
-      "https://xqimg.imedao.com/community/small.png!50x50.png",
+      "https://xavatar.imedao.com/community/small.png!50x50.png",
     );
   });
 });

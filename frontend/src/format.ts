@@ -12,7 +12,7 @@ export function avatarUrl(value: unknown): string {
   if (/^https?:\/\//.test(raw)) return raw;
   if (raw.startsWith("//")) return `https:${raw}`;
   const key = raw.replace(/^\/+/, "");
-  return /^(community|avatar|cube|users)\//.test(key) ? `https://xqimg.imedao.com/${key}` : "";
+  return /^(community|avatar|cube|users)\//.test(key) ? `https://xavatar.imedao.com/${key}` : "";
 }
 
 export function postTitle(item: Row): string {
