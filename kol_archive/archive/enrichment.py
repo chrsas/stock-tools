@@ -28,6 +28,7 @@ class EnrichmentMixin(ArchiveBase):
         post_id: int | None = None,
         author_id: int | None = None,
         current_only: bool = False,
+        observed_since: str | None = None,
         limit: int | None = None,
     ) -> list[EnrichmentTarget]:
         """Observed versions still missing an enrichment for ``prompt_version``.
@@ -58,6 +59,9 @@ class EnrichmentMixin(ArchiveBase):
             params.append(author_id)
         if current_only:
             query += " AND EXISTS (SELECT 1 FROM posts p WHERE p.current_version_id = v.id)"
+        if observed_since is not None:
+            query += " AND v.first_observed_at >= ?"
+            params.append(observed_since)
         query += " ORDER BY v.first_observed_at, v.id"
         if limit is not None:
             if limit <= 0:

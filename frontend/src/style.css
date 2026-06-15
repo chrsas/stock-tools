@@ -114,6 +114,36 @@ small { font-size: .8rem; }
 .enrichment-result.success { color: var(--down); }
 .enrichment-result.failed, .enrichment-error { color: var(--up) !important; }
 
+/* ---------------------------------------------------------------- operations */
+.operations-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
+.automation-panel { display: flex; align-items: end; gap: 18px; flex-wrap: wrap; margin-bottom: 18px; }
+.automation-panel > div { margin-right: auto; }
+.automation-panel h2 { margin-top: 3px; font-size: 1.05rem; }
+.automation-panel p { margin: .25rem 0 0; }
+.automation-panel label { margin: 0; }
+.toggle-row { display: flex; grid-template-columns: auto 1fr; align-items: center; gap: .55rem; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }
+.toggle-row input { width: 17px; height: 17px; margin: 0; padding: 0; accent-color: var(--accent); }
+.compact-field { min-width: 150px; }
+.compact-field input { width: 150px; }
+.operation-panel { display: grid; gap: 14px; }
+.operation-head, .operation-status, .run-log-head, .enrich-author-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.operation-head h2 { margin-top: 3px; font-size: 1.05rem; }
+.operation-status { min-height: 28px; }
+.progress-track { height: 7px; overflow: hidden; border-radius: 4px; background: var(--surface-3); }
+.progress-track span { display: block; height: 100%; min-width: 0; background: var(--accent); transition: width .25s ease; }
+.progress-track.active span { animation: progress-scan 1.5s ease-in-out infinite alternate; }
+@keyframes progress-scan { from { transform: translateX(-70%); } to { transform: translateX(170%); } }
+.run-log { min-height: 150px; max-height: 310px; overflow: auto; padding: .8rem; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--surface-2); }
+.run-log-head { position: sticky; top: -.8rem; padding: .2rem 0 .6rem; background: var(--surface-2); }
+.run-log-head h3 { font-size: .9rem; }
+.log-line { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: .7rem; padding: .38rem 0; border-top: 1px solid var(--line-soft); font-size: .8rem; }
+.log-line time { color: var(--ink-3); font-family: var(--font-mono); }
+.enrich-author-list { display: grid; max-height: 280px; overflow: auto; border-top: 1px solid var(--line-soft); }
+.enrich-author-row { padding: .7rem 0; border-bottom: 1px solid var(--line-soft); }
+.enrich-author-row .muted { margin-left: auto; white-space: nowrap; }
+
 /* ---------------------------------------------------------------- surfaces */
 .panel, .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem 1.1rem; }
 .card { box-shadow: var(--shadow); margin: 14px 0; }
@@ -235,7 +265,9 @@ pre.data { max-height: 28rem; overflow: auto; font-family: var(--font-mono); fon
   .nav-item .ico { width: 19px; height: 19px; }
 }
 @media (max-width: 760px) {
-  .author-layout, .queue-layout, .facts { grid-template-columns: 1fr; }
+  .author-layout, .queue-layout, .facts, .operations-grid { grid-template-columns: 1fr; }
+  .automation-panel { align-items: stretch; }
+  .automation-panel > div { width: 100%; }
   .roster, .legend { position: static; }
   .content { padding: 18px 16px 48px; }
 }

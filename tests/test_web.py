@@ -32,6 +32,8 @@ from kol_archive.web import (
     ArchiveHttpServer,
     ArchiveRequestHandler,
     WebSettings,
+    _load_automation_settings,
+    _start_auto_enrichment,
     create_server,
     load_web_settings,
 )
@@ -268,6 +270,7 @@ def test_collect_run_once_web_flow(
     import kol_archive.cli.collect as collect_module
 
     calls: list[Path] = []
+    auto_enrich_calls: list[tuple[ArchiveHttpServer, str]] = []
 
     def fake_run(
         config_dir: Path, *, progress: Callable[[str], None] | None = None
@@ -277,7 +280,12 @@ def test_collect_run_once_web_flow(
             progress("正在检查采集结果")
         return collect_module.RunOnceResult(healthy=True, reason=None)
 
+    def fake_auto_enrich(server: ArchiveHttpServer, observed_since: str) -> bool:
+        auto_enrich_calls.append((server, observed_since))
+        return True
+
     monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
+    monkeypatch.setattr("kol_archive.web._start_auto_enrichment", fake_auto_enrich)
     status, _, content = _request(
         web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
     )
@@ -286,11 +294,21 @@ def test_collect_run_once_web_flow(
     assert payload["ok"] is True
     assert payload["healthy"] is True
     assert payload["message"] == "采集完成。"
+    assert payload["auto_enrich_started"] is True
     assert calls == [web_server.config_dir]
+    assert len(auto_enrich_calls) == 1
+    assert auto_enrich_calls[0][0] is web_server
+    assert datetime.fromisoformat(auto_enrich_calls[0][1]).tzinfo is not None
     status_payload = _get_json(web_server, "/api/collect/status")
     assert status_payload["running"] is False
     assert status_payload["phase"] == "采集完成。"
     assert status_payload["healthy"] is True
+    collection_logs = cast(list[dict[str, object]], status_payload["logs"])
+    assert [item["message"] for item in collection_logs] == [
+        "正在启动采集",
+        "正在检查采集结果",
+        "采集完成。",
+    ]
 
     # A completed-but-degraded pass surfaces the reason instead of claiming success.
     def degraded_run(
@@ -413,6 +431,8 @@ def test_collect_status_reports_live_phase(
     assert payload["phase"] == "正在采集博主 2/3 的近期发言"
     assert isinstance(payload["elapsed_seconds"], int)
     assert payload["elapsed_seconds"] >= 0
+    live_logs = cast(list[dict[str, object]], payload["logs"])
+    assert live_logs[-1]["message"] == "正在采集博主 2/3 的近期发言"
 
     finish_run.set()
     request_thread.join(timeout=5)
@@ -467,8 +487,153 @@ def test_enrich_author_web_flow(
     assert status_payload["processed"] == 1
     assert status_payload["enriched"] == 1
     assert status_payload["details"] == payload["details"]
+    enrichment_logs = cast(list[dict[str, object]], status_payload["logs"])
+    assert enrichment_logs[0]["message"] == "正在准备富化"
+    assert enrichment_logs[1]["message"] == "准备富化 1 条发言"
+    assert enrichment_logs[-1]["message"] == "富化完成，成功 1 条，失败 0 条"
     authors = cast(list[dict[str, object]], _get_json(web_server, "/api/home")["authors"])
     assert authors[0]["pending_enrichment_count"] == 0
+
+
+def test_operations_home_lists_authors(web_server: ArchiveHttpServer) -> None:
+    payload = _get_json(web_server, "/api/home?view=operations")
+    authors = cast(list[dict[str, object]], payload["authors"])
+
+    assert payload["view"] == "operations"
+    assert authors[0]["author_platform_uid"] == "100"
+    assert authors[0]["pending_enrichment_count"] == 1
+
+
+def test_operations_status_combines_task_and_automation_state(
+    web_server: ArchiveHttpServer,
+) -> None:
+    payload = _get_json(web_server, "/api/operations/status")
+    collection = cast(dict[str, object], payload["collection"])
+    enrichment = cast(dict[str, object], payload["enrichment"])
+    automation = cast(dict[str, object], payload["automation"])
+
+    assert collection["phase"] == "尚未开始采集"
+    assert enrichment["phase"] == "尚未开始富化"
+    assert automation["collection_interval_minutes"] == 180
+
+
+def test_automation_settings_web_flow(web_server: ArchiveHttpServer) -> None:
+    initial = _get_json(web_server, "/api/automation/settings")
+    assert initial["collection_enabled"] is False
+    assert initial["collection_interval_minutes"] == 180
+    assert initial["auto_enrich"] is True
+
+    status, _, content = _request(
+        web_server,
+        "POST",
+        "/automation/settings",
+        {
+            "csrf_token": CSRF_TOKEN,
+            "collection_enabled": "true",
+            "collection_interval_minutes": "45",
+            "auto_enrich": "false",
+        },
+    )
+    assert status == 200
+    payload = json.loads(content)
+    assert payload["collection_enabled"] is True
+    assert payload["collection_interval_minutes"] == 45
+    assert payload["auto_enrich"] is False
+    assert payload["next_collection_at"] is not None
+    saved = json.loads(
+        (web_server.db_path.parent / "web-automation.json").read_text(encoding="utf-8")
+    )
+    assert saved == {
+        "collection_enabled": True,
+        "collection_interval_minutes": 45,
+        "auto_enrich": False,
+    }
+
+    status, _, content = _request(
+        web_server,
+        "POST",
+        "/automation/settings",
+        {
+            "csrf_token": CSRF_TOKEN,
+            "collection_enabled": "true",
+            "collection_interval_minutes": "1",
+            "auto_enrich": "true",
+        },
+    )
+    assert status == 400
+    assert "5 至 10080" in content
+
+
+@pytest.mark.parametrize("content", ["null", "[]", "42", '"text"'])
+def test_load_automation_settings_ignores_non_object_json(tmp_path: Path, content: str) -> None:
+    db_path = tmp_path / "archive.sqlite3"
+    (tmp_path / "web-automation.json").write_text(content, encoding="utf-8")
+
+    settings = _load_automation_settings(db_path)
+
+    assert settings.collection_enabled is False
+    assert settings.collection_interval_minutes == 180
+    assert settings.auto_enrich is True
+
+
+def test_auto_enrichment_encodes_uid_and_passes_collection_boundary(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = connect_database(web_server.db_path)
+    try:
+        connection.execute(
+            "UPDATE authors SET platform_uid = ? WHERE platform_uid = '100'",
+            ("a/b %",),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    web_server.automation_active = True
+    calls: list[tuple[str, dict[str, str] | None]] = []
+    completed = threading.Event()
+
+    def fake_local_post(
+        server: ArchiveHttpServer, path: str, values: dict[str, str] | None = None
+    ) -> None:
+        assert server is web_server
+        calls.append((path, values))
+        completed.set()
+
+    monkeypatch.setattr("kol_archive.web._local_post", fake_local_post)
+
+    assert _start_auto_enrichment(web_server, BASE_TIME) is True
+    assert completed.wait(timeout=5)
+    assert calls == [
+        (
+            "/authors/a%2Fb%20%25/enrich",
+            {"observed_since": BASE_TIME},
+        )
+    ]
+
+
+def test_enrich_author_observed_since_excludes_old_backlog(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected_enrichment(
+        settings: object, original_text: str, *, client: object
+    ) -> EnrichmentResult:
+        raise AssertionError("old backlog must not be enriched")
+
+    monkeypatch.setattr("kol_archive.web.request_enrichment", unexpected_enrichment)
+    status, _, content = _request(
+        web_server,
+        "POST",
+        "/authors/100/enrich",
+        {
+            "csrf_token": CSRF_TOKEN,
+            "observed_since": "2026-06-02T00:00:00+00:00",
+        },
+    )
+
+    assert status == 200
+    payload = json.loads(content)
+    assert payload["candidates"] == 0
+    assert payload["enriched"] == 0
 
 
 def test_enrich_author_counts_database_failure_and_keeps_batch_status(

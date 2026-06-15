@@ -16,7 +16,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import httpx
 
@@ -75,6 +75,7 @@ class CollectionStatus:
     updated_at: str | None = None
     finished_at: str | None = None
     healthy: bool | None = None
+    logs: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -87,6 +88,15 @@ class EnrichmentStatus:
     enriched: int = 0
     failed: int = 0
     details: list[dict[str, object]] = field(default_factory=list)
+    logs: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class AutomationSettings:
+    collection_enabled: bool = False
+    collection_interval_minutes: int = 180
+    auto_enrich: bool = True
+    next_collection_at: str | None = None
 
 
 class ArchiveHttpServer(ThreadingHTTPServer):
@@ -106,6 +116,10 @@ class ArchiveHttpServer(ThreadingHTTPServer):
     enrichment_lock: threading.Lock
     enrichment_status_lock: threading.Lock
     enrichment_status: EnrichmentStatus
+    automation_settings_lock: threading.Lock
+    automation_settings: AutomationSettings
+    automation_stop: threading.Event
+    automation_active: bool
 
 
 def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
@@ -193,17 +207,146 @@ def create_server(
     server.enrichment_lock = long_task_lock
     server.enrichment_status_lock = threading.Lock()
     server.enrichment_status = EnrichmentStatus()
+    server.automation_settings_lock = threading.Lock()
+    server.automation_settings = _load_automation_settings(db_path)
+    server.automation_stop = threading.Event()
+    server.automation_active = False
     return server
 
 
 def serve_archive(db_path: Path, config_dir: Path, settings: WebSettings) -> None:
     server = create_server(db_path, config_dir, settings)
+    server.automation_active = True
+    automation_thread = threading.Thread(
+        target=_automation_loop,
+        args=(server,),
+        name="web-automation",
+        daemon=True,
+    )
+    automation_thread.start()
     host, port = cast(tuple[str, int], server.server_address)
     LOGGER.info("web archive listening http://%s:%s", host, port)
     try:
         server.serve_forever()
     finally:
+        server.automation_stop.set()
+        automation_thread.join(timeout=2)
         server.server_close()
+
+
+def _automation_path(db_path: Path) -> Path:
+    return db_path.parent / "web-automation.json"
+
+
+def _load_automation_settings(db_path: Path) -> AutomationSettings:
+    path = _automation_path(db_path)
+    if not path.is_file():
+        return AutomationSettings()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("automation settings must be an object")
+        interval = int(raw.get("collection_interval_minutes", 180))
+        if not 5 <= interval <= 10080:
+            raise ValueError("collection interval out of range")
+        return AutomationSettings(
+            collection_enabled=bool(raw.get("collection_enabled", False)),
+            collection_interval_minutes=interval,
+            auto_enrich=bool(raw.get("auto_enrich", True)),
+        )
+    except OSError, ValueError, TypeError, json.JSONDecodeError:
+        LOGGER.warning("invalid web automation settings ignored path=%s", path)
+        return AutomationSettings()
+
+
+def _save_automation_settings(server: ArchiveHttpServer) -> None:
+    path = _automation_path(server.db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with server.automation_settings_lock:
+        settings = server.automation_settings
+        payload = {
+            "collection_enabled": settings.collection_enabled,
+            "collection_interval_minutes": settings.collection_interval_minutes,
+            "auto_enrich": settings.auto_enrich,
+        }
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _schedule_next_collection(settings: AutomationSettings) -> None:
+    settings.next_collection_at = (
+        datetime.now(tz=UTC) + timedelta(minutes=settings.collection_interval_minutes)
+    ).isoformat()
+
+
+def _local_post(server: ArchiveHttpServer, path: str, values: dict[str, str] | None = None) -> None:
+    host, port = cast(tuple[str, int], server.server_address)
+    response = httpx.post(
+        f"http://{host}:{port}{path}",
+        data={"csrf_token": server.csrf_token, **(values or {})},
+        timeout=3600,
+    )
+    response.raise_for_status()
+
+
+def _automation_loop(server: ArchiveHttpServer) -> None:
+    while not server.automation_stop.wait(1):
+        with server.automation_settings_lock:
+            settings = server.automation_settings
+            if not settings.collection_enabled:
+                settings.next_collection_at = None
+                continue
+            if settings.next_collection_at is None:
+                _schedule_next_collection(settings)
+                continue
+            due = datetime.now(tz=UTC) >= datetime.fromisoformat(settings.next_collection_at)
+            if due:
+                _schedule_next_collection(settings)
+        if not due:
+            continue
+        try:
+            _local_post(server, "/collect/run-once")
+        except Exception:
+            LOGGER.warning("automatic web collection failed")
+
+
+def _start_auto_enrichment(server: ArchiveHttpServer, observed_since: str) -> bool:
+    with server.automation_settings_lock:
+        if not server.automation_active or not server.automation_settings.auto_enrich:
+            return False
+
+    def run() -> None:
+        connection = connect_database(server.db_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT a.platform_uid
+                FROM authors a
+                JOIN posts p ON p.author_id = a.id
+                JOIN post_versions v ON v.id = p.current_version_id
+                LEFT JOIN enrichments e
+                  ON e.version_id = v.id AND e.prompt_version = ?
+                WHERE e.id IS NULL AND v.first_observed_at >= ?
+                ORDER BY a.id
+                """,
+                (server.enrich_prompt_version, observed_since),
+            ).fetchall()
+        finally:
+            connection.close()
+        for row in rows:
+            try:
+                uid = quote(str(row["platform_uid"]), safe="")
+                _local_post(
+                    server,
+                    f"/authors/{uid}/enrich",
+                    {"observed_since": observed_since},
+                )
+            except Exception:
+                LOGGER.warning("automatic web enrichment failed author_uid=%s", row["platform_uid"])
+
+    threading.Thread(target=run, name="web-auto-enrichment", daemon=True).start()
+    return True
 
 
 def _queue_counts(connection: sqlite3.Connection, prompt_version: str) -> dict[str, int]:
@@ -328,6 +471,11 @@ def _home_payload(
             ),
             "crowding_events": list_crowding_events(connection, limit=limit),
         }
+    if view == "operations":
+        return {
+            "view": "operations",
+            "authors": author_viewpoint_overview(connection, prompt_version),
+        }
     authors = author_viewpoint_overview(connection, prompt_version)
     selected_uid = (values.get("author") or [""])[0] or None
     selected = next(
@@ -368,6 +516,19 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/enrich/status":
                 self._send_json(HTTPStatus.OK, self._enrichment_status_payload())
+                return
+            if path == "/api/automation/settings":
+                self._send_json(HTTPStatus.OK, self._automation_settings_payload())
+                return
+            if path == "/api/operations/status":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "collection": self._collection_status_payload(),
+                        "enrichment": self._enrichment_status_payload(),
+                        "automation": self._automation_settings_payload(),
+                    },
+                )
                 return
             if path == "/api/home":
                 self._with_connection(
@@ -479,6 +640,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/collect/run-once":
                 self._run_collection(form)
+                return
+            if path == "/automation/settings":
+                self._update_automation_settings(form)
                 return
             author_uid = self._author_action_uid(path, suffix="/enrich")
             if author_uid is not None:
@@ -621,6 +785,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         if not self.server.collect_lock.acquire(blocking=False):
             self._send_text(HTTPStatus.CONFLICT, "采集正在进行中，请稍候。")
             return
+        collection_started_at = datetime.now(tz=UTC).isoformat()
         self._set_collection_status(running=True, phase="正在启动采集", healthy=None)
         failure_response: tuple[HTTPStatus, str] | None = None
         try:
@@ -674,6 +839,10 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             return
         message = "采集完成。" if result.healthy else f"采集完成，但有告警：{result.reason}"
         self._set_collection_status(running=False, phase=message, healthy=result.healthy)
+        with self.server.automation_settings_lock:
+            if self.server.automation_settings.collection_enabled:
+                _schedule_next_collection(self.server.automation_settings)
+        auto_enrich_started = _start_auto_enrichment(self.server, collection_started_at)
         self._send_json(
             HTTPStatus.OK,
             {
@@ -681,6 +850,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 "healthy": result.healthy,
                 "reason": result.reason,
                 "message": message,
+                "auto_enrich_started": auto_enrich_started,
             },
         )
 
@@ -691,10 +861,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if running and not status.running:
                 status.started_at = now
                 status.finished_at = None
+                status.logs = []
             status.running = running
             status.phase = phase
             status.updated_at = now
             status.healthy = healthy
+            if not status.logs or status.logs[-1]["message"] != phase:
+                status.logs.append({"at": now, "message": phase})
             if not running:
                 status.finished_at = now
 
@@ -718,7 +891,35 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 "finished_at": status.finished_at,
                 "healthy": status.healthy,
                 "elapsed_seconds": elapsed_seconds,
+                "logs": list(status.logs),
             }
+
+    def _automation_settings_payload(self) -> dict[str, object]:
+        with self.server.automation_settings_lock:
+            settings = self.server.automation_settings
+            return {
+                "collection_enabled": settings.collection_enabled,
+                "collection_interval_minutes": settings.collection_interval_minutes,
+                "auto_enrich": settings.auto_enrich,
+                "next_collection_at": settings.next_collection_at,
+            }
+
+    def _update_automation_settings(self, form: dict[str, list[str]]) -> None:
+        interval = int(self._required_form_value(form, "collection_interval_minutes"))
+        if not 5 <= interval <= 10080:
+            raise ValueError("自动采集周期必须在 5 至 10080 分钟之间")
+        enabled = self._form_value(form, "collection_enabled") == "true"
+        auto_enrich = self._form_value(form, "auto_enrich") == "true"
+        with self.server.automation_settings_lock:
+            settings = self.server.automation_settings
+            settings.collection_enabled = enabled
+            settings.collection_interval_minutes = interval
+            settings.auto_enrich = auto_enrich
+            settings.next_collection_at = None
+            if enabled:
+                _schedule_next_collection(settings)
+        _save_automation_settings(self.server)
+        self._send_json(HTTPStatus.OK, {"ok": True, **self._automation_settings_payload()})
 
     def _add_watchlist_ticker(self, form: dict[str, list[str]]) -> None:
         ticker = self._required_form_value(form, "ticker")
@@ -734,10 +935,20 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         self._mutation_done(0, key="watchlist_id", location="/?view=watchlist")
 
     def _enrich_author(self, author_uid: str, form: dict[str, list[str]]) -> None:
-        del form
+        observed_since = self._form_value(form, "observed_since")
         if not self.server.enrichment_lock.acquire(blocking=False):
             self._send_text(HTTPStatus.CONFLICT, "富化正在进行中，请稍候。")
             return
+        self._set_enrichment_status(
+            running=True,
+            author_uid=author_uid,
+            phase="正在准备富化",
+            processed=0,
+            total=0,
+            enriched=0,
+            failed=0,
+            details=[],
+        )
         try:
             config = load_config(self.server.config_dir)
             settings = replace(
@@ -757,6 +968,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                     settings.prompt_version,
                     author_id=int(author_row["id"]),
                     current_only=True,
+                    observed_since=observed_since,
                 )
                 self._set_enrichment_status(
                     running=True,
@@ -903,7 +1115,12 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         failed: int,
         details: list[dict[str, object]],
     ) -> None:
+        now = datetime.now(tz=UTC).isoformat()
         with self.server.enrichment_status_lock:
+            previous = self.server.enrichment_status
+            logs = [] if running and not previous.running else list(previous.logs)
+            if not logs or logs[-1]["message"] != phase:
+                logs.append({"at": now, "message": phase})
             self.server.enrichment_status = EnrichmentStatus(
                 running=running,
                 author_uid=author_uid,
@@ -913,6 +1130,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 enriched=enriched,
                 failed=failed,
                 details=list(details),
+                logs=logs,
             )
 
     def _enrichment_status_payload(self) -> dict[str, object]:
@@ -927,6 +1145,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 "enriched": status.enriched,
                 "failed": status.failed,
                 "details": status.details,
+                "logs": list(status.logs),
             }
 
     def _remove_watchlist_ticker(self, form: dict[str, list[str]]) -> None:
@@ -1087,6 +1306,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             or path.startswith("/watchlist/")
             or path.startswith("/accounts/")
             or path.startswith("/collect/")
+            or path.startswith("/automation/")
             or path.startswith("/authors/")
         ):
             return True
