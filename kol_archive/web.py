@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,7 +33,7 @@ from kol_archive.database import connect_database, initialize_database
 from kol_archive.decisions import list_decisions
 from kol_archive.enrich import load_enrich_settings, request_enrichment
 from kol_archive.maintenance import redact_text
-from kol_archive.models import FeedState, WatchMode
+from kol_archive.models import EnrichmentTarget, FeedState, WatchMode
 from kol_archive.presentation import (
     author_profile,
     author_recent_viewpoint_clusters,
@@ -80,11 +80,13 @@ class CollectionStatus:
 @dataclass
 class EnrichmentStatus:
     running: bool = False
+    author_uid: str | None = None
     phase: str = "尚未开始富化"
     processed: int = 0
     total: int = 0
     enriched: int = 0
     failed: int = 0
+    details: list[dict[str, object]] = field(default_factory=list)
 
 
 class ArchiveHttpServer(ThreadingHTTPServer):
@@ -758,22 +760,27 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 )
                 self._set_enrichment_status(
                     running=True,
+                    author_uid=author_uid,
                     phase=f"准备富化 {len(targets)} 条发言",
                     processed=0,
                     total=len(targets),
                     enriched=0,
                     failed=0,
+                    details=[],
                 )
                 enriched = failed = 0
+                details: list[dict[str, object]] = []
                 with httpx.Client(timeout=30.0) as client:
                     for index, target in enumerate(targets, start=1):
                         self._set_enrichment_status(
                             running=True,
+                            author_uid=author_uid,
                             phase=f"正在富化 {index}/{len(targets)}",
                             processed=index - 1,
                             total=len(targets),
                             enriched=enriched,
                             failed=failed,
+                            details=details,
                         )
                         try:
                             result = request_enrichment(
@@ -792,8 +799,16 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                                 is not None
                             ):
                                 enriched += 1
+                                details.append(self._enrichment_detail(target, status="success"))
                         except (httpx.HTTPError, sqlite3.Error, ValueError) as error:
                             failed += 1
+                            details.append(
+                                self._enrichment_detail(
+                                    target,
+                                    status="failed",
+                                    error=error,
+                                )
+                            )
                             LOGGER.warning(
                                 "web enrichment failed version_id=%s type=%s",
                                 target.version_id,
@@ -801,19 +816,23 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                             )
                         self._set_enrichment_status(
                             running=True,
+                            author_uid=author_uid,
                             phase=f"正在富化 {index}/{len(targets)}",
                             processed=index,
                             total=len(targets),
                             enriched=enriched,
                             failed=failed,
+                            details=details,
                         )
                 self._set_enrichment_status(
                     running=False,
+                    author_uid=author_uid,
                     phase=f"富化完成，成功 {enriched} 条，失败 {failed} 条",
                     processed=len(targets),
                     total=len(targets),
                     enriched=enriched,
                     failed=failed,
+                    details=details,
                 )
             finally:
                 connection.close()
@@ -824,8 +843,10 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 total = status.total
                 enriched = status.enriched
                 failed = status.failed
+                details = status.details
             self._set_enrichment_status(
                 running=False,
+                author_uid=author_uid,
                 phase=(
                     f"富化中止，已处理 {processed}/{total}，成功 {enriched} 条，失败 {failed} 条"
                 ),
@@ -833,6 +854,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 total=total,
                 enriched=enriched,
                 failed=failed,
+                details=details,
             )
             raise
         finally:
@@ -845,28 +867,52 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 "candidates": len(targets),
                 "enriched": enriched,
                 "failed": failed,
+                "details": details,
                 "message": f"富化完成，成功 {enriched} 条，失败 {failed} 条。",
             },
         )
+
+    @staticmethod
+    def _enrichment_detail(
+        target: EnrichmentTarget,
+        *,
+        status: str,
+        error: Exception | None = None,
+    ) -> dict[str, object]:
+        original_text = re.sub(r"\s+", " ", target.original_text).strip()
+        detail: dict[str, object] = {
+            "post_id": target.post_id,
+            "version_id": target.version_id,
+            "status": status,
+            "excerpt": original_text[:120],
+        }
+        if error is not None:
+            detail["error_type"] = type(error).__name__
+            detail["error"] = redact_text(str(error)).strip()[:500] or "未提供错误详情"
+        return detail
 
     def _set_enrichment_status(
         self,
         *,
         running: bool,
+        author_uid: str,
         phase: str,
         processed: int,
         total: int,
         enriched: int,
         failed: int,
+        details: list[dict[str, object]],
     ) -> None:
         with self.server.enrichment_status_lock:
             self.server.enrichment_status = EnrichmentStatus(
                 running=running,
+                author_uid=author_uid,
                 phase=phase,
                 processed=processed,
                 total=total,
                 enriched=enriched,
                 failed=failed,
+                details=list(details),
             )
 
     def _enrichment_status_payload(self) -> dict[str, object]:
@@ -874,11 +920,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             status = self.server.enrichment_status
             return {
                 "running": status.running,
+                "author_uid": status.author_uid,
                 "phase": status.phase,
                 "processed": status.processed,
                 "total": status.total,
                 "enriched": status.enriched,
                 "failed": status.failed,
+                "details": status.details,
             }
 
     def _remove_watchlist_ticker(self, form: dict[str, list[str]]) -> None:

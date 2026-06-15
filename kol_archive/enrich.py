@@ -33,7 +33,13 @@ SYSTEM_PROMPT = """你在协助用户给一条 KOL 发言原文打结构化标�
 - evidence_snippet：字符串，必须是原文中逐字摘录的一小段，作为上述判断的依据；
   原文为空或无可摘录内容时返回空字符串。
 
+输出必须是严格合法的 JSON。字符串中的 ASCII 双引号必须使用反斜杠转义。
+若逐字证据片段含有容易破坏 JSON 的引号，可摘录更短且仍能在原文逐字找到的片段。
 标签拿不准时取 false。不要美化、不要替原文补全缺失的信息。"""
+
+RETRY_PROMPT = """上次输出未通过严格校验。请重新输出完整 JSON 对象。
+确保 JSON 可由标准解析器直接解析，字符串内的 ASCII 双引号正确转义，
+且 evidence_snippet 去除空白后仍能在原文中逐字找到。只输出 JSON。"""
 
 
 @dataclass(frozen=True)
@@ -79,8 +85,52 @@ def _required_bool(mapping: dict[str, Any], key: str) -> bool:
     raise ValueError(f"LLM response field must be a JSON boolean: {key}")
 
 
-def _strip_whitespace(value: str) -> str:
-    return "".join(value.split())
+_QUOTE_EQUIVALENTS = str.maketrans(
+    {
+        "“": '"',
+        "”": '"',
+        "＂": '"',
+        "‘": "'",
+        "’": "'",
+        "＇": "'",
+    }
+)
+
+
+def _normalized_excerpt(value: str) -> tuple[str, list[int]]:
+    characters: list[str] = []
+    positions: list[int] = []
+    for position, character in enumerate(value):
+        if character.isspace():
+            continue
+        characters.append(character.translate(_QUOTE_EQUIVALENTS))
+        positions.append(position)
+    return "".join(characters), positions
+
+
+def _original_excerpt(candidate: str, original_text: str) -> str | None:
+    needle, _ = _normalized_excerpt(candidate)
+    haystack, positions = _normalized_excerpt(original_text)
+    if not needle:
+        return ""
+    start = haystack.find(needle)
+    if start < 0:
+        return None
+    end = start + len(needle) - 1
+    return original_text[positions[start] : positions[end] + 1].strip()
+
+
+def _diagnostic_excerpt(value: object, limit: int = 320) -> str:
+    return " ".join(str(value).split())[:limit]
+
+
+def _json_content(value: object) -> str:
+    content = str(value).strip()
+    if content.startswith("```") and content.endswith("```"):
+        lines = content.splitlines()
+        if len(lines) >= 3:
+            content = "\n".join(lines[1:-1]).strip()
+    return content
 
 
 def _parse_result(payload: dict[str, Any], original_text: str) -> EnrichmentResult:
@@ -88,10 +138,14 @@ def _parse_result(payload: dict[str, Any], original_text: str) -> EnrichmentResu
         content = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as error:
         raise ValueError("LLM response is missing choices[0].message.content") from error
+    json_content = _json_content(content)
     try:
-        parsed = json.loads(str(content))
+        parsed = json.loads(json_content)
     except json.JSONDecodeError as error:
-        raise ValueError("LLM response content is not valid JSON") from error
+        excerpt = _diagnostic_excerpt(content)
+        raise ValueError(
+            f"LLM response content is not valid JSON; response excerpt: {excerpt}"
+        ) from error
     if not isinstance(parsed, dict):
         raise ValueError("LLM response content must be a JSON object")
     post_type = str(parsed.get("post_type") or "").strip()
@@ -106,12 +160,15 @@ def _parse_result(payload: dict[str, Any], original_text: str) -> EnrichmentResu
     # "依据片段", so a hallucinated snippet would become durable false evidence.
     # Compare with whitespace removed (the project's "去空白后" convention) to
     # tolerate reflowing without admitting fabricated content.
-    evidence_snippet = str(parsed.get("evidence_snippet") or "").strip()
+    returned_snippet = str(parsed.get("evidence_snippet") or "").strip()
+    evidence_snippet = _original_excerpt(returned_snippet, original_text)
     stance_summary = str(parsed.get("stance_summary") or "").strip()
-    if evidence_snippet and _strip_whitespace(evidence_snippet) not in _strip_whitespace(
-        original_text
-    ):
-        raise ValueError("LLM evidence_snippet is not a verbatim excerpt of the original text")
+    if evidence_snippet is None:
+        excerpt = _diagnostic_excerpt(returned_snippet)
+        raise ValueError(
+            "LLM evidence_snippet is not a verbatim excerpt of the original text; "
+            f"returned snippet: {excerpt}"
+        )
     first_hand = _required_bool(parsed, "label_first_hand_info")
     transferable = _required_bool(parsed, "label_transferable_framework")
     non_consensus = _required_bool(parsed, "label_reasoned_non_consensus")
@@ -139,23 +196,37 @@ def request_enrichment(
     owned_client = client is None
     active_client = client or httpx.Client(timeout=30.0)
     try:
-        response = active_client.post(
-            f"{settings.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.api_key}"},
-            json={
-                "model": settings.model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": original_text},
-                ],
-                "response_format": {"type": "json_object"},
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError("LLM response body must be a JSON object")
-        return _parse_result(cast(dict[str, Any], payload), original_text)
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": original_text},
+        ]
+        try:
+            return _request_and_parse(settings, original_text, messages, active_client)
+        except ValueError:
+            messages.append({"role": "user", "content": RETRY_PROMPT})
+            return _request_and_parse(settings, original_text, messages, active_client)
     finally:
         if owned_client:
             active_client.close()
+
+
+def _request_and_parse(
+    settings: EnrichSettings,
+    original_text: str,
+    messages: list[dict[str, str]],
+    client: httpx.Client,
+) -> EnrichmentResult:
+    response = client.post(
+        f"{settings.base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {settings.api_key}"},
+        json={
+            "model": settings.model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("LLM response body must be a JSON object")
+    return _parse_result(cast(dict[str, Any], payload), original_text)

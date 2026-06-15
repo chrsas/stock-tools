@@ -27,12 +27,16 @@ const enrichPhase = ref("");
 const enrichProcessed = ref(0);
 const enrichTotal = ref(0);
 const enrichNotice = ref("");
+const enrichDetails = ref<Row[]>([]);
 const addAuthorNotice = ref("");
 const theme = ref(localStorage.getItem("kol-theme") || "system");
 let collectStatusTimer: number | undefined;
 let pollingCollectStatus = false;
 let enrichStatusTimer: number | undefined;
 let pollingEnrichStatus = false;
+let activeEnrichAuthorUid = "";
+let enrichRunObserved = false;
+let enrichRequestPending = false;
 
 function applyTheme() {
   document.documentElement.dataset.theme = theme.value === "system"
@@ -102,24 +106,29 @@ function stopCollectStatusPolling() {
 }
 
 async function runEnrichment() {
-  if (!page.value?.selected || enriching.value || collecting.value || busy.value) return;
+  if (!page.value?.selected || enriching.value || enrichRequestPending || collecting.value || busy.value) return;
+  activeEnrichAuthorUid = String(page.value.selected.author_platform_uid);
+  enrichRunObserved = false;
+  enrichRequestPending = true;
   enriching.value = true;
   error.value = "";
   enrichNotice.value = "";
+  enrichDetails.value = [];
   enrichPhase.value = "正在准备富化";
   enrichProcessed.value = 0;
   enrichTotal.value = Number(page.value.selected.pending_enrichment_count || 0);
   startEnrichStatusPolling();
   try {
-    const uid = encodeURIComponent(String(page.value.selected.author_platform_uid));
+    const uid = encodeURIComponent(activeEnrichAuthorUid);
     const result = await mutate(`/authors/${uid}/enrich`, page.value.csrf_token);
     await refresh();
     enrichNotice.value = String(result.message || "富化完成。");
+    enrichDetails.value = Array.isArray(result.details) ? result.details : [];
   } catch (reason) {
     error.value = friendlyRequestError(reason);
   } finally {
+    enrichRequestPending = false;
     enriching.value = false;
-    await pollEnrichStatus();
     stopEnrichStatusPolling();
   }
 }
@@ -129,9 +138,20 @@ async function pollEnrichStatus() {
   pollingEnrichStatus = true;
   try {
     const status = await loadEnrichmentStatus();
+    if (String(status.author_uid || "") !== activeEnrichAuthorUid) return;
+    if (!enrichRunObserved && !status.running) return;
+    if (status.running) enrichRunObserved = true;
     enrichPhase.value = String(status.phase || "正在富化");
     enrichProcessed.value = Number(status.processed || 0);
     enrichTotal.value = Number(status.total || 0);
+    enrichDetails.value = Array.isArray(status.details) ? status.details : [];
+    enriching.value = Boolean(status.running);
+    if (!status.running && enrichProcessed.value > 0) {
+      enrichNotice.value = `${enrichPhase.value}。`;
+    }
+    if (!status.running) {
+      stopEnrichStatusPolling();
+    }
   } catch {
     // The main enrichment request reports connection failures with actionable text.
   } finally {
@@ -149,6 +169,25 @@ function stopEnrichStatusPolling() {
   if (enrichStatusTimer !== undefined) {
     window.clearInterval(enrichStatusTimer);
     enrichStatusTimer = undefined;
+  }
+}
+
+async function restoreEnrichStatus() {
+  if (!page.value?.selected) return;
+  try {
+    const status = await loadEnrichmentStatus();
+    const selectedUid = String(page.value.selected.author_platform_uid);
+    if (!status.running || String(status.author_uid || "") !== selectedUid) return;
+    activeEnrichAuthorUid = selectedUid;
+    enrichRunObserved = true;
+    enrichPhase.value = String(status.phase || "正在富化");
+    enrichProcessed.value = Number(status.processed || 0);
+    enrichTotal.value = Number(status.total || 0);
+    enrichDetails.value = Array.isArray(status.details) ? status.details : [];
+    enriching.value = true;
+    startEnrichStatusPolling();
+  } catch {
+    // A status lookup failure must not block the rest of the page on mount.
   }
 }
 
@@ -229,7 +268,11 @@ function navActive(view: string): boolean {
   return current === view;
 }
 
-onMounted(() => { applyTheme(); refresh(); });
+onMounted(async () => {
+  applyTheme();
+  await refresh();
+  await restoreEnrichStatus();
+});
 onBeforeUnmount(() => {
   stopCollectStatusPolling();
   stopEnrichStatusPolling();
@@ -288,7 +331,24 @@ onBeforeUnmount(() => {
           <strong>{{ enrichPhase || "正在富化" }}</strong>
           <span>已处理 {{ enrichProcessed }}/{{ enrichTotal }}</span>
         </div>
-        <p v-else-if="enrichNotice" class="notice">{{ enrichNotice }}</p>
+        <details v-else-if="enrichNotice" class="notice enrichment-report">
+          <summary>{{ enrichNotice }}<span v-if="enrichDetails.length">查看明细</span></summary>
+          <div v-if="enrichDetails.length" class="enrichment-details">
+            <div v-for="item in enrichDetails" :key="`${item.version_id}-${item.status}`" class="enrichment-detail">
+              <span class="enrichment-result" :class="item.status">
+                {{ item.status === "success" ? "成功" : "失败" }}
+              </span>
+              <div>
+                <a :href="`/posts/${item.post_id}`">帖子 {{ item.post_id }} · 版本 {{ item.version_id }}</a>
+                <p>{{ item.excerpt || "无正文摘要" }}</p>
+                <p v-if="item.status === 'failed'" class="enrichment-error">
+                  {{ item.error_type }}：{{ item.error }}
+                </p>
+              </div>
+            </div>
+          </div>
+          <p v-else class="muted">本次运行没有可展示的逐条结果。</p>
+        </details>
         <p v-if="busy && !collecting" class="notice">正在读取归档...</p>
         <p v-if="error" class="error">{{ error }}</p>
 

@@ -250,8 +250,69 @@ def test_request_enrichment_rejects_hallucinated_snippet() -> None:
         "evidence_snippet": "我实地走访了三家门店",
     }
     with httpx.Client(transport=_llm_response(payload)) as client:
-        with pytest.raises(ValueError, match="verbatim excerpt"):
+        with pytest.raises(ValueError, match="returned snippet: 我实地走访了三家门店"):
             request_enrichment(_settings(), "今天天气不错。", client=client)
+
+
+def test_request_enrichment_reports_invalid_json_excerpt() -> None:
+    response = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"post_type": "观点" trailing'}}]},
+        )
+    )
+    with httpx.Client(transport=response) as client:
+        with pytest.raises(ValueError, match=r'response excerpt: \{"post_type": "观点" trailing'):
+            request_enrichment(_settings(), "原文", client=client)
+
+
+def test_request_enrichment_accepts_json_markdown_fence() -> None:
+    payload = {
+        "post_type": "观点",
+        "label_first_hand_info": False,
+        "label_transferable_framework": False,
+        "label_reasoned_non_consensus": False,
+        "rationale": "理由",
+        "stance_summary": "",
+        "evidence_snippet": "",
+    }
+    content = f"```json\n{json.dumps(payload, ensure_ascii=False)}\n```"
+    response = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+    )
+    with httpx.Client(transport=response) as client:
+        result = request_enrichment(_settings(), "原文", client=client)
+    assert result.post_type == "观点"
+
+
+def test_request_enrichment_retries_invalid_json_once() -> None:
+    calls: list[dict[str, object]] = []
+    valid = {
+        "post_type": "情绪",
+        "label_first_hand_info": False,
+        "label_transferable_framework": False,
+        "label_reasoned_non_consensus": False,
+        "rationale": "口号式陈述",
+        "stance_summary": "认为运力时代到来",
+        "evidence_snippet": "时代到来",
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        content = (
+            '{"post_type":"情绪","evidence_snippet":"“运力""时代到来！"}'
+            if len(calls) == 1
+            else json.dumps(valid, ensure_ascii=False)
+        )
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        result = request_enrichment(_settings(), '“运力""时代到来！', client=client)
+
+    assert result.evidence_snippet == "时代到来"
+    assert len(calls) == 2
+    messages = cast(list[dict[str, str]], calls[1]["messages"])
+    assert "上次输出未通过严格校验" in messages[-1]["content"]
 
 
 def test_request_enrichment_requires_snippet_when_a_label_fires() -> None:
@@ -282,6 +343,23 @@ def test_request_enrichment_tolerates_whitespace_in_snippet() -> None:
     with httpx.Client(transport=_llm_response(payload)) as client:
         result = request_enrichment(_settings(), "我实地走访了三家门店，结论如下。", client=client)
     assert result.label_first_hand_info is True
+    assert result.evidence_snippet == "我实地走访了三家门店"
+
+
+def test_request_enrichment_restores_original_quote_style_in_snippet() -> None:
+    original = '$澜起科技(SH688008)$“运力""时代到来！'
+    payload = {
+        "post_type": "情绪",
+        "label_first_hand_info": False,
+        "label_transferable_framework": False,
+        "label_reasoned_non_consensus": False,
+        "rationale": "口号式陈述",
+        "stance_summary": "认为运力时代到来",
+        "evidence_snippet": '$澜起科技(SH688008)$"运力""时代到来！',
+    }
+    with httpx.Client(transport=_llm_response(payload)) as client:
+        result = request_enrichment(_settings(), original, client=client)
+    assert result.evidence_snippet == original
 
 
 # ── service: targets + persistence ───────────────────────────────────────

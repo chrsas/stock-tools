@@ -103,6 +103,16 @@ small { font-size: .8rem; }
 .error { background: color-mix(in srgb, var(--up) 14%, var(--surface)); border-color: color-mix(in srgb, var(--up) 40%, transparent); }
 .collect-status { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .collect-status span { color: var(--ink-2); font-size: .9rem; }
+.enrichment-report { margin-top: 0; }
+.enrichment-report > summary { display: flex; justify-content: space-between; width: 100%; color: var(--ink); }
+.enrichment-report > summary span { color: var(--ink-2); font-size: .8rem; }
+.enrichment-details { display: grid; margin-top: .7rem; border-top: 1px solid var(--line-soft); }
+.enrichment-detail { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: .7rem; padding: .65rem 0; border-bottom: 1px solid var(--line-soft); }
+.enrichment-detail:last-child { border-bottom: 0; padding-bottom: 0; }
+.enrichment-detail p { margin: .2rem 0 0; color: var(--ink-2); font-size: .82rem; overflow-wrap: anywhere; }
+.enrichment-result { align-self: start; padding: 1px 7px; border: 1px solid var(--line); border-radius: 5px; font-size: .76rem; font-weight: 650; text-align: center; }
+.enrichment-result.success { color: var(--down); }
+.enrichment-result.failed, .enrichment-error { color: var(--up) !important; }
 
 /* ---------------------------------------------------------------- surfaces */
 .panel, .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem 1.1rem; }

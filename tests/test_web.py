@@ -452,11 +452,21 @@ def test_enrich_author_web_flow(
     assert payload["candidates"] == 1
     assert payload["enriched"] == 1
     assert payload["failed"] == 0
+    assert payload["details"] == [
+        {
+            "post_id": 1,
+            "version_id": 1,
+            "status": "success",
+            "excerpt": "原始正文 A",
+        }
+    ]
     assert calls == ["原始正文 A"]
     status_payload = _get_json(web_server, "/api/enrich/status")
     assert status_payload["running"] is False
+    assert status_payload["author_uid"] == "100"
     assert status_payload["processed"] == 1
     assert status_payload["enriched"] == 1
+    assert status_payload["details"] == payload["details"]
     authors = cast(list[dict[str, object]], _get_json(web_server, "/api/home")["authors"])
     assert authors[0]["pending_enrichment_count"] == 0
 
@@ -494,11 +504,23 @@ def test_enrich_author_counts_database_failure_and_keeps_batch_status(
     assert payload["candidates"] == 1
     assert payload["enriched"] == 0
     assert payload["failed"] == 1
+    assert payload["details"] == [
+        {
+            "post_id": 1,
+            "version_id": 1,
+            "status": "failed",
+            "excerpt": "原始正文 A",
+            "error_type": "OperationalError",
+            "error": "database is locked",
+        }
+    ]
     status_payload = _get_json(web_server, "/api/enrich/status")
     assert status_payload["running"] is False
+    assert status_payload["author_uid"] == "100"
     assert status_payload["processed"] == 1
     assert status_payload["total"] == 1
     assert status_payload["failed"] == 1
+    assert status_payload["details"] == payload["details"]
 
 
 def test_watchlist_web_flow_and_csrf(web_server: ArchiveHttpServer) -> None:
