@@ -10,13 +10,15 @@ import secrets
 import sqlite3
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlparse
+
+import httpx
 
 from kol_archive.accounts import add_account
 from kol_archive.analysis import (
@@ -29,6 +31,7 @@ from kol_archive.claims import list_claim_proposals
 from kol_archive.config import load_config
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.decisions import list_decisions
+from kol_archive.enrich import load_enrich_settings, request_enrichment
 from kol_archive.maintenance import redact_text
 from kol_archive.models import FeedState, WatchMode
 from kol_archive.presentation import (
@@ -64,6 +67,26 @@ class WebSettings:
     framework_prompt_version: str = "framework-v1"
 
 
+@dataclass
+class CollectionStatus:
+    running: bool = False
+    phase: str = "尚未开始采集"
+    started_at: str | None = None
+    updated_at: str | None = None
+    finished_at: str | None = None
+    healthy: bool | None = None
+
+
+@dataclass
+class EnrichmentStatus:
+    running: bool = False
+    phase: str = "尚未开始富化"
+    processed: int = 0
+    total: int = 0
+    enriched: int = 0
+    failed: int = 0
+
+
 class ArchiveHttpServer(ThreadingHTTPServer):
     db_path: Path
     config_dir: Path
@@ -76,6 +99,11 @@ class ArchiveHttpServer(ThreadingHTTPServer):
     analysis_min_group_samples: int
     framework_prompt_version: str
     collect_lock: threading.Lock
+    collection_status_lock: threading.Lock
+    collection_status: CollectionStatus
+    enrichment_lock: threading.Lock
+    enrichment_status_lock: threading.Lock
+    enrichment_status: EnrichmentStatus
 
 
 def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
@@ -156,7 +184,13 @@ def create_server(
     server.viewpoint_cluster_window_days = settings.viewpoint_cluster_window_days
     server.analysis_min_group_samples = settings.analysis_min_group_samples
     server.framework_prompt_version = settings.framework_prompt_version
-    server.collect_lock = threading.Lock()
+    long_task_lock = threading.Lock()
+    server.collect_lock = long_task_lock
+    server.collection_status_lock = threading.Lock()
+    server.collection_status = CollectionStatus()
+    server.enrichment_lock = long_task_lock
+    server.enrichment_status_lock = threading.Lock()
+    server.enrichment_status = EnrichmentStatus()
     return server
 
 
@@ -327,6 +361,12 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
+            if path == "/api/collect/status":
+                self._send_json(HTTPStatus.OK, self._collection_status_payload())
+                return
+            if path == "/api/enrich/status":
+                self._send_json(HTTPStatus.OK, self._enrichment_status_payload())
+                return
             if path == "/api/home":
                 self._with_connection(
                     lambda connection: self._send_json(
@@ -437,6 +477,10 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/collect/run-once":
                 self._run_collection(form)
+                return
+            author_uid = self._author_action_uid(path, suffix="/enrich")
+            if author_uid is not None:
+                self._enrich_author(author_uid, form)
                 return
             if path == "/watchlist/add":
                 self._add_watchlist_ticker(form)
@@ -575,6 +619,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         if not self.server.collect_lock.acquire(blocking=False):
             self._send_text(HTTPStatus.CONFLICT, "采集正在进行中，请稍候。")
             return
+        self._set_collection_status(running=True, phase="正在启动采集", healthy=None)
+        failure_response: tuple[HTTPStatus, str] | None = None
         try:
             # Deferred import: kol_archive.cli.collect pulls in the CLI package, which
             # imports this module back — importing it lazily avoids the load-time cycle.
@@ -583,23 +629,49 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             from kol_archive.cli.collect import RunLockError, execute_run_once
 
             try:
-                result = execute_run_once(self.server.config_dir)
+                result = execute_run_once(
+                    self.server.config_dir,
+                    progress=lambda phase: self._set_collection_status(
+                        running=True,
+                        phase=phase,
+                        healthy=None,
+                    ),
+                )
             except RunLockError:
-                self._send_text(
+                self._set_collection_status(
+                    running=False,
+                    phase="采集未启动，另一处采集正在运行",
+                    healthy=False,
+                )
+                failure_response = (
                     HTTPStatus.CONFLICT,
                     "采集正在进行中（已被其他进程占用），请稍候。",
                 )
-                return
             except BrowserError:
-                self._send_text(
+                self._set_collection_status(
+                    running=False,
+                    phase="采集失败，专用雪球浏览器未就绪",
+                    healthy=False,
+                )
+                failure_response = (
                     HTTPStatus.SERVICE_UNAVAILABLE,
                     "采集失败：专用雪球浏览器未就绪。"
                     "请先运行 login 并完成登录/滑块，再保持窗口开着重试。",
                 )
-                return
+        except Exception:
+            self._set_collection_status(
+                running=False,
+                phase="采集失败，请查看服务日志",
+                healthy=False,
+            )
+            raise
         finally:
             self.server.collect_lock.release()
+        if failure_response is not None:
+            self._send_text(*failure_response)
+            return
         message = "采集完成。" if result.healthy else f"采集完成，但有告警：{result.reason}"
+        self._set_collection_status(running=False, phase=message, healthy=result.healthy)
         self._send_json(
             HTTPStatus.OK,
             {
@@ -609,6 +681,42 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 "message": message,
             },
         )
+
+    def _set_collection_status(self, *, running: bool, phase: str, healthy: bool | None) -> None:
+        now = datetime.now(tz=UTC).isoformat()
+        with self.server.collection_status_lock:
+            status = self.server.collection_status
+            if running and not status.running:
+                status.started_at = now
+                status.finished_at = None
+            status.running = running
+            status.phase = phase
+            status.updated_at = now
+            status.healthy = healthy
+            if not running:
+                status.finished_at = now
+
+    def _collection_status_payload(self) -> dict[str, object]:
+        with self.server.collection_status_lock:
+            status = self.server.collection_status
+            elapsed_seconds = 0
+            if status.started_at is not None:
+                started_at = datetime.fromisoformat(status.started_at)
+                ended_at = (
+                    datetime.now(tz=UTC)
+                    if status.running or status.finished_at is None
+                    else datetime.fromisoformat(status.finished_at)
+                )
+                elapsed_seconds = max(0, int((ended_at - started_at).total_seconds()))
+            return {
+                "running": status.running,
+                "phase": status.phase,
+                "started_at": status.started_at,
+                "updated_at": status.updated_at,
+                "finished_at": status.finished_at,
+                "healthy": status.healthy,
+                "elapsed_seconds": elapsed_seconds,
+            }
 
     def _add_watchlist_ticker(self, form: dict[str, list[str]]) -> None:
         ticker = self._required_form_value(form, "ticker")
@@ -622,6 +730,156 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             )
         )
         self._mutation_done(0, key="watchlist_id", location="/?view=watchlist")
+
+    def _enrich_author(self, author_uid: str, form: dict[str, list[str]]) -> None:
+        del form
+        if not self.server.enrichment_lock.acquire(blocking=False):
+            self._send_text(HTTPStatus.CONFLICT, "富化正在进行中，请稍候。")
+            return
+        try:
+            config = load_config(self.server.config_dir)
+            settings = replace(
+                load_enrich_settings(config),
+                prompt_version=self.server.enrich_prompt_version,
+            )
+            connection = connect_database(self.server.db_path)
+            archive = Archive(connection)
+            try:
+                author_row = connection.execute(
+                    "SELECT id FROM authors WHERE platform = 'xueqiu' AND platform_uid = ?",
+                    (author_uid,),
+                ).fetchone()
+                if author_row is None:
+                    raise ValueError("author not found")
+                targets = archive.enrichment_targets(
+                    settings.prompt_version,
+                    author_id=int(author_row["id"]),
+                    current_only=True,
+                )
+                self._set_enrichment_status(
+                    running=True,
+                    phase=f"准备富化 {len(targets)} 条发言",
+                    processed=0,
+                    total=len(targets),
+                    enriched=0,
+                    failed=0,
+                )
+                enriched = failed = 0
+                with httpx.Client(timeout=30.0) as client:
+                    for index, target in enumerate(targets, start=1):
+                        self._set_enrichment_status(
+                            running=True,
+                            phase=f"正在富化 {index}/{len(targets)}",
+                            processed=index - 1,
+                            total=len(targets),
+                            enriched=enriched,
+                            failed=failed,
+                        )
+                        try:
+                            result = request_enrichment(
+                                settings,
+                                target.original_text,
+                                client=client,
+                            )
+                            if (
+                                archive.add_enrichment(
+                                    target,
+                                    result,
+                                    settings.model,
+                                    settings.prompt_version,
+                                    datetime.now(tz=UTC).isoformat(),
+                                )
+                                is not None
+                            ):
+                                enriched += 1
+                        except (httpx.HTTPError, sqlite3.Error, ValueError) as error:
+                            failed += 1
+                            LOGGER.warning(
+                                "web enrichment failed version_id=%s type=%s",
+                                target.version_id,
+                                type(error).__name__,
+                            )
+                        self._set_enrichment_status(
+                            running=True,
+                            phase=f"正在富化 {index}/{len(targets)}",
+                            processed=index,
+                            total=len(targets),
+                            enriched=enriched,
+                            failed=failed,
+                        )
+                self._set_enrichment_status(
+                    running=False,
+                    phase=f"富化完成，成功 {enriched} 条，失败 {failed} 条",
+                    processed=len(targets),
+                    total=len(targets),
+                    enriched=enriched,
+                    failed=failed,
+                )
+            finally:
+                connection.close()
+        except Exception:
+            with self.server.enrichment_status_lock:
+                status = self.server.enrichment_status
+                processed = status.processed
+                total = status.total
+                enriched = status.enriched
+                failed = status.failed
+            self._set_enrichment_status(
+                running=False,
+                phase=(
+                    f"富化中止，已处理 {processed}/{total}，成功 {enriched} 条，失败 {failed} 条"
+                ),
+                processed=processed,
+                total=total,
+                enriched=enriched,
+                failed=failed,
+            )
+            raise
+        finally:
+            self.server.enrichment_lock.release()
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "prompt_version": settings.prompt_version,
+                "candidates": len(targets),
+                "enriched": enriched,
+                "failed": failed,
+                "message": f"富化完成，成功 {enriched} 条，失败 {failed} 条。",
+            },
+        )
+
+    def _set_enrichment_status(
+        self,
+        *,
+        running: bool,
+        phase: str,
+        processed: int,
+        total: int,
+        enriched: int,
+        failed: int,
+    ) -> None:
+        with self.server.enrichment_status_lock:
+            self.server.enrichment_status = EnrichmentStatus(
+                running=running,
+                phase=phase,
+                processed=processed,
+                total=total,
+                enriched=enriched,
+                failed=failed,
+            )
+
+    def _enrichment_status_payload(self) -> dict[str, object]:
+        with self.server.enrichment_status_lock:
+            status = self.server.enrichment_status
+            return {
+                "running": status.running,
+                "phase": status.phase,
+                "processed": status.processed,
+                "total": status.total,
+                "enriched": status.enriched,
+                "failed": status.failed,
+            }
 
     def _remove_watchlist_ticker(self, form: dict[str, list[str]]) -> None:
         ticker = self._required_form_value(form, "ticker")
@@ -739,6 +997,12 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         return unquote(path[len(prefix) :])
 
     @staticmethod
+    def _author_action_uid(path: str, *, suffix: str) -> str | None:
+        if not path.endswith(suffix):
+            return None
+        return ArchiveRequestHandler._author_uid(path[: -len(suffix)])
+
+    @staticmethod
     def _post_id(path: str, *, prefix: str = "/posts/", suffix: str = "") -> int | None:
         if not path.startswith(prefix):
             return None
@@ -775,6 +1039,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             or path.startswith("/watchlist/")
             or path.startswith("/accounts/")
             or path.startswith("/collect/")
+            or path.startswith("/authors/")
         ):
             return True
         return any(

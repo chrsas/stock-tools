@@ -3,8 +3,9 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -268,8 +269,12 @@ def test_collect_run_once_web_flow(
 
     calls: list[Path] = []
 
-    def fake_run(config_dir: Path) -> collect_module.RunOnceResult:
+    def fake_run(
+        config_dir: Path, *, progress: Callable[[str], None] | None = None
+    ) -> collect_module.RunOnceResult:
         calls.append(config_dir)
+        if progress is not None:
+            progress("正在检查采集结果")
         return collect_module.RunOnceResult(healthy=True, reason=None)
 
     monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
@@ -282,9 +287,15 @@ def test_collect_run_once_web_flow(
     assert payload["healthy"] is True
     assert payload["message"] == "采集完成。"
     assert calls == [web_server.config_dir]
+    status_payload = _get_json(web_server, "/api/collect/status")
+    assert status_payload["running"] is False
+    assert status_payload["phase"] == "采集完成。"
+    assert status_payload["healthy"] is True
 
     # A completed-but-degraded pass surfaces the reason instead of claiming success.
-    def degraded_run(config_dir: Path) -> collect_module.RunOnceResult:
+    def degraded_run(
+        config_dir: Path, *, progress: Callable[[str], None] | None = None
+    ) -> collect_module.RunOnceResult:
         return collect_module.RunOnceResult(healthy=False, reason="run-once 连续失败")
 
     monkeypatch.setattr(collect_module, "execute_run_once", degraded_run)
@@ -302,7 +313,9 @@ def test_collect_run_once_reports_browser_not_ready(
     import kol_archive.cli.collect as collect_module
     from kol_archive.browser import BrowserError
 
-    def boom(config_dir: Path) -> collect_module.RunOnceResult:
+    def boom(
+        config_dir: Path, *, progress: Callable[[str], None] | None = None
+    ) -> collect_module.RunOnceResult:
         raise BrowserError("no cdp endpoint")
 
     monkeypatch.setattr(collect_module, "execute_run_once", boom)
@@ -321,7 +334,9 @@ def test_collect_run_once_reports_cross_process_conflict(
 ) -> None:
     import kol_archive.cli.collect as collect_module
 
-    def busy(config_dir: Path) -> collect_module.RunOnceResult:
+    def busy(
+        config_dir: Path, *, progress: Callable[[str], None] | None = None
+    ) -> collect_module.RunOnceResult:
         raise collect_module.RunLockError("已被其他进程占用")
 
     monkeypatch.setattr(collect_module, "execute_run_once", busy)
@@ -338,6 +353,7 @@ def test_collect_run_once_reports_cross_process_conflict(
 def test_collect_run_once_guards_csrf_method_and_concurrency(
     web_server: ArchiveHttpServer,
 ) -> None:
+    assert web_server.collect_lock is web_server.enrichment_lock
     status, _, _ = _request(web_server, "POST", "/collect/run-once", {})
     assert status == 403
     status, _, _ = _request(web_server, "GET", "/collect/run-once")
@@ -353,6 +369,136 @@ def test_collect_run_once_guards_csrf_method_and_concurrency(
         web_server.collect_lock.release()
     assert status == 409
     assert "采集正在进行中" in content
+
+    assert web_server.collect_lock.acquire(blocking=False)
+    try:
+        status, _, content = _request(
+            web_server, "POST", "/authors/100/enrich", {"csrf_token": CSRF_TOKEN}
+        )
+    finally:
+        web_server.collect_lock.release()
+    assert status == 409
+    assert "富化正在进行中" in content
+
+
+def test_collect_status_reports_live_phase(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kol_archive.cli.collect as collect_module
+
+    phase_reported = threading.Event()
+    finish_run = threading.Event()
+    response: list[tuple[int, dict[str, str], str]] = []
+
+    def wait_in_phase(
+        config_dir: Path, *, progress: Callable[[str], None] | None = None
+    ) -> collect_module.RunOnceResult:
+        assert progress is not None
+        progress("正在采集博主 2/3 的近期发言")
+        phase_reported.set()
+        assert finish_run.wait(timeout=5)
+        return collect_module.RunOnceResult(healthy=True, reason=None)
+
+    monkeypatch.setattr(collect_module, "execute_run_once", wait_in_phase)
+    request_thread = threading.Thread(
+        target=lambda: response.append(
+            _request(web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN})
+        )
+    )
+    request_thread.start()
+    assert phase_reported.wait(timeout=5)
+
+    payload = _get_json(web_server, "/api/collect/status")
+    assert payload["running"] is True
+    assert payload["phase"] == "正在采集博主 2/3 的近期发言"
+    assert isinstance(payload["elapsed_seconds"], int)
+    assert payload["elapsed_seconds"] >= 0
+
+    finish_run.set()
+    request_thread.join(timeout=5)
+    assert response[0][0] == 200
+
+
+def test_enrich_author_web_flow(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def fake_enrichment(
+        settings: object, original_text: str, *, client: object
+    ) -> EnrichmentResult:
+        calls.append(original_text)
+        return EnrichmentResult(
+            post_type="观点",
+            label_first_hand_info=False,
+            label_transferable_framework=False,
+            label_reasoned_non_consensus=False,
+            rationale="测试富化",
+            evidence_snippet="",
+            stance_summary="",
+        )
+
+    monkeypatch.setattr("kol_archive.web.request_enrichment", fake_enrichment)
+    status, _, content = _request(
+        web_server,
+        "POST",
+        "/authors/100/enrich",
+        {"csrf_token": CSRF_TOKEN},
+    )
+
+    assert status == 200
+    payload = json.loads(content)
+    assert payload["prompt_version"] == "enrich-v1"
+    assert payload["candidates"] == 1
+    assert payload["enriched"] == 1
+    assert payload["failed"] == 0
+    assert calls == ["原始正文 A"]
+    status_payload = _get_json(web_server, "/api/enrich/status")
+    assert status_payload["running"] is False
+    assert status_payload["processed"] == 1
+    assert status_payload["enriched"] == 1
+    authors = cast(list[dict[str, object]], _get_json(web_server, "/api/home")["authors"])
+    assert authors[0]["pending_enrichment_count"] == 0
+
+
+def test_enrich_author_counts_database_failure_and_keeps_batch_status(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_enrichment(
+        settings: object, original_text: str, *, client: object
+    ) -> EnrichmentResult:
+        return EnrichmentResult(
+            post_type="观点",
+            label_first_hand_info=False,
+            label_transferable_framework=False,
+            label_reasoned_non_consensus=False,
+            rationale="测试富化",
+            evidence_snippet="",
+            stance_summary="",
+        )
+
+    def locked(*args: object, **kwargs: object) -> int | None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("kol_archive.web.request_enrichment", fake_enrichment)
+    monkeypatch.setattr(Archive, "add_enrichment", locked)
+    status, _, content = _request(
+        web_server,
+        "POST",
+        "/authors/100/enrich",
+        {"csrf_token": CSRF_TOKEN},
+    )
+
+    assert status == 200
+    payload = json.loads(content)
+    assert payload["candidates"] == 1
+    assert payload["enriched"] == 0
+    assert payload["failed"] == 1
+    status_payload = _get_json(web_server, "/api/enrich/status")
+    assert status_payload["running"] is False
+    assert status_payload["processed"] == 1
+    assert status_payload["total"] == 1
+    assert status_payload["failed"] == 1
 
 
 def test_watchlist_web_flow_and_csrf(web_server: ArchiveHttpServer) -> None:
@@ -580,6 +726,9 @@ def test_authors_view_renders_recent_viewpoints_without_ranking(
     [cluster] = cast(list[dict[str, object]], payload["clusters"])
     assert author["viewpoint_count"] == 1
     assert author["evaluated_viewpoint_count"] == 0
+    assert author["latest_post_at"] == author["latest_viewpoint_at"]
+    assert author["pending_enrichment_count"] == 0
+    assert author["latest_enrichment_at"] is not None
     assert cluster["statement_count"] == 1
     assert (
         cast(list[dict[str, object]], cluster["viewpoints"])[0]["enrichment_evidence_snippet"]

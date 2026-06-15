@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -177,7 +178,10 @@ def test_run_once_command_loads_config_once(
         return config
 
     monkeypatch.setattr("kol_archive.cli.collect.load_config", load_once)
-    monkeypatch.setattr("kol_archive.cli.collect._run_once_with_config", lambda loaded: None)
+    monkeypatch.setattr(
+        "kol_archive.cli.collect._run_once_with_config",
+        lambda loaded, *, progress=None: None,
+    )
     monkeypatch.setattr(
         "kol_archive.cli.collect._record_run_health_safely", lambda *args, **kwargs: None
     )
@@ -196,7 +200,9 @@ def test_execute_run_once_refuses_concurrent_process(
     monkeypatch.setattr("kol_archive.cli.collect.load_config", lambda config_dir: config)
     ran = False
 
-    def fail_if_run(loaded: dict[str, object]) -> None:
+    def fail_if_run(
+        loaded: dict[str, object], *, progress: Callable[[str], None] | None = None
+    ) -> None:
         nonlocal ran
         ran = True
 

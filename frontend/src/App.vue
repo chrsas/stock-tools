@@ -1,6 +1,13 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
-import { loadPage, mutate, type Row } from "./api";
+import { onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  friendlyRequestError,
+  loadCollectionStatus,
+  loadEnrichmentStatus,
+  loadPage,
+  mutate,
+  type Row,
+} from "./api";
 import { authorName, fmtTime, percent, postTitle, xueqiuUrl } from "./format";
 import AuthorBadge from "./components/AuthorBadge.vue";
 import PostLinks from "./components/PostLinks.vue";
@@ -13,8 +20,19 @@ const error = ref("");
 const busy = ref(false);
 const collecting = ref(false);
 const collectNotice = ref("");
+const collectPhase = ref("");
+const collectElapsed = ref(0);
+const enriching = ref(false);
+const enrichPhase = ref("");
+const enrichProcessed = ref(0);
+const enrichTotal = ref(0);
+const enrichNotice = ref("");
 const addAuthorNotice = ref("");
 const theme = ref(localStorage.getItem("kol-theme") || "system");
+let collectStatusTimer: number | undefined;
+let pollingCollectStatus = false;
+let enrichStatusTimer: number | undefined;
+let pollingEnrichStatus = false;
 
 function applyTheme() {
   document.documentElement.dataset.theme = theme.value === "system"
@@ -32,18 +50,105 @@ async function refresh() {
 }
 
 async function runCollection() {
-  if (!page.value || collecting.value || busy.value) return;
+  if (!page.value || collecting.value || enriching.value || busy.value) return;
   collecting.value = true;
   error.value = "";
   collectNotice.value = "";
+  collectPhase.value = "正在启动采集";
+  collectElapsed.value = 0;
+  startCollectStatusPolling();
   try {
     const result = await mutate("/collect/run-once", page.value.csrf_token);
-    collectNotice.value = String(result.message || "采集完成。");
+    const resultMessage = String(result.message || "采集完成。");
     await refresh();
+    const pending = Number(page.value?.selected?.pending_enrichment_count || 0);
+    collectNotice.value = pending > 0
+      ? `${resultMessage} 当前博主还有 ${pending} 条发言待富化，观点页可能仍显示旧内容。`
+      : resultMessage;
   } catch (reason) {
-    error.value = String(reason);
+    error.value = friendlyRequestError(reason);
   } finally {
     collecting.value = false;
+    await pollCollectStatus();
+    stopCollectStatusPolling();
+  }
+}
+
+async function pollCollectStatus() {
+  if (pollingCollectStatus) return;
+  pollingCollectStatus = true;
+  try {
+    const status = await loadCollectionStatus();
+    collectPhase.value = String(status.phase || "正在采集");
+    collectElapsed.value = Number(status.elapsed_seconds || 0);
+  } catch {
+    // The main collection request reports connection failures with actionable text.
+  } finally {
+    pollingCollectStatus = false;
+  }
+}
+
+function startCollectStatusPolling() {
+  stopCollectStatusPolling();
+  void pollCollectStatus();
+  collectStatusTimer = window.setInterval(() => { void pollCollectStatus(); }, 1000);
+}
+
+function stopCollectStatusPolling() {
+  if (collectStatusTimer !== undefined) {
+    window.clearInterval(collectStatusTimer);
+    collectStatusTimer = undefined;
+  }
+}
+
+async function runEnrichment() {
+  if (!page.value?.selected || enriching.value || collecting.value || busy.value) return;
+  enriching.value = true;
+  error.value = "";
+  enrichNotice.value = "";
+  enrichPhase.value = "正在准备富化";
+  enrichProcessed.value = 0;
+  enrichTotal.value = Number(page.value.selected.pending_enrichment_count || 0);
+  startEnrichStatusPolling();
+  try {
+    const uid = encodeURIComponent(String(page.value.selected.author_platform_uid));
+    const result = await mutate(`/authors/${uid}/enrich`, page.value.csrf_token);
+    await refresh();
+    enrichNotice.value = String(result.message || "富化完成。");
+  } catch (reason) {
+    error.value = friendlyRequestError(reason);
+  } finally {
+    enriching.value = false;
+    await pollEnrichStatus();
+    stopEnrichStatusPolling();
+  }
+}
+
+async function pollEnrichStatus() {
+  if (pollingEnrichStatus) return;
+  pollingEnrichStatus = true;
+  try {
+    const status = await loadEnrichmentStatus();
+    enrichPhase.value = String(status.phase || "正在富化");
+    enrichProcessed.value = Number(status.processed || 0);
+    enrichTotal.value = Number(status.total || 0);
+  } catch {
+    // The main enrichment request reports connection failures with actionable text.
+  } finally {
+    pollingEnrichStatus = false;
+  }
+}
+
+function startEnrichStatusPolling() {
+  stopEnrichStatusPolling();
+  void pollEnrichStatus();
+  enrichStatusTimer = window.setInterval(() => { void pollEnrichStatus(); }, 1000);
+}
+
+function stopEnrichStatusPolling() {
+  if (enrichStatusTimer !== undefined) {
+    window.clearInterval(enrichStatusTimer);
+    enrichStatusTimer = undefined;
   }
 }
 
@@ -125,6 +230,10 @@ function navActive(view: string): boolean {
 }
 
 onMounted(() => { applyTheme(); refresh(); });
+onBeforeUnmount(() => {
+  stopCollectStatusPolling();
+  stopEnrichStatusPolling();
+});
 </script>
 
 <template>
@@ -159,7 +268,7 @@ onMounted(() => { applyTheme(); refresh(); });
           <span class="muted small">红涨绿跌 · A股口径</span>
         </div>
         <div class="topbar-actions">
-          <button class="secondary refresh-btn" :disabled="collecting || busy" title="立刻执行一次采集（run-once）；需先 login 并保持雪球浏览器窗口开着" @click="runCollection">
+          <button class="secondary refresh-btn" :disabled="collecting || enriching || busy" title="立刻执行一次采集（run-once）；需先 login 并保持雪球浏览器窗口开着" @click="runCollection">
             <svg viewBox="0 0 24 24" class="ico" :class="{ spin: collecting }"><path d="M20 11a8 8 0 1 0-2.3 5.7" /><path d="M20 5v6h-6" /></svg>
             {{ collecting ? "采集中…" : "立即采集" }}
           </button>
@@ -170,8 +279,16 @@ onMounted(() => { applyTheme(); refresh(); });
       </header>
 
       <main class="content">
-        <p v-if="collecting" class="notice">正在采集，请保持雪球浏览器窗口开着，期间可能需要数十秒…</p>
+        <div v-if="collecting" class="notice collect-status" aria-live="polite">
+          <strong>{{ collectPhase || "正在采集" }}</strong>
+          <span>已用时 {{ collectElapsed }} 秒，请保持雪球浏览器窗口开着。</span>
+        </div>
         <p v-else-if="collectNotice" class="notice">{{ collectNotice }}</p>
+        <div v-if="enriching" class="notice collect-status" aria-live="polite">
+          <strong>{{ enrichPhase || "正在富化" }}</strong>
+          <span>已处理 {{ enrichProcessed }}/{{ enrichTotal }}</span>
+        </div>
+        <p v-else-if="enrichNotice" class="notice">{{ enrichNotice }}</p>
         <p v-if="busy && !collecting" class="notice">正在读取归档...</p>
         <p v-if="error" class="error">{{ error }}</p>
 
@@ -194,6 +311,11 @@ onMounted(() => { applyTheme(); refresh(); });
                 <a class="author-pick" :href="`/?author=${encodeURIComponent(author.author_platform_uid)}`">
                   <AuthorBadge :item="author" />
                   <small class="muted">观点发言 {{ author.viewpoint_count }} · 已评估观点 {{ author.evaluated_viewpoint_count }}</small>
+                  <small class="freshness" :class="{ delayed: author.pending_enrichment_count > 0 }">
+                    原始 {{ fmtTime(author.latest_post_at) }} · 观点页 {{ fmtTime(author.latest_viewpoint_at) }}
+                    <template v-if="author.pending_enrichment_count"> · 待富化 {{ author.pending_enrichment_count }}</template>
+                  </small>
+                  <small class="freshness">最近富化 {{ fmtTime(author.latest_enrichment_at) }}</small>
                 </a>
                 <a v-if="xueqiuUrl(author)" class="xq-jump" :href="xueqiuUrl(author)" target="_blank" rel="noopener noreferrer" title="在雪球查看主页">雪球 ↗</a>
               </div>
@@ -202,7 +324,17 @@ onMounted(() => { applyTheme(); refresh(); });
             <section class="stream">
               <div v-if="page.selected" class="author-banner">
                 <AuthorBadge :item="page.selected" />
-                <a v-if="xueqiuUrl(page.selected)" class="xq-jump" :href="xueqiuUrl(page.selected)" target="_blank" rel="noopener noreferrer" title="在雪球查看主页">雪球主页 ↗</a>
+                <div class="author-actions">
+                  <button
+                    class="secondary"
+                    :disabled="enriching || collecting || busy || !page.selected.pending_enrichment_count"
+                    title="使用当前观点页 prompt 版本富化该博主待处理发言"
+                    @click="runEnrichment"
+                  >
+                    {{ enriching ? "富化中…" : `立即富化 ${page.selected.pending_enrichment_count || 0}` }}
+                  </button>
+                  <a v-if="xueqiuUrl(page.selected)" class="xq-jump" :href="xueqiuUrl(page.selected)" target="_blank" rel="noopener noreferrer" title="在雪球查看主页">雪球主页 ↗</a>
+                </div>
               </div>
               <div class="stream-label"><span class="eyebrow">最近 {{ page.clusters.length }} 个观点簇</span></div>
               <p v-if="page.clusters.length && !hasMarketFeedback(page.clusters)" class="empty soft">

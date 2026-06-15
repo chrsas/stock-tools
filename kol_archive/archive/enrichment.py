@@ -22,7 +22,13 @@ from .base import ArchiveBase, _required_lastrowid
 
 class EnrichmentMixin(ArchiveBase):
     def enrichment_targets(
-        self, prompt_version: str, *, post_id: int | None = None, limit: int | None = None
+        self,
+        prompt_version: str,
+        *,
+        post_id: int | None = None,
+        author_id: int | None = None,
+        current_only: bool = False,
+        limit: int | None = None,
     ) -> list[EnrichmentTarget]:
         """Observed versions still missing an enrichment for ``prompt_version``.
 
@@ -45,6 +51,13 @@ class EnrichmentMixin(ArchiveBase):
         if post_id is not None:
             query += " AND v.post_id = ?"
             params.append(post_id)
+        if author_id is not None:
+            query += (
+                " AND EXISTS (SELECT 1 FROM posts p WHERE p.id = v.post_id AND p.author_id = ?)"
+            )
+            params.append(author_id)
+        if current_only:
+            query += " AND EXISTS (SELECT 1 FROM posts p WHERE p.current_version_id = v.id)"
         query += " ORDER BY v.first_observed_at, v.id"
         if limit is not None:
             if limit <= 0:

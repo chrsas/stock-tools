@@ -101,6 +101,8 @@ small { font-size: .8rem; }
 .notice, .error { padding: .8rem 1rem; border-radius: var(--radius-sm); margin-bottom: 14px;
   background: color-mix(in srgb, var(--gold) 16%, var(--surface)); color: var(--ink); border: 1px solid color-mix(in srgb, var(--gold) 40%, transparent); }
 .error { background: color-mix(in srgb, var(--up) 14%, var(--surface)); border-color: color-mix(in srgb, var(--up) 40%, transparent); }
+.collect-status { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.collect-status span { color: var(--ink-2); font-size: .9rem; }
 
 /* ---------------------------------------------------------------- surfaces */
 .panel, .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem 1.1rem; }
@@ -115,11 +117,14 @@ small { font-size: .8rem; }
 .author-option:hover { background: var(--surface-2); }
 .author-option.active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 26%, transparent); }
 .author-pick { display: grid; gap: .3rem; color: inherit; }
+.freshness { display: block; color: var(--ink-3); line-height: 1.45; }
+.freshness.delayed { color: var(--gold); }
 .author-option .xq-jump { justify-self: start; }
 .roster-note { padding: 9px 5px 2px; border-top: 1px solid var(--line-soft); margin: 5px 0 0; font-size: .8rem; }
 
 .stream { display: grid; gap: 14px; }
 .author-banner { display: flex; align-items: center; justify-content: space-between; gap: .7rem; padding: 1rem 1.1rem; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.author-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
 .xq-jump { display: inline-flex; align-items: center; gap: .2rem; padding: 2px 9px; font-size: .76rem; line-height: 1.6;
   color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);

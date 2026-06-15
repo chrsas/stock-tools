@@ -931,6 +931,32 @@ def author_viewpoint_overview(
                 LIMIT 1
             ) AS author_avatar_url,
             COUNT(e.id) AS viewpoint_count,
+            MAX(COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at))
+                AS latest_post_at,
+            MAX(
+                CASE WHEN e.id IS NOT NULL
+                    THEN COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at)
+                END
+            ) AS latest_viewpoint_at,
+            (
+                SELECT COUNT(*)
+                FROM posts pending_post
+                WHERE pending_post.author_id = a.id
+                  AND pending_post.current_version_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM enrichments pending_enrichment
+                      WHERE pending_enrichment.version_id = pending_post.current_version_id
+                        AND pending_enrichment.prompt_version = ?
+                  )
+            ) AS pending_enrichment_count,
+            (
+                SELECT MAX(latest_enrichment.created_at)
+                FROM enrichments latest_enrichment
+                JOIN posts latest_enriched_post
+                    ON latest_enriched_post.current_version_id = latest_enrichment.version_id
+                WHERE latest_enriched_post.author_id = a.id
+                  AND latest_enrichment.prompt_version = ?
+            ) AS latest_enrichment_at,
             SUM(
                 CASE WHEN EXISTS (
                     SELECT 1
@@ -949,7 +975,7 @@ def author_viewpoint_overview(
         GROUP BY a.id
         ORDER BY a.id
         """,
-        (prompt_version.strip(),),
+        (prompt_version.strip(), prompt_version.strip(), prompt_version.strip()),
     ).fetchall()
     return [_row_dict(row) for row in rows]
 

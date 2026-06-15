@@ -8,7 +8,7 @@ import logging
 import os
 import sqlite3
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -217,7 +217,16 @@ def run_once(conf_dir: Path) -> None:
     _run_once_with_config(load_config(conf_dir))
 
 
-def _run_once_with_config(config: dict[str, Any]) -> None:
+def _report_progress(progress: Callable[[str], None] | None, message: str) -> None:
+    if progress is not None:
+        progress(message)
+
+
+def _run_once_with_config(
+    config: dict[str, Any],
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> None:
     storage = section(config, "storage")
     monitoring = section(config, "monitoring")
     polling = section(config, "polling")
@@ -242,6 +251,7 @@ def _run_once_with_config(config: dict[str, Any]) -> None:
         raise ValueError("backfill.on_add_pages must not be negative (use 0 to disable)")
     client = None
     try:
+        _report_progress(progress, "正在连接雪球专用浏览器")
         client = _build_collector_client(config)
         collector = _build_collector(archive, client, polling)
         now = datetime.now(tz=UTC)
@@ -254,10 +264,11 @@ def _run_once_with_config(config: dict[str, Any]) -> None:
             raise ValueError("at least one account must be configured")
         want_backfill = backfill_on_add and on_add_pages > 0
         feed_blocked = False
-        for account in accounts:
+        for account_index, account in enumerate(accounts, start=1):
             uid = str(account.get("uid") or "").strip()
             if not uid:
                 continue
+            _report_progress(progress, f"正在采集博主 {account_index}/{len(accounts)} 的近期发言")
             note = str(account.get("note") or "") or None
             author_id = archive.ensure_author("xueqiu", uid, now.isoformat(), note)
             previous_covered_to = archive.last_live_covered_to(author_id)
@@ -286,6 +297,10 @@ def _run_once_with_config(config: dict[str, Any]) -> None:
                 and archive.baseline_backfill_pending(author_id)
                 and archive.feed_run_parse_clean(live_run_id)
             ):
+                _report_progress(
+                    progress,
+                    f"正在回填博主 {account_index}/{len(accounts)} 的历史基线",
+                )
                 backfill_run_id = collector.backfill_feed(
                     author_id,
                     uid,
@@ -300,12 +315,14 @@ def _run_once_with_config(config: dict[str, Any]) -> None:
         # Direct-link probes hit the same host and session as the feed; if any feed poll
         # was blocked this run, skip the probe pass too (same rule as the backfill gate).
         if not feed_blocked:
+            _report_progress(progress, "正在复查钉住和待确认帖子")
             collector.probe_due_posts()
     finally:
         if client is not None:
             client.close()
         connection.close()
     if bool(storage.get("backup_after_run", True)):
+        _report_progress(progress, "正在创建采集后备份")
         result = create_verified_backup(
             db_path,
             Path(str(storage.get("backup_dir") or "data/backups")),
@@ -326,7 +343,11 @@ class RunOnceResult:
     reason: str | None
 
 
-def execute_run_once(conf_dir: Path) -> RunOnceResult:
+def execute_run_once(
+    conf_dir: Path,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> RunOnceResult:
     """Run the full run-once pass: collect, evaluate health, alert, record state.
 
     Shared by the CLI ``run-once`` command and the web "立即采集" button. Hard
@@ -338,13 +359,16 @@ def execute_run_once(conf_dir: Path) -> RunOnceResult:
     with _run_once_file_lock(db_path):
         started_at = datetime.now(tz=UTC).isoformat()
         try:
-            _run_once_with_config(config)
+            _run_once_with_config(config, progress=progress)
         except Exception as error:
             reason = "CDP 连接失败" if isinstance(error, BrowserError) else "run-once 执行失败"
             _record_run_health_safely(config, healthy=False, reason=reason)
             raise
+        _report_progress(progress, "正在检查采集结果")
         collection_reason = _collection_failure_reason(db_path, started_at)
+        _report_progress(progress, "正在发送关注列表提醒")
         _send_watchlist_alerts(config, db_path, started_at)
+        _report_progress(progress, "正在记录采集健康状态")
         _record_run_health_safely(
             config, healthy=collection_reason is None, reason=collection_reason
         )

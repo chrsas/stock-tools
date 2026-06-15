@@ -408,6 +408,22 @@ def test_enrichment_targets_post_id_filter_and_limit(archive: Archive) -> None:
     assert len(archive.enrichment_targets("enrich-v1", limit=1)) == 1
 
 
+def test_enrichment_targets_can_scope_current_versions_to_author(archive: Archive) -> None:
+    second_author_id = archive.add_author("xueqiu", "200", BASE_TIME)
+    archive.record_feed_run(
+        make_feed_run(),
+        [make_post("post-1", text="A"), make_post("post-2", text="B")],
+    )
+    archive.record_feed_run(
+        dataclasses.replace(make_feed_run(), author_id=second_author_id),
+        [dataclasses.replace(make_post("post-3", text="C"), author_id=second_author_id)],
+    )
+
+    targets = archive.enrichment_targets("enrich-v1", author_id=1, current_only=True)
+
+    assert [target.original_text for target in targets] == ["A", "B"]
+
+
 # ── presentation: filter stream + evidence card ──────────────────────────
 
 
@@ -661,6 +677,21 @@ def test_author_recent_viewpoints_excludes_market_unrelated_opinions(archive: Ar
 
     assert [item["platform_post_id"] for item in viewpoints] == ["related"]
     assert overview[0]["viewpoint_count"] == 1
+    assert overview[0]["latest_post_at"] == overview[0]["latest_viewpoint_at"]
+    assert overview[0]["pending_enrichment_count"] == 0
+    assert overview[0]["latest_enrichment_at"] == BASE_TIME
+
+
+def test_author_viewpoint_overview_exposes_pending_enrichment(archive: Archive) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post("pending", text="待富化发言")])
+
+    [overview] = author_viewpoint_overview(archive.connection, "enrich-v1")
+
+    assert overview["viewpoint_count"] == 0
+    assert overview["latest_post_at"] is not None
+    assert overview["latest_viewpoint_at"] is None
+    assert overview["pending_enrichment_count"] == 1
+    assert overview["latest_enrichment_at"] is None
 
 
 def test_author_recent_viewpoint_clusters_groups_shared_nested_ticker(archive: Archive) -> None:
