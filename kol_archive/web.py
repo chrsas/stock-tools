@@ -8,6 +8,7 @@ import mimetypes
 import re
 import secrets
 import sqlite3
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -74,6 +75,7 @@ class ArchiveHttpServer(ThreadingHTTPServer):
     viewpoint_cluster_window_days: int
     analysis_min_group_samples: int
     framework_prompt_version: str
+    collect_lock: threading.Lock
 
 
 def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
@@ -154,6 +156,7 @@ def create_server(
     server.viewpoint_cluster_window_days = settings.viewpoint_cluster_window_days
     server.analysis_min_group_samples = settings.analysis_min_group_samples
     server.framework_prompt_version = settings.framework_prompt_version
+    server.collect_lock = threading.Lock()
     return server
 
 
@@ -432,6 +435,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if path == "/accounts/add":
                 self._add_account(form)
                 return
+            if path == "/collect/run-once":
+                self._run_collection(form)
+                return
             if path == "/watchlist/add":
                 self._add_watchlist_ticker(form)
                 return
@@ -561,6 +567,48 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", "/")
         self.end_headers()
+
+    def _run_collection(self, form: dict[str, list[str]]) -> None:
+        del form
+        # The collection shares one dedicated browser session and writes the archive;
+        # never let two run-once passes overlap. Reject (not queue) a concurrent click.
+        if not self.server.collect_lock.acquire(blocking=False):
+            self._send_text(HTTPStatus.CONFLICT, "采集正在进行中，请稍候。")
+            return
+        try:
+            # Deferred import: kol_archive.cli.collect pulls in the CLI package, which
+            # imports this module back — importing it lazily avoids the load-time cycle.
+            # The import sits inside the try so a failure still releases the lock below.
+            from kol_archive.browser import BrowserError
+            from kol_archive.cli.collect import RunLockError, execute_run_once
+
+            try:
+                result = execute_run_once(self.server.config_dir)
+            except RunLockError:
+                self._send_text(
+                    HTTPStatus.CONFLICT,
+                    "采集正在进行中（已被其他进程占用），请稍候。",
+                )
+                return
+            except BrowserError:
+                self._send_text(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "采集失败：专用雪球浏览器未就绪。"
+                    "请先运行 login 并完成登录/滑块，再保持窗口开着重试。",
+                )
+                return
+        finally:
+            self.server.collect_lock.release()
+        message = "采集完成。" if result.healthy else f"采集完成，但有告警：{result.reason}"
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "healthy": result.healthy,
+                "reason": result.reason,
+                "message": message,
+            },
+        )
 
     def _add_watchlist_ticker(self, form: dict[str, list[str]]) -> None:
         ticker = self._required_form_value(form, "ticker")
@@ -726,6 +774,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             or path.startswith("/claim-proposals/")
             or path.startswith("/watchlist/")
             or path.startswith("/accounts/")
+            or path.startswith("/collect/")
         ):
             return True
         return any(

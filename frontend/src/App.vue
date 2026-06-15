@@ -11,6 +11,8 @@ import ViewpointCluster from "./components/ViewpointCluster.vue";
 const page = ref<Row | null>(null);
 const error = ref("");
 const busy = ref(false);
+const collecting = ref(false);
+const collectNotice = ref("");
 const addAuthorNotice = ref("");
 const theme = ref(localStorage.getItem("kol-theme") || "system");
 
@@ -27,6 +29,22 @@ async function refresh() {
   try { page.value = await loadPage(); }
   catch (reason) { error.value = String(reason); }
   finally { busy.value = false; }
+}
+
+async function runCollection() {
+  if (!page.value || collecting.value || busy.value) return;
+  collecting.value = true;
+  error.value = "";
+  collectNotice.value = "";
+  try {
+    const result = await mutate("/collect/run-once", page.value.csrf_token);
+    collectNotice.value = String(result.message || "采集完成。");
+    await refresh();
+  } catch (reason) {
+    error.value = String(reason);
+  } finally {
+    collecting.value = false;
+  }
 }
 
 async function action(path: string, values: Row = {}) {
@@ -140,13 +158,21 @@ onMounted(() => { applyTheme(); refresh(); });
           <span class="dot-live" aria-hidden="true"></span>
           <span class="muted small">红涨绿跌 · A股口径</span>
         </div>
-        <select v-model="theme" aria-label="主题" @change="applyTheme">
-          <option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">暗色</option>
-        </select>
+        <div class="topbar-actions">
+          <button class="secondary refresh-btn" :disabled="collecting || busy" title="立刻执行一次采集（run-once）；需先 login 并保持雪球浏览器窗口开着" @click="runCollection">
+            <svg viewBox="0 0 24 24" class="ico" :class="{ spin: collecting }"><path d="M20 11a8 8 0 1 0-2.3 5.7" /><path d="M20 5v6h-6" /></svg>
+            {{ collecting ? "采集中…" : "立即采集" }}
+          </button>
+          <select v-model="theme" aria-label="主题" @change="applyTheme">
+            <option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">暗色</option>
+          </select>
+        </div>
       </header>
 
       <main class="content">
-        <p v-if="busy" class="notice">正在读取归档...</p>
+        <p v-if="collecting" class="notice">正在采集，请保持雪球浏览器窗口开着，期间可能需要数十秒…</p>
+        <p v-else-if="collectNotice" class="notice">{{ collectNotice }}</p>
+        <p v-if="busy && !collecting" class="notice">正在读取归档...</p>
         <p v-if="error" class="error">{{ error }}</p>
 
         <template v-if="page?.view === 'authors'">

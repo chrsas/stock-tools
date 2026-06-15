@@ -261,6 +261,100 @@ def test_add_account_web_flow(web_server: ArchiveHttpServer) -> None:
     assert status == 400
 
 
+def test_collect_run_once_web_flow(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kol_archive.cli.collect as collect_module
+
+    calls: list[Path] = []
+
+    def fake_run(config_dir: Path) -> collect_module.RunOnceResult:
+        calls.append(config_dir)
+        return collect_module.RunOnceResult(healthy=True, reason=None)
+
+    monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
+    status, _, content = _request(
+        web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
+    )
+    assert status == 200
+    payload = json.loads(content)
+    assert payload["ok"] is True
+    assert payload["healthy"] is True
+    assert payload["message"] == "采集完成。"
+    assert calls == [web_server.config_dir]
+
+    # A completed-but-degraded pass surfaces the reason instead of claiming success.
+    def degraded_run(config_dir: Path) -> collect_module.RunOnceResult:
+        return collect_module.RunOnceResult(healthy=False, reason="run-once 连续失败")
+
+    monkeypatch.setattr(collect_module, "execute_run_once", degraded_run)
+    status, _, content = _request(
+        web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
+    )
+    payload = json.loads(content)
+    assert payload["healthy"] is False
+    assert "run-once 连续失败" in payload["message"]
+
+
+def test_collect_run_once_reports_browser_not_ready(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kol_archive.cli.collect as collect_module
+    from kol_archive.browser import BrowserError
+
+    def boom(config_dir: Path) -> collect_module.RunOnceResult:
+        raise BrowserError("no cdp endpoint")
+
+    monkeypatch.setattr(collect_module, "execute_run_once", boom)
+    status, _, content = _request(
+        web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
+    )
+    assert status == 503
+    assert "浏览器" in content
+    # The lock is released after a failed pass so the next click can still collect.
+    assert web_server.collect_lock.acquire(blocking=False)
+    web_server.collect_lock.release()
+
+
+def test_collect_run_once_reports_cross_process_conflict(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kol_archive.cli.collect as collect_module
+
+    def busy(config_dir: Path) -> collect_module.RunOnceResult:
+        raise collect_module.RunLockError("已被其他进程占用")
+
+    monkeypatch.setattr(collect_module, "execute_run_once", busy)
+    status, _, content = _request(
+        web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
+    )
+    assert status == 409
+    assert "其他进程" in content
+    # The in-process lock is freed even though the run never started.
+    assert web_server.collect_lock.acquire(blocking=False)
+    web_server.collect_lock.release()
+
+
+def test_collect_run_once_guards_csrf_method_and_concurrency(
+    web_server: ArchiveHttpServer,
+) -> None:
+    status, _, _ = _request(web_server, "POST", "/collect/run-once", {})
+    assert status == 403
+    status, _, _ = _request(web_server, "GET", "/collect/run-once")
+    assert status == 405
+
+    # A run already in flight is rejected, not queued behind the active one.
+    assert web_server.collect_lock.acquire(blocking=False)
+    try:
+        status, _, content = _request(
+            web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
+        )
+    finally:
+        web_server.collect_lock.release()
+    assert status == 409
+    assert "采集正在进行中" in content
+
+
 def test_watchlist_web_flow_and_csrf(web_server: ArchiveHttpServer) -> None:
     payload = _get_json(web_server, "/api/home?view=watchlist")
     assert payload["view"] == "watchlist"

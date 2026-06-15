@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import sqlite3
+import sys
+from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from kol_archive.alerts import load_alert_settings, record_run_health
 from kol_archive.browser import (
@@ -48,6 +52,57 @@ from .common import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+class RunLockError(RuntimeError):
+    """Raised when another process already holds the run-once lock."""
+
+
+# OS-level advisory locks auto-release when the holding process exits, so a crashed
+# run-once never strands the lock the way an existence-based lock file would.
+if sys.platform == "win32":
+    import msvcrt
+
+    def _acquire_run_lock(handle: IO[str]) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _release_run_lock(handle: IO[str]) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _acquire_run_lock(handle: IO[str]) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _release_run_lock(handle: IO[str]) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _run_once_file_lock(db_path: Path) -> Iterator[None]:
+    """Cross-process mutex so scheduled and web-triggered run-once never overlap.
+
+    The lock sits next to the archive because a single run-once shares that SQLite
+    file, the dedicated CDP page and the backup directory — none of which tolerate a
+    concurrent writer, whether it comes from this process or another.
+    """
+    lock_path = db_path.parent / "run-once.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            _acquire_run_lock(handle)
+        except OSError as error:
+            raise RunLockError("另一处 run-once 采集正在进行（已被其他进程占用）。") from error
+        try:
+            yield
+        finally:
+            _release_run_lock(handle)
+    finally:
+        handle.close()
 
 
 def _browser_section(config: dict[str, Any]) -> dict[str, Any]:
@@ -263,6 +318,39 @@ def _run_once_with_config(config: dict[str, Any]) -> None:
         )
 
 
+@dataclass(frozen=True)
+class RunOnceResult:
+    """Outcome of a completed run-once pass (collection did not hard-fail)."""
+
+    healthy: bool
+    reason: str | None
+
+
+def execute_run_once(conf_dir: Path) -> RunOnceResult:
+    """Run the full run-once pass: collect, evaluate health, alert, record state.
+
+    Shared by the CLI ``run-once`` command and the web "立即采集" button. Hard
+    failures (e.g. :class:`BrowserError`) record unhealthy state and re-raise; a
+    pass that finishes with degraded runs returns ``healthy=False`` plus a reason.
+    """
+    config = load_config(conf_dir)
+    db_path = resolve_db_path(None, config)
+    with _run_once_file_lock(db_path):
+        started_at = datetime.now(tz=UTC).isoformat()
+        try:
+            _run_once_with_config(config)
+        except Exception as error:
+            reason = "CDP 连接失败" if isinstance(error, BrowserError) else "run-once 执行失败"
+            _record_run_health_safely(config, healthy=False, reason=reason)
+            raise
+        collection_reason = _collection_failure_reason(db_path, started_at)
+        _send_watchlist_alerts(config, db_path, started_at)
+        _record_run_health_safely(
+            config, healthy=collection_reason is None, reason=collection_reason
+        )
+        return RunOnceResult(healthy=collection_reason is None, reason=collection_reason)
+
+
 def run_backfill(
     conf_dir: Path,
     *,
@@ -401,26 +489,13 @@ def _login_command(args: argparse.Namespace) -> None:
 
 
 def _run_once_command(args: argparse.Namespace) -> None:
-    config = load_config(args.config_dir)
-    started_at = datetime.now(tz=UTC).isoformat()
-
     try:
-        _run_once_with_config(config)
-    except Exception as error:
-        failure_reason = "CDP 连接失败" if isinstance(error, BrowserError) else "run-once 执行失败"
-        _record_run_health_safely(
-            config,
-            healthy=False,
-            reason=failure_reason,
-        )
-        raise
-    collection_reason = _collection_failure_reason(resolve_db_path(None, config), started_at)
-    _send_watchlist_alerts(config, resolve_db_path(None, config), started_at)
-    _record_run_health_safely(
-        config,
-        healthy=collection_reason is None,
-        reason=collection_reason,
-    )
+        execute_run_once(args.config_dir)
+    except RunLockError as error:
+        # A scheduled run and a manual/web run colliding is expected concurrency, not a
+        # failure: skip cleanly so Task Scheduler doesn't flag the run as errored.
+        LOGGER.warning("run-once skipped: %s", error)
+        print(f"# 跳过：{error}")
 
 
 def _backfill_command(args: argparse.Namespace) -> None:

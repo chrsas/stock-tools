@@ -9,10 +9,13 @@ import pytest
 
 from kol_archive.alerts import AlertSettings, load_alert_settings, record_run_health
 from kol_archive.cli.collect import (
+    RunLockError,
     _collection_failure_reason,
     _record_run_health_safely,
     _run_once_command,
+    _run_once_file_lock,
     _send_watchlist_alerts,
+    execute_run_once,
 )
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.notifications import (
@@ -183,6 +186,50 @@ def test_run_once_command_loads_config_once(
     _run_once_command(argparse.Namespace(config_dir=tmp_path))
 
     assert loads == 1
+
+
+def test_execute_run_once_refuses_concurrent_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "kol.sqlite3"
+    config: dict[str, object] = {"storage": {"db_path": str(db_path)}}
+    monkeypatch.setattr("kol_archive.cli.collect.load_config", lambda config_dir: config)
+    ran = False
+
+    def fail_if_run(loaded: dict[str, object]) -> None:
+        nonlocal ran
+        ran = True
+
+    monkeypatch.setattr("kol_archive.cli.collect._run_once_with_config", fail_if_run)
+
+    # Holding the file lock stands in for a Task Scheduler / CLI run already in flight:
+    # the second pass must bail out before touching the shared archive.
+    with _run_once_file_lock(db_path):
+        with pytest.raises(RunLockError):
+            execute_run_once(tmp_path)
+    assert ran is False
+
+    # Once the holder releases, the lock is reusable (no stranded lock file).
+    monkeypatch.setattr(
+        "kol_archive.cli.collect._record_run_health_safely", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr("kol_archive.cli.collect._send_watchlist_alerts", lambda *args: None)
+    monkeypatch.setattr("kol_archive.cli.collect._collection_failure_reason", lambda *args: None)
+    result = execute_run_once(tmp_path)
+    assert result.healthy is True
+    assert ran is True
+
+
+def test_run_once_command_skips_cleanly_on_lock_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def busy(config_dir: Path) -> None:
+        raise RunLockError("另一处 run-once 采集正在进行（已被其他进程占用）。")
+
+    monkeypatch.setattr("kol_archive.cli.collect.execute_run_once", busy)
+
+    # A collision is expected concurrency, not a crash: the command returns normally.
+    _run_once_command(argparse.Namespace(config_dir=tmp_path))
 
 
 def test_watchlist_notification_failure_retries_without_affecting_archive(

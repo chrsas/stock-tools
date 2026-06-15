@@ -80,6 +80,11 @@ small { font-size: .8rem; }
 .topbar-tape { display: flex; align-items: center; gap: 10px; }
 .dot-live { width: 8px; height: 8px; border-radius: 50%; background: var(--down); box-shadow: 0 0 0 3px color-mix(in srgb, var(--down) 22%, transparent); }
 .topbar select { padding: 7px 11px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface-2); }
+.topbar-actions { display: flex; align-items: center; gap: 10px; }
+.refresh-btn { display: inline-flex; align-items: center; gap: 7px; padding: 7px 13px; }
+.refresh-btn .ico { width: 16px; height: 16px; }
+.refresh-btn .ico.spin { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .content { flex: 1; padding: 26px 28px 64px; }
 .content > * { max-width: 1240px; margin-left: auto; margin-right: auto; }
@@ -218,4 +223,12 @@ pre.data { max-height: 28rem; overflow: auto; font-family: var(--font-mono); fon
   .author-layout, .queue-layout, .facts { grid-template-columns: 1fr; }
   .roster, .legend { position: static; }
   .content { padding: 18px 16px 48px; }
+}
+@media (max-width: 480px) {
+  /* The 64px rail leaves a narrow frame; drop the tape text (keep the live dot),
+     tighten the controls, and let the bar wrap so it can never overflow sideways. */
+  .topbar { padding: 10px 14px; gap: 10px; flex-wrap: wrap; }
+  .topbar-tape .small { display: none; }
+  .refresh-btn { padding: 7px 10px; gap: 6px; }
+  .topbar select { padding: 7px 8px; }
 }
