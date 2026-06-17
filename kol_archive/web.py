@@ -45,7 +45,13 @@ from kol_archive.presentation import (
     list_pinned_versions,
     list_timeline,
 )
-from kol_archive.recall import build_recall_page
+from kol_archive.recall import (
+    append_topic_brief,
+    build_recall_page,
+    recall_query_from_values,
+    retrieve,
+)
+from kol_archive.recall_brief import load_brief_settings, synthesize_brief
 from kol_archive.recall_expand import expand_query, load_expand_settings
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
 from kol_archive.service import Archive
@@ -656,6 +662,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if path == "/recall/expand":
                 self._expand_recall_query(form)
                 return
+            if path == "/recall/brief":
+                self._synthesize_recall_brief(form)
+                return
             author_uid = self._author_action_uid(path, suffix="/enrich")
             if author_uid is not None:
                 self._enrich_author(author_uid, form)
@@ -944,6 +953,53 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK,
             {"ok": True, "prompt_version": settings.prompt_version, **expansion.to_payload()},
         )
+
+    def _synthesize_recall_brief(self, form: dict[str, list[str]]) -> None:
+        # 简报合成是主题回溯里唯一生成文字、花费 token 的步骤：在已确认的确定性
+        # 检索结果上合成，固定四块、每条带 version_id 引用，并把结果连同当时的
+        # coverage/selection 一起 append 到 append-only 的 topic_briefs。POST + CSRF。
+        query, _, error = recall_query_from_values(form)
+        if query is None:
+            raise ValueError(error or "请先确认检索词分组与回溯时间窗，再生成简报。")
+        if not query.question.strip():
+            raise ValueError("请先填写主题问题：简报需要一个可追溯的问题作为标题。")
+        config = load_config(self.server.config_dir)
+        settings = load_brief_settings(config)
+        captured: dict[str, object] = {}
+
+        def run(connection: sqlite3.Connection) -> None:
+            result = retrieve(
+                connection,
+                query,
+                prompt_version=self.server.enrich_prompt_version,
+                benchmark_ticker=self.server.market_benchmark_ticker,
+            )
+            coverage = cast(dict[str, object], result["coverage"])
+            if int(cast(int, coverage["version_count"])) == 0:
+                raise ValueError("该检索条件下窗内没有命中发言，无法生成简报。")
+            brief = synthesize_brief(settings, result)
+            brief_id = append_topic_brief(
+                connection,
+                query=query,
+                coverage=result["coverage"],
+                selection=result["selection"],
+                cited_version_ids=brief.cited_version_ids,
+                brief_text=brief.brief_text,
+                model=settings.model,
+                prompt_version=settings.prompt_version,
+                created_at=datetime.now(tz=UTC).isoformat(),
+            )
+            captured["payload"] = {
+                "ok": True,
+                "brief_id": brief_id,
+                "prompt_version": settings.prompt_version,
+                "coverage": result["coverage"],
+                "selection": result["selection"],
+                **brief.to_payload(),
+            }
+
+        self._with_connection(run)
+        self._send_json(HTTPStatus.OK, captured["payload"])
 
     def _add_watchlist_ticker(self, form: dict[str, list[str]]) -> None:
         ticker = self._required_form_value(form, "ticker")

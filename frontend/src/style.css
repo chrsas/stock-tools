@@ -252,6 +252,12 @@ form, label { display: grid; gap: .5rem; margin: 1rem 0; }
 .recall-group input { margin: 0; }
 .recall-window { display: flex; gap: 1rem; flex-wrap: wrap; align-items: end; }
 .recall-window label { margin: .5rem 0; }
+.recall-brief-block { margin: .6rem 0; }
+.recall-brief-block h3 { margin: .4rem 0 .2rem; }
+.recall-brief-block ul { margin: .2rem 0; padding-left: 1.2rem; }
+.recall-brief-block li { margin: .25rem 0; }
+.brief-cites { margin-left: .35rem; display: inline-flex; gap: .3rem; flex-wrap: wrap; }
+.brief-cite { font-size: .82em; }
 @media (max-width: 760px) { .recall-group { grid-template-columns: 1fr; } }
 textarea, input, select { padding: .7rem; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface-2); }
 textarea { min-height: 6rem; }

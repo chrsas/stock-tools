@@ -44,8 +44,15 @@ export function friendlyRequestError(reason: unknown): string {
   return String(reason);
 }
 
-export async function mutate(path: string, csrfToken: string, values: Row = {}): Promise<Row> {
-  const body = new URLSearchParams({ csrf_token: csrfToken, ...values });
+export async function mutate(
+  path: string,
+  csrfToken: string,
+  values: Row | URLSearchParams = {},
+): Promise<Row> {
+  // URLSearchParams preserves repeated keys (e.g. multiple recall `group` fields)
+  // that a plain object would collapse; a Row is the common single-value case.
+  const body = values instanceof URLSearchParams ? values : new URLSearchParams(values);
+  body.set("csrf_token", csrfToken);
   const response = await fetch(path, {
     method: "POST",
     headers: {

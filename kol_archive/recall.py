@@ -424,20 +424,17 @@ def _split_tickers(values: dict[str, list[str]]) -> tuple[str, ...]:
     return tuple(tickers)
 
 
-def build_recall_page(
-    connection: sqlite3.Connection,
+def recall_query_from_values(
     values: dict[str, list[str]],
-    *,
-    prompt_version: str,
-    benchmark_ticker: str,
-) -> dict[str, object]:
-    """Build the read-only 主题回溯 page payload from parsed query-string values.
+) -> tuple[RetrievalQuery | None, dict[str, object], str | None]:
+    """Parse confirmed search inputs into a runnable query, an echo form, an error.
 
-    GET-only and side-effect free: this just parses the confirmed search form,
-    runs the deterministic :func:`retrieve` when groups *and* a window are present,
-    and always echoes the raw inputs back as ``form`` so the page can repopulate the
-    editable fields after navigation. Malformed input degrades to an ``error`` note
-    on the page rather than raising — the user fixes it inline, never sees a 500.
+    Shared by the read-only recall page and the brief-synthesis action so both read
+    the *exact same* confirmed inputs (grouped terms, window, tickers, group joiner,
+    limit). Returns ``(query, form, error)``: ``query`` is ``None`` when the inputs are
+    not yet runnable (no groups, or groups without a window), in which case ``error``
+    carries a user-facing note (or ``None`` when the form is simply still incomplete).
+    The ``form`` always mirrors the raw inputs so the page can repopulate its fields.
     """
     question = _first(values, "q")
     date_from = _first(values, "from")
@@ -471,15 +468,12 @@ def build_recall_page(
         "limit": limit,
         "invalid_groups": invalid_groups,
     }
-    payload: dict[str, object] = {"view": "recall", "form": form, "has_results": False}
 
     if not groups:
-        if invalid_groups:
-            payload["error"] = "检索词分组格式应为 label=词1,词2。"
-        return payload
+        error = "检索词分组格式应为 label=词1,词2。" if invalid_groups else None
+        return None, form, error
     if not date_from or not date_to:
-        payload["error"] = "请填写回溯时间窗的起止日期（北京时间）。"
-        return payload
+        return None, form, "请填写回溯时间窗的起止日期（北京时间）。"
 
     query = RetrievalQuery(
         groups=tuple(groups),
@@ -490,6 +484,36 @@ def build_recall_page(
         limit=limit,
         question=question,
     )
+    return query, form, None
+
+
+def build_recall_page(
+    connection: sqlite3.Connection,
+    values: dict[str, list[str]],
+    *,
+    prompt_version: str,
+    benchmark_ticker: str,
+) -> dict[str, object]:
+    """Build the read-only 主题回溯 page payload from parsed query-string values.
+
+    GET-only and side-effect free: this just parses the confirmed search form,
+    runs the deterministic :func:`retrieve` when groups *and* a window are present,
+    and always echoes the raw inputs back as ``form`` so the page can repopulate the
+    editable fields after navigation. Malformed input degrades to an ``error`` note
+    on the page rather than raising — the user fixes it inline, never sees a 500.
+    Recent archived briefs ride along so the page can list past syntheses.
+    """
+    query, form, error = recall_query_from_values(values)
+    payload: dict[str, object] = {
+        "view": "recall",
+        "form": form,
+        "has_results": False,
+        "briefs": list_recent_topic_briefs(connection),
+    }
+    if query is None:
+        if error:
+            payload["error"] = error
+        return payload
     try:
         result = retrieve(
             connection,
@@ -503,3 +527,99 @@ def build_recall_page(
     payload.update(result)
     payload["has_results"] = True
     return payload
+
+
+def append_topic_brief(
+    connection: sqlite3.Connection,
+    *,
+    query: RetrievalQuery,
+    coverage: object,
+    selection: object,
+    cited_version_ids: tuple[int, ...],
+    brief_text: str,
+    model: str,
+    prompt_version: str,
+    created_at: str,
+) -> int:
+    """Append one synthesized brief immutably, pinning its provenance.
+
+    Stores the confirmed question/groups/window that produced the brief, the
+    coverage/selection denominators *as they stood at synthesis time*, and the exact
+    cited ``version_id`` set — so a brief can later be audited against the evidence it
+    actually rested on, even after the corpus grows or source posts disappear. The
+    window is stored as the normalized UTC bounds the retrieval used.
+    """
+    cursor = connection.execute(
+        """
+        INSERT INTO topic_briefs(
+            question, groups, tickers, date_from, date_to, require_all_groups,
+            coverage, selection, cited_version_ids, brief_text, model,
+            prompt_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            query.question,
+            json.dumps(
+                [{"label": g.label, "terms": list(g.terms)} for g in query.groups if g.terms],
+                ensure_ascii=False,
+            ),
+            json.dumps(list(query.tickers), ensure_ascii=False),
+            parse_window_bound(query.date_from),
+            parse_window_bound(query.date_to, end_of_day=True),
+            1 if query.require_all_groups else 0,
+            json.dumps(coverage, ensure_ascii=False, default=str),
+            json.dumps(selection, ensure_ascii=False, default=str),
+            json.dumps(sorted({int(version_id) for version_id in cited_version_ids})),
+            brief_text,
+            model,
+            prompt_version,
+            created_at,
+        ),
+    )
+    brief_id = cursor.lastrowid
+    assert brief_id is not None
+    return int(brief_id)
+
+
+def _topic_brief_row(row: sqlite3.Row) -> dict[str, object]:
+    cited = _json_list_int(row["cited_version_ids"])
+    return {
+        "id": int(row["id"]),
+        "question": row["question"],
+        "groups": json.loads(str(row["groups"])),
+        "tickers": _json_list(row["tickers"]),
+        "date_from": row["date_from"],
+        "date_to": row["date_to"],
+        "require_all_groups": bool(row["require_all_groups"]),
+        "coverage": json.loads(str(row["coverage"])),
+        "selection": json.loads(str(row["selection"])),
+        "cited_version_ids": cited,
+        "cited_count": len(cited),
+        "brief_text": row["brief_text"],
+        "model": row["model"],
+        "prompt_version": row["prompt_version"],
+        "created_at": row["created_at"],
+    }
+
+
+def list_recent_topic_briefs(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 20,
+) -> list[dict[str, object]]:
+    """Most-recent archived briefs first, JSON columns parsed for display."""
+    rows = connection.execute(
+        """
+        SELECT * FROM topic_briefs
+        ORDER BY datetime(created_at) DESC, id DESC
+        LIMIT ?
+        """,
+        (max(1, min(limit, 100)),),
+    ).fetchall()
+    return [_topic_brief_row(row) for row in rows]
+
+
+def _json_list_int(value: object) -> list[int]:
+    if value is None:
+        return []
+    return [int(item) for item in json.loads(str(value))]

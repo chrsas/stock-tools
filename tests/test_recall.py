@@ -10,9 +10,12 @@ from kol_archive.database import connect_database, initialize_database
 from kol_archive.recall import (
     RetrievalQuery,
     TermGroup,
+    append_topic_brief,
     build_recall_page,
+    list_recent_topic_briefs,
     parse_term_group,
     parse_window_bound,
+    recall_query_from_values,
     retrieve,
 )
 
@@ -442,6 +445,127 @@ def test_topic_briefs_table_is_append_only(tmp_path: Path) -> None:
             )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute("DELETE FROM topic_briefs WHERE id = ?", (brief_id,))
+    finally:
+        connection.close()
+
+
+def test_append_and_list_topic_briefs_round_trip(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        query = RetrievalQuery(
+            groups=_event_market(),
+            date_from=WINDOW_FROM,
+            date_to=WINDOW_TO,
+            tickers=("SH601857",),
+            require_all_groups=True,
+            question="美伊冲突油价",
+        )
+        coverage = {"version_count": 3, "author_count": 2, "post_count": 3, "groups": []}
+        selection = {"removed_post_count": 1, "removed_post_ids": [9]}
+        brief_id = append_topic_brief(
+            connection,
+            query=query,
+            coverage=coverage,
+            selection=selection,
+            cited_version_ids=(22, 11, 11),  # unsorted + duplicate
+            brief_text="## 覆盖度\n- 样本少",
+            model="m",
+            prompt_version="brief-v1",
+            created_at="2025-07-01T00:00:00+00:00",
+        )
+        assert brief_id > 0
+
+        [brief] = list_recent_topic_briefs(connection)
+        assert brief["question"] == "美伊冲突油价"
+        assert brief["groups"] == [
+            {"label": "event", "terms": ["美伊", "伊朗", "霍尔木兹"]},
+            {"label": "market", "terms": ["油价", "原油", "布油"]},
+        ]
+        assert brief["tickers"] == ["SH601857"]
+        # Window persisted as normalized UTC bounds (Beijing local → UTC).
+        assert str(brief["date_from"]).startswith("2025-06-09T16:00:00")
+        assert str(brief["date_to"]).startswith("2025-06-30T15:59:59")
+        assert brief["require_all_groups"] is True
+        assert brief["coverage"] == coverage
+        assert brief["selection"] == selection
+        # Cited ids are de-duplicated and sorted on persist.
+        assert brief["cited_version_ids"] == [11, 22]
+        assert brief["cited_count"] == 2
+        assert brief["require_all_groups"] is True
+    finally:
+        connection.close()
+
+
+def test_list_topic_briefs_orders_most_recent_first(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        query = RetrievalQuery(
+            groups=(TermGroup("event", ("伊朗",)),),
+            date_from=WINDOW_FROM,
+            date_to=WINDOW_TO,
+            question="问题",
+        )
+        for created_at in ("2025-07-01T00:00:00+00:00", "2025-07-03T00:00:00+00:00"):
+            append_topic_brief(
+                connection,
+                query=query,
+                coverage={},
+                selection={},
+                cited_version_ids=(),
+                brief_text=created_at,
+                model="m",
+                prompt_version="brief-v1",
+                created_at=created_at,
+            )
+        briefs = list_recent_topic_briefs(connection)
+        assert [brief["created_at"] for brief in briefs] == [
+            "2025-07-03T00:00:00+00:00",
+            "2025-07-01T00:00:00+00:00",
+        ]
+    finally:
+        connection.close()
+
+
+def test_recall_query_from_values_returns_none_when_not_runnable() -> None:
+    query, form, error = recall_query_from_values({"group": ["没有等号"]})
+    assert query is None
+    assert form["invalid_groups"] == ["没有等号"]
+    assert error is not None and "label=词1,词2" in error
+
+    query, _, error = recall_query_from_values({"group": ["event=伊朗"]})
+    assert query is None
+    assert error is not None and "时间窗" in error
+
+    query, _, error = recall_query_from_values(
+        {"group": ["event=伊朗"], "from": [WINDOW_FROM], "to": [WINDOW_TO], "q": ["问题"]}
+    )
+    assert query is not None
+    assert error is None
+    assert query.question == "问题"
+
+
+def test_build_recall_page_lists_recent_briefs(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        append_topic_brief(
+            connection,
+            query=RetrievalQuery(
+                groups=(TermGroup("event", ("伊朗",)),),
+                date_from=WINDOW_FROM,
+                date_to=WINDOW_TO,
+                question="历史问题",
+            ),
+            coverage={},
+            selection={},
+            cited_version_ids=(),
+            brief_text="正文",
+            model="m",
+            prompt_version="brief-v1",
+            created_at="2025-07-01T00:00:00+00:00",
+        )
+        page = _recall_page(connection, {})
+        briefs = cast(list[dict[str, object]], page["briefs"])
+        assert [brief["question"] for brief in briefs] == ["历史问题"]
     finally:
         connection.close()
 

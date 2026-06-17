@@ -92,6 +92,22 @@ def seed_archive(path: Path) -> None:
         """,
         (NOW,),
     )
+    connection.execute(
+        """
+        INSERT INTO topic_briefs(
+            question, groups, tickers, date_from, date_to, require_all_groups,
+            coverage, selection, cited_version_ids, brief_text, model,
+            prompt_version, created_at
+        ) VALUES (
+            'question token=brief-question-secret',
+            '[{"label":"event","terms":["token=brief-keyword-secret"]}]', '[]',
+            '2025-06-10T00:00:00+00:00', '2025-06-30T15:59:59+00:00', 1,
+            '{}', '{}', '[1]', 'brief body cookie=brief-text-secret', 'm',
+            'brief-v1', ?
+        )
+        """,
+        (NOW,),
+    )
     connection.close()
 
 
@@ -193,6 +209,10 @@ def test_export_writes_json_and_csv_with_credential_redaction(tmp_path: Path) ->
     }
     assert payload["relations"]["posts"][0]["raw_meta"] == {"session_token": "[REDACTED]"}
     assert payload["relations"]["watchlist"][0]["note"] == "token=[REDACTED]"
+    brief = payload["relations"]["topic_briefs"][0]
+    assert brief["question"] == "question token=[REDACTED]"
+    assert brief["brief_text"] == "brief body cookie=[REDACTED]"
+    assert brief["groups"] == [{"label": "event", "terms": ["token=[REDACTED]"]}]
     assert "content-secret" in exported_text
     for secret in (
         "cookie-secret",
@@ -206,6 +226,9 @@ def test_export_writes_json_and_csv_with_credential_redaction(tmp_path: Path) ->
         "review-secret",
         "lesson-secret",
         "watchlist-secret",
+        "brief-question-secret",
+        "brief-keyword-secret",
+        "brief-text-secret",
     ):
         assert secret not in exported_text
     assert (result.csv_dir / "posts.csv").is_file()

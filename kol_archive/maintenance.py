@@ -46,11 +46,20 @@ EXPORT_QUERIES = {
     "version_ticker_scans": "SELECT * FROM version_ticker_scans",
     "crowding_events": "SELECT * FROM crowding_events",
     "crowding_event_members": "SELECT * FROM crowding_event_members",
+    "topic_briefs": "SELECT * FROM topic_briefs",
     "version_sightings": "SELECT * FROM version_sightings",
 }
 JSON_COLUMNS = {
     ("posts", "raw_meta"),
     ("post_versions", "raw_payload"),
+    # A brief's JSON columns are parsed and string-sanitized on export. groups holds
+    # the user's keywords; coverage/selection embed group labels/terms too — all run
+    # through the heuristic credential redaction. cited_version_ids/tickers are ids.
+    ("topic_briefs", "groups"),
+    ("topic_briefs", "tickers"),
+    ("topic_briefs", "coverage"),
+    ("topic_briefs", "selection"),
+    ("topic_briefs", "cited_version_ids"),
 }
 # Image source URLs carry a rotating CDN signature in their query string; drop the
 # whole query/fragment on export so a credential-bearing token never leaves the
@@ -67,6 +76,11 @@ RELATION_TEXT_REDACTION_COLUMNS = {
     ("my_decision_reviews", "retro_text"),
     ("my_decision_reviews", "lesson"),
     ("watchlist", "note"),
+    # A brief's free-text question and synthesized body are scrubbed on export like
+    # other user prose (heuristic credential redaction); the cited evidence itself is
+    # exported intact via post_versions.
+    ("topic_briefs", "question"),
+    ("topic_briefs", "brief_text"),
 }
 _SNAPSHOT_NAME_RE = re.compile(r"^kol-(\d{8}T\d{12}Z)(?:-(\d+))?\.sqlite3$")
 _SENSITIVE_KEY_PARTS = (

@@ -1098,6 +1098,92 @@ def test_recall_expand_web_flow_and_guards(
     assert status == 403
 
 
+def test_recall_brief_web_flow_persists_lists_and_guards(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kol_archive.recall_brief import BriefPoint, BriefSection, TopicBrief
+
+    captured: list[dict[str, object]] = []
+
+    def fake_synthesize(
+        settings: object, retrieval: dict[str, object], **kwargs: object
+    ) -> TopicBrief:
+        captured.append(retrieval)
+        hits = cast(list[dict[str, object]], retrieval["hits"])
+        version_id = int(cast(int, hits[0]["version_id"]))
+        sections = (
+            BriefSection("coverage", "覆盖度", (BriefPoint("样本少，不足以代表共识", ()),)),
+            BriefSection(
+                "contemporaneous_judgement", "当时判断", (BriefPoint("看多原油", (version_id,)),)
+            ),
+            BriefSection("later_descriptive_outcome", "后来描述性结果", ()),
+            BriefSection("gaps_and_counterevidence", "缺口与反证", ()),
+        )
+        return TopicBrief(
+            sections=sections,
+            brief_text="## 覆盖度\n- 样本少，不足以代表共识",
+            cited_version_ids=(version_id,),
+        )
+
+    monkeypatch.setattr("kol_archive.web.synthesize_brief", fake_synthesize)
+
+    status, _, content = _request(
+        web_server,
+        "POST",
+        "/recall/brief",
+        {
+            "csrf_token": CSRF_TOKEN,
+            "q": "原始正文主题",
+            "group": "text=原始",
+            "from": "2026-01-01",
+            "to": "2030-12-31",
+        },
+    )
+    assert status == 200
+    payload = json.loads(content)
+    assert payload["ok"] is True
+    assert payload["brief_id"] >= 1
+    assert payload["prompt_version"] == "brief-v1"
+    assert cast(dict[str, int], payload["coverage"])["version_count"] == 1
+    assert [section["title"] for section in payload["sections"]] == [
+        "覆盖度",
+        "当时判断",
+        "后来描述性结果",
+        "缺口与反证",
+    ]
+    assert captured  # synthesis ran on the deterministic retrieval
+
+    # Persisted and listed back on the recall page.
+    page = _get_json(web_server, "/api/home?view=recall")
+    briefs = cast(list[dict[str, object]], page["briefs"])
+    assert [brief["question"] for brief in briefs] == ["原始正文主题"]
+    assert str(briefs[0]["brief_text"]).startswith("## 覆盖度")
+
+    # Token-spending synthesis is POST + CSRF only; GET is rejected as a mutation path.
+    status, _, _ = _request(web_server, "GET", "/recall/brief")
+    assert status == 405
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        "/recall/brief",
+        {"q": "x", "group": "text=原始", "from": "2026-01-01", "to": "2030-12-31"},
+    )
+    assert status == 403  # missing CSRF
+    # A brief needs a traceable question.
+    status, _, _ = _request(
+        web_server,
+        "POST",
+        "/recall/brief",
+        {"csrf_token": CSRF_TOKEN, "group": "text=原始", "from": "2026-01-01", "to": "2030-12-31"},
+    )
+    assert status == 400
+    # No groups → not runnable.
+    status, _, _ = _request(
+        web_server, "POST", "/recall/brief", {"csrf_token": CSRF_TOKEN, "q": "x"}
+    )
+    assert status == 400
+
+
 def test_web_settings_default_to_loopback_and_reject_wildcard_addresses() -> None:
     assert load_web_settings({}) == WebSettings()
     assert load_web_settings(

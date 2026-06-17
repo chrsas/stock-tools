@@ -51,6 +51,9 @@ const recallLimit = ref(200);
 const recallExpanding = ref(false);
 const recallNotes = ref("");
 const recallNotice = ref("");
+const recallBriefGenerating = ref(false);
+const recallBrief = ref<Row | null>(null);
+const recallBriefNotice = ref("");
 let collectStatusTimer: number | undefined;
 let pollingCollectStatus = false;
 let enrichStatusTimer: number | undefined;
@@ -131,7 +134,7 @@ async function expandRecall() {
   }
 }
 
-function submitRecall() {
+function recallParams(): URLSearchParams {
   const params = new URLSearchParams();
   params.set("view", "recall");
   const question = recallQuestion.value.trim();
@@ -146,7 +149,73 @@ function submitRecall() {
   for (const ticker of splitRecallTerms(recallTickers.value)) params.append("ticker", ticker);
   if (recallAnyGroup.value) params.set("any", "1");
   if (recallLimit.value) params.set("limit", String(recallLimit.value));
-  window.location.assign(`/?${params.toString()}`);
+  return params;
+}
+
+function submitRecall() {
+  window.location.assign(`/?${recallParams().toString()}`);
+}
+
+function confirmedRecallParams(): URLSearchParams {
+  // The brief must be synthesized over the *confirmed* query that produced the
+  // displayed results (echoed back as page.form), never the live editable form —
+  // otherwise an unsubmitted edit would archive a brief against conditions the user
+  // isn't looking at, and spend a model call doing it. Rebuilt to byte-match the GET
+  // params submitRecall would send for the same confirmed query.
+  const form = (page.value?.form || {}) as Row;
+  const params = new URLSearchParams();
+  params.set("view", "recall");
+  const question = String(form.question || "").trim();
+  if (question) params.set("q", question);
+  for (const group of (Array.isArray(form.groups) ? form.groups : []) as Row[]) {
+    const label = String(group.label || "").trim();
+    const terms = (Array.isArray(group.terms) ? group.terms : [])
+      .map((term: unknown) => String(term).trim())
+      .filter(Boolean);
+    if (label && terms.length) params.append("group", `${label}=${terms.join(",")}`);
+  }
+  if (form.date_from) params.set("from", String(form.date_from));
+  if (form.date_to) params.set("to", String(form.date_to));
+  for (const ticker of (Array.isArray(form.tickers) ? form.tickers : []) as unknown[]) {
+    const value = String(ticker).trim();
+    if (value) params.append("ticker", value);
+  }
+  if (!form.require_all_groups) params.set("any", "1");
+  if (form.limit) params.set("limit", String(form.limit));
+  return params;
+}
+
+function recallFormDiverged(): boolean {
+  // True when the editable form no longer matches the confirmed query behind the
+  // shown results — the user changed terms/window without re-searching.
+  return recallParams().toString() !== confirmedRecallParams().toString();
+}
+
+function recallPostForVersion(versionId: number): number | null {
+  // Cited versions are validated server-side to be within the retrieved hits, so the
+  // current page's hits carry the post_id needed to link a citation to its evidence.
+  const hits = Array.isArray(page.value?.hits) ? (page.value!.hits as Row[]) : [];
+  const hit = hits.find((item) => Number(item.version_id) === Number(versionId));
+  return hit ? Number(hit.post_id) : null;
+}
+
+async function generateRecallBrief() {
+  if (!page.value || recallBriefGenerating.value || busy.value) return;
+  const params = confirmedRecallParams();
+  if (!params.get("q")) { error.value = "请先填写主题问题并检索，简报需要可追溯的标题。"; return; }
+  recallBriefGenerating.value = true;
+  error.value = "";
+  recallBriefNotice.value = "";
+  try {
+    const result = await mutate("/recall/brief", page.value.csrf_token, params);
+    recallBrief.value = result;
+    recallBriefNotice.value = "已生成简报并归档（append-only，不可改写）。";
+    await refresh();
+  } catch (reason) {
+    error.value = friendlyRequestError(reason);
+  } finally {
+    recallBriefGenerating.value = false;
+  }
 }
 
 async function runCollection() {
@@ -863,6 +932,30 @@ onBeforeUnmount(() => {
               <span v-for="g in page.coverage.groups" :key="g.label">{{ g.label }} {{ g.version_count }}</span>
             </div>
             <p v-if="page.selection.removed_post_count" class="muted small">检索只覆盖现存归档，删帖会让画面偏“干净”；上方中性列出曾被移除的帖子数，便于折扣解读，不做归因。</p>
+            <div class="actions">
+              <button :disabled="recallBriefGenerating || busy" @click="generateRecallBrief">{{ recallBriefGenerating ? "合成简报中…" : "在当前结果上生成简报" }}</button>
+              <span class="muted small">简报会调用模型，按当前显示结果的已确认条件合成，固定四块、每条带 version_id 引用，并连同当时的覆盖度/选择性一起归档（不可改写）。</span>
+            </div>
+            <p v-if="recallFormDiverged()" class="muted small">上方检索条件已修改但尚未重新检索；简报仍按当前显示的结果生成。如需对修改后的条件生成，请先点「检索」。</p>
+            <p v-if="recallBriefNotice" class="notice">{{ recallBriefNotice }}</p>
+            <section v-if="recallBrief" class="panel recall-brief">
+              <div class="stream-label"><span class="eyebrow">本次简报 · {{ recallBrief.prompt_version }} · 引用 {{ (recallBrief.cited_version_ids || []).length }} 个版本</span></div>
+              <div v-for="section in recallBrief.sections" :key="section.key" class="recall-brief-block">
+                <h3>{{ section.title }}</h3>
+                <p v-if="!section.points.length" class="muted small">（本次未生成该部分内容）</p>
+                <ul>
+                  <li v-for="(point, index) in section.points" :key="index">
+                    {{ point.text }}
+                    <span v-if="point.version_ids.length" class="brief-cites">
+                      <template v-for="vid in point.version_ids" :key="vid">
+                        <a v-if="recallPostForVersion(vid)" :href="`/posts/${recallPostForVersion(vid)}`" class="brief-cite">v{{ vid }}</a>
+                        <span v-else class="brief-cite">v{{ vid }}</span>
+                      </template>
+                    </span>
+                  </li>
+                </ul>
+              </div>
+            </section>
             <section class="stream">
               <article v-for="hit in page.hits" :key="hit.version_id" class="card">
                 <header>
@@ -877,6 +970,25 @@ onBeforeUnmount(() => {
                 <p><a :href="`/posts/${hit.post_id}`">查看版本证据</a><a v-if="hit.url" :href="hit.url" target="_blank" rel="noopener noreferrer" class="xq-jump"> · 原帖 ↗</a></p>
               </article>
               <p v-if="!page.hits.length" class="empty">该时间窗内未检索到同时命中各分组的发言。可放宽时间窗、增删检索词，或勾选「组间改为 OR」。</p>
+            </section>
+          </template>
+
+          <template v-if="page.briefs?.length">
+            <div class="stream-label"><span class="eyebrow">历史简报 {{ page.briefs.length }}</span></div>
+            <section class="stream">
+              <article v-for="brief in page.briefs" :key="brief.id" class="card">
+                <header>
+                  <h2>{{ brief.question }}</h2>
+                  <span class="pill">{{ brief.prompt_version }}</span>
+                </header>
+                <p class="muted">生成 {{ fmtTime(brief.created_at) }} · 窗 {{ fmtTime(brief.date_from) }} 至 {{ fmtTime(brief.date_to) }} · 组间 {{ brief.require_all_groups ? "AND" : "OR" }} · 引用 {{ brief.cited_count }} 个版本</p>
+                <p class="muted small">
+                  <span v-for="g in brief.groups" :key="g.label" class="pill">{{ g.label }}：{{ (g.terms || []).join("/") }}</span>
+                  <span v-if="brief.coverage">· 命中版本 {{ brief.coverage.version_count }} · 博主 {{ brief.coverage.author_count }} · 帖子 {{ brief.coverage.post_count }}</span>
+                  <span v-if="brief.selection?.removed_post_count">· 曾被移除 {{ brief.selection.removed_post_count }} 帖</span>
+                </p>
+                <pre>{{ brief.brief_text }}</pre>
+              </article>
             </section>
           </template>
         </template>

@@ -112,6 +112,7 @@ llm:
   enrich_prompt_version: enrich-v2   # 输出契约或判断逻辑变化必须升版本
   claim_prompt_version: claim-v1     # 可证伪命题提取契约版本
   expand_prompt_version: expand-v1   # 主题回溯「扩词」prompt 版本（仅产出可改检索词+建议窗）
+  brief_prompt_version: brief-v1     # 主题回溯「简报合成」prompt 版本（固定四块、每条带 version_id 引用）
   # 图片 VLM 描述（enrich-images，推断产物，不进证据正文）：
   vision_model: ""             # 留空则复用上面的 model；建议填多模态模型 id
   vision_prompt_version: vision-v1   # 按版本隔离 image_enrichments
