@@ -33,6 +33,12 @@ from kol_archive.presentation import version_descriptive_market_snapshots
 # in +08:00 and converted to UTC for storage-aligned comparison.
 LOCAL_TZ_OFFSET_HOURS = 8
 
+# Recall returns a window's worth of hits, not a timeline page, so it carries its
+# own larger default/ceiling than the home timeline limit. The ceiling caps detail
+# rows only — coverage/selection always aggregate the full match set.
+RECALL_DEFAULT_LIMIT = 200
+RECALL_MAX_LIMIT = 500
+
 
 @dataclass(frozen=True)
 class TermGroup:
@@ -40,6 +46,22 @@ class TermGroup:
 
     label: str
     terms: tuple[str, ...]
+
+
+def parse_term_group(value: str) -> TermGroup:
+    """Parse a ``label=词1,词2`` string into a :class:`TermGroup`.
+
+    Shared by the CLI and the web recall form so both accept exactly the same
+    syntax. Raises ``ValueError`` on a missing label, missing ``=``, or no terms.
+    """
+    label, separator, terms = value.partition("=")
+    label = label.strip()
+    if not label or not separator:
+        raise ValueError(f"分组必须写成 'label=词1,词2'（收到：{value!r}）")
+    parsed = tuple(term.strip() for term in terms.split(",") if term.strip())
+    if not parsed:
+        raise ValueError(f"分组 '{label}' 未提供检索词")
+    return TermGroup(label=label, terms=parsed)
 
 
 @dataclass(frozen=True)
@@ -385,3 +407,99 @@ def _json_list(value: object) -> list[str]:
         return []
     parsed = json.loads(str(value))
     return [str(item) for item in parsed if item is not None]
+
+
+def _first(values: dict[str, list[str]], key: str) -> str:
+    items = values.get(key) or []
+    return items[0].strip() if items else ""
+
+
+def _split_tickers(values: dict[str, list[str]]) -> tuple[str, ...]:
+    tickers: list[str] = []
+    for raw in values.get("ticker") or []:
+        for part in raw.split(","):
+            ticker = part.strip().upper()
+            if ticker and ticker not in tickers:
+                tickers.append(ticker)
+    return tuple(tickers)
+
+
+def build_recall_page(
+    connection: sqlite3.Connection,
+    values: dict[str, list[str]],
+    *,
+    prompt_version: str,
+    benchmark_ticker: str,
+) -> dict[str, object]:
+    """Build the read-only 主题回溯 page payload from parsed query-string values.
+
+    GET-only and side-effect free: this just parses the confirmed search form,
+    runs the deterministic :func:`retrieve` when groups *and* a window are present,
+    and always echoes the raw inputs back as ``form`` so the page can repopulate the
+    editable fields after navigation. Malformed input degrades to an ``error`` note
+    on the page rather than raising — the user fixes it inline, never sees a 500.
+    """
+    question = _first(values, "q")
+    date_from = _first(values, "from")
+    date_to = _first(values, "to")
+    require_all_groups = _first(values, "any") != "1"
+    tickers = _split_tickers(values)
+
+    groups: list[TermGroup] = []
+    invalid_groups: list[str] = []
+    for raw in values.get("group") or []:
+        if not raw.strip():
+            continue
+        try:
+            groups.append(parse_term_group(raw))
+        except ValueError:
+            invalid_groups.append(raw.strip())
+
+    try:
+        limit = int(_first(values, "limit") or RECALL_DEFAULT_LIMIT)
+    except ValueError:
+        limit = RECALL_DEFAULT_LIMIT
+    limit = max(1, min(limit, RECALL_MAX_LIMIT))
+
+    form: dict[str, object] = {
+        "question": question,
+        "groups": [{"label": group.label, "terms": list(group.terms)} for group in groups],
+        "tickers": list(tickers),
+        "date_from": date_from,
+        "date_to": date_to,
+        "require_all_groups": require_all_groups,
+        "limit": limit,
+        "invalid_groups": invalid_groups,
+    }
+    payload: dict[str, object] = {"view": "recall", "form": form, "has_results": False}
+
+    if not groups:
+        if invalid_groups:
+            payload["error"] = "检索词分组格式应为 label=词1,词2。"
+        return payload
+    if not date_from or not date_to:
+        payload["error"] = "请填写回溯时间窗的起止日期（北京时间）。"
+        return payload
+
+    query = RetrievalQuery(
+        groups=tuple(groups),
+        date_from=date_from,
+        date_to=date_to,
+        tickers=tickers,
+        require_all_groups=require_all_groups,
+        limit=limit,
+        question=question,
+    )
+    try:
+        result = retrieve(
+            connection,
+            query,
+            prompt_version=prompt_version,
+            benchmark_ticker=benchmark_ticker,
+        )
+    except ValueError as error:
+        payload["error"] = str(error)
+        return payload
+    payload.update(result)
+    payload["has_results"] = True
+    return payload

@@ -41,6 +41,16 @@ const automationSettings = ref<Row>({
 const automationNotice = ref("");
 const addAuthorNotice = ref("");
 const theme = ref(localStorage.getItem("kol-theme") || "system");
+const recallQuestion = ref("");
+const recallGroups = ref<{ label: string; terms: string }[]>([]);
+const recallFrom = ref("");
+const recallTo = ref("");
+const recallTickers = ref("");
+const recallAnyGroup = ref(false);
+const recallLimit = ref(200);
+const recallExpanding = ref(false);
+const recallNotes = ref("");
+const recallNotice = ref("");
 let collectStatusTimer: number | undefined;
 let pollingCollectStatus = false;
 let enrichStatusTimer: number | undefined;
@@ -60,9 +70,83 @@ function applyTheme() {
 async function refresh() {
   busy.value = true;
   error.value = "";
-  try { page.value = await loadPage(); }
+  try { page.value = await loadPage(); syncRecallForm(); }
   catch (reason) { error.value = String(reason); }
   finally { busy.value = false; }
+}
+
+function syncRecallForm() {
+  if (page.value?.view !== "recall") return;
+  const form = (page.value.form || {}) as Row;
+  recallQuestion.value = String(form.question || "");
+  recallGroups.value = mapRecallGroups(form.groups);
+  recallFrom.value = String(form.date_from || "");
+  recallTo.value = String(form.date_to || "");
+  recallTickers.value = (Array.isArray(form.tickers) ? form.tickers : []).join(", ");
+  recallAnyGroup.value = !form.require_all_groups;
+  recallLimit.value = Number(form.limit || 200);
+}
+
+function mapRecallGroups(groups: unknown): { label: string; terms: string }[] {
+  if (!Array.isArray(groups)) return [];
+  return groups.map((group: Row) => ({
+    label: String(group.label || ""),
+    terms: (Array.isArray(group.terms) ? group.terms : []).join(", "),
+  }));
+}
+
+function addRecallGroup() {
+  recallGroups.value.push({ label: "", terms: "" });
+}
+
+function removeRecallGroup(index: number) {
+  recallGroups.value.splice(index, 1);
+}
+
+function splitRecallTerms(value: string): string[] {
+  return value.split(/[,，、]/).map((item) => item.trim()).filter(Boolean);
+}
+
+async function expandRecall() {
+  if (!page.value || recallExpanding.value || busy.value) return;
+  const question = recallQuestion.value.trim();
+  if (!question) { error.value = "请先输入主题问题。"; return; }
+  recallExpanding.value = true;
+  error.value = "";
+  recallNotice.value = "";
+  try {
+    const result = await mutate("/recall/expand", page.value.csrf_token, { question });
+    const groups = mapRecallGroups(result.groups);
+    if (groups.length) recallGroups.value = groups;
+    if (result.date_from) recallFrom.value = String(result.date_from);
+    if (result.date_to) recallTo.value = String(result.date_to);
+    const tickers = Array.isArray(result.tickers) ? result.tickers : [];
+    if (tickers.length) recallTickers.value = tickers.join(", ");
+    recallNotes.value = String(result.notes || "");
+    recallNotice.value = "已生成建议检索词，请确认或修改后再检索（确定性检索不会再调用模型）。";
+  } catch (reason) {
+    error.value = friendlyRequestError(reason);
+  } finally {
+    recallExpanding.value = false;
+  }
+}
+
+function submitRecall() {
+  const params = new URLSearchParams();
+  params.set("view", "recall");
+  const question = recallQuestion.value.trim();
+  if (question) params.set("q", question);
+  for (const group of recallGroups.value) {
+    const label = group.label.trim();
+    const terms = splitRecallTerms(group.terms);
+    if (label && terms.length) params.append("group", `${label}=${terms.join(",")}`);
+  }
+  if (recallFrom.value) params.set("from", recallFrom.value);
+  if (recallTo.value) params.set("to", recallTo.value);
+  for (const ticker of splitRecallTerms(recallTickers.value)) params.append("ticker", ticker);
+  if (recallAnyGroup.value) params.set("any", "1");
+  if (recallLimit.value) params.set("limit", String(recallLimit.value));
+  window.location.assign(`/?${params.toString()}`);
 }
 
 async function runCollection() {
@@ -381,6 +465,7 @@ onBeforeUnmount(() => {
         <li><a class="nav-item" :class="{ on: navActive('watchlist') }" href="/?view=watchlist"><svg viewBox="0 0 24 24" class="ico"><path d="M12 3v18M3 12h18" /><circle cx="12" cy="12" r="8" /></svg>关注列表</a></li>
         <li><a class="nav-item" :class="{ on: navActive('analysis') }" href="/?view=analysis"><svg viewBox="0 0 24 24" class="ico"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" /></svg>统计分析</a></li>
         <li><a class="nav-item" :class="{ on: navActive('frameworks') }" href="/?view=frameworks"><svg viewBox="0 0 24 24" class="ico"><path d="M4 4h7v7H4z" /><path d="M13 4h7v7h-7z" /><path d="M4 13h7v7H4z" /><path d="M13 13h7v7h-7z" /></svg>框架库</a></li>
+        <li><a class="nav-item" :class="{ on: navActive('recall') }" href="/?view=recall"><svg viewBox="0 0 24 24" class="ico"><circle cx="11" cy="11" r="7" /><path d="M11 8v3l2 2M21 21l-4-4" /></svg>主题回溯</a></li>
       </ul>
       <div class="sidebar-foot">
         <span class="eyebrow">prompt 版本</span>
@@ -733,6 +818,67 @@ onBeforeUnmount(() => {
             </article>
             <p v-if="!page.items.length" class="empty">暂无已抽取的分析框架。先运行 extract-frameworks。</p>
           </section>
+        </template>
+
+        <template v-else-if="page?.view === 'recall'">
+          <div class="page-title"><div><h1>主题回溯</h1><p class="sub">按事件 + 时间窗回溯当时发言。确定性检索：纯证据、零幻觉、不调用模型，可逐条核对。</p></div></div>
+          <section class="panel">
+            <label>主题问题<input v-model="recallQuestion" placeholder="如：美伊冲突那阵子大家怎么看油价" @keyup.enter="submitRecall"></label>
+            <div class="actions">
+              <button class="secondary" :disabled="recallExpanding || busy" @click="expandRecall">{{ recallExpanding ? "扩词中…" : "扩词建议" }}</button>
+              <span class="muted small">扩词会调用模型，仅给出可改的检索词与建议时间窗，不生成结论、不下判断。</span>
+            </div>
+            <p v-if="recallNotice" class="notice">{{ recallNotice }}</p>
+            <p v-if="recallNotes" class="muted small">模型说明：{{ recallNotes }}</p>
+            <div class="stream-label"><span class="eyebrow">检索词分组（组内 OR、组间默认 AND）</span></div>
+            <div v-for="(group, index) in recallGroups" :key="index" class="recall-group">
+              <input v-model="group.label" placeholder="维度名 如 event">
+              <input v-model="group.terms" placeholder="同义词，逗号分隔 如 美伊,伊朗,霍尔木兹">
+              <button class="secondary" @click="removeRecallGroup(index)">删除</button>
+            </div>
+            <div class="actions"><button class="secondary" @click="addRecallGroup">+ 添加分组</button></div>
+            <div class="recall-window">
+              <label>起始日期<input v-model="recallFrom" type="date"></label>
+              <label>结束日期<input v-model="recallTo" type="date"></label>
+              <label>标的过滤（可选，逗号分隔）<input v-model="recallTickers" placeholder="SH601857"></label>
+              <label>最多命中<input v-model.number="recallLimit" type="number" min="1" max="500"></label>
+            </div>
+            <label class="toggle-row"><input v-model="recallAnyGroup" type="checkbox"><span>组间改为 OR（放宽召回；默认 AND 提高精度）</span></label>
+            <div class="actions"><button :disabled="busy" @click="submitRecall">检索</button></div>
+          </section>
+
+          <p v-if="page.form?.invalid_groups?.length" class="error">无法解析的分组：{{ page.form.invalid_groups.join(" · ") }}（应写成 label=词1,词2）。</p>
+          <p v-if="page.error" class="error">{{ page.error }}</p>
+
+          <template v-if="page.has_results">
+            <div class="toolbar">
+              <span>命中版本 {{ page.coverage.version_count }}</span>
+              <span>博主 {{ page.coverage.author_count }}</span>
+              <span>帖子 {{ page.coverage.post_count }}</span>
+              <span>组间 {{ page.coverage.require_all_groups ? "AND" : "OR" }}</span>
+              <span v-if="page.selection.removed_post_count">来源页曾明确已移除 {{ page.selection.removed_post_count }} 帖</span>
+            </div>
+            <div v-if="page.coverage.groups?.length" class="toolbar">
+              <span class="muted small">各组窗内命中：</span>
+              <span v-for="g in page.coverage.groups" :key="g.label">{{ g.label }} {{ g.version_count }}</span>
+            </div>
+            <p v-if="page.selection.removed_post_count" class="muted small">检索只覆盖现存归档，删帖会让画面偏“干净”；上方中性列出曾被移除的帖子数，便于折扣解读，不做归因。</p>
+            <section class="stream">
+              <article v-for="hit in page.hits" :key="hit.version_id" class="card">
+                <header>
+                  <h2>{{ hit.author_display_name || hit.author_platform_uid }}</h2>
+                  <span class="pill">{{ hit.removed ? "来源页曾明确已移除" : hit.source_state }}</span>
+                </header>
+                <p class="muted">发言时间 {{ fmtTime(hit.viewpoint_at) }} · 版本 {{ hit.version_id }}</p>
+                <p v-if="hit.stance_summary"><b>立场摘要：</b>{{ hit.stance_summary }}</p>
+                <pre>{{ hit.content_text }}</pre>
+                <p v-if="hit.framework_topics?.length"><b>框架主题：</b><span v-for="topic in hit.framework_topics" :key="topic" class="pill">{{ topic }}</span></p>
+                <div v-if="hit.market_snapshot" class="market-row"><strong>描述性市场变化</strong><span>标的 {{ percent(hit.market_snapshot.raw_return) }} · 超额 {{ percent(hit.market_snapshot.excess_return) }}</span></div>
+                <p><a :href="`/posts/${hit.post_id}`">查看版本证据</a><a v-if="hit.url" :href="hit.url" target="_blank" rel="noopener noreferrer" class="xq-jump"> · 原帖 ↗</a></p>
+              </article>
+              <p v-if="!page.hits.length" class="empty">该时间窗内未检索到同时命中各分组的发言。可放宽时间窗、增删检索词，或勾选「组间改为 OR」。</p>
+            </section>
+          </template>
         </template>
 
         <template v-else-if="page?.view === 'author'">

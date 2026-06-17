@@ -4,8 +4,17 @@ import sqlite3
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from kol_archive.database import connect_database, initialize_database
-from kol_archive.recall import RetrievalQuery, TermGroup, parse_window_bound, retrieve
+from kol_archive.recall import (
+    RetrievalQuery,
+    TermGroup,
+    build_recall_page,
+    parse_term_group,
+    parse_window_bound,
+    retrieve,
+)
 
 
 def _lastrowid(cursor: sqlite3.Cursor) -> int:
@@ -297,6 +306,142 @@ def test_coverage_and_selection_ignore_limit(tmp_path: Path) -> None:
         selection = cast(dict[str, object], result["selection"])
         assert selection["removed_post_count"] == 2
         assert len(cast(list[int], selection["removed_post_ids"])) == 2
+    finally:
+        connection.close()
+
+
+def _recall_page(connection: sqlite3.Connection, values: dict[str, list[str]]) -> dict[str, object]:
+    return build_recall_page(
+        connection, values, prompt_version="enrich-v2", benchmark_ticker="SH000300"
+    )
+
+
+def test_parse_term_group_and_errors() -> None:
+    assert parse_term_group("market=油价, 原油 ,") == TermGroup("market", ("油价", "原油"))
+    with pytest.raises(ValueError, match="label=词1,词2"):
+        parse_term_group("油价,原油")  # missing label=
+    with pytest.raises(ValueError, match="未提供检索词"):
+        parse_term_group("market=")
+
+
+def test_build_recall_page_runs_retrieval_and_echoes_form(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        _post(connection, "a", "伊朗局势紧张，油价可能冲高", "2025-06-15T01:00:00+00:00")
+        _post(connection, "b", "夏季出行旺季，油价季节性走强", "2025-06-16T01:00:00+00:00")
+
+        page = _recall_page(
+            connection,
+            {
+                "q": ["美伊冲突油价"],
+                "group": ["event=美伊,伊朗,霍尔木兹", "market=油价,原油,布油"],
+                "from": [WINDOW_FROM],
+                "to": [WINDOW_TO],
+            },
+        )
+
+        assert page["view"] == "recall"
+        assert page["has_results"] is True
+        hits = cast(list[dict[str, object]], page["hits"])
+        assert [hit["author_platform_uid"] for hit in hits] == ["a"]
+        form = cast(dict[str, object], page["form"])
+        assert form["question"] == "美伊冲突油价"
+        assert form["date_from"] == WINDOW_FROM
+        assert form["require_all_groups"] is True
+        assert form["groups"] == [
+            {"label": "event", "terms": ["美伊", "伊朗", "霍尔木兹"]},
+            {"label": "market", "terms": ["油价", "原油", "布油"]},
+        ]
+    finally:
+        connection.close()
+
+
+def test_build_recall_page_without_groups_returns_form_only(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        page = _recall_page(connection, {"q": ["还没填检索词"]})
+        assert page["has_results"] is False
+        assert "error" not in page
+        assert cast(dict[str, object], page["form"])["groups"] == []
+    finally:
+        connection.close()
+
+
+def test_build_recall_page_requires_window_when_groups_present(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        page = _recall_page(connection, {"group": ["event=伊朗"], "from": [WINDOW_FROM]})
+        assert page["has_results"] is False
+        assert "时间窗" in str(page["error"])
+    finally:
+        connection.close()
+
+
+def test_build_recall_page_flags_invalid_groups(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        page = _recall_page(connection, {"group": ["没有等号"]})
+        assert page["has_results"] is False
+        form = cast(dict[str, object], page["form"])
+        assert form["invalid_groups"] == ["没有等号"]
+        assert "label=词1,词2" in str(page["error"])
+    finally:
+        connection.close()
+
+
+def test_build_recall_page_any_group_and_ticker_params(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        _post(connection, "a", "伊朗局势紧张", "2025-06-15T01:00:00+00:00")
+        _post(connection, "b", "油价季节性走强", "2025-06-16T01:00:00+00:00")
+
+        page = _recall_page(
+            connection,
+            {
+                "group": ["event=伊朗", "market=油价"],
+                "from": [WINDOW_FROM],
+                "to": [WINDOW_TO],
+                "any": ["1"],
+                "ticker": ["sh601857, sh000300"],
+                "limit": ["5"],
+            },
+        )
+
+        assert page["has_results"] is True
+        coverage = cast(dict[str, object], page["coverage"])
+        assert coverage["require_all_groups"] is False
+        form = cast(dict[str, object], page["form"])
+        assert form["require_all_groups"] is False
+        assert form["tickers"] == ["SH601857", "SH000300"]
+        assert form["limit"] == 5
+    finally:
+        connection.close()
+
+
+def test_topic_briefs_table_is_append_only(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO topic_briefs(
+                question, groups, tickers, date_from, date_to, require_all_groups,
+                coverage, selection, cited_version_ids, brief_text, model,
+                prompt_version, created_at
+            ) VALUES (
+                '美伊冲突油价', '[{"label":"event","terms":["伊朗"]}]', '[]',
+                '2025-06-10T00:00:00+00:00', '2025-06-30T15:59:59+00:00', 1,
+                '{}', '{}', '[1]', '简报正文', 'm', 'brief-v1', '2025-07-01T00:00:00+00:00'
+            )
+            """
+        )
+        row = connection.execute("SELECT id FROM topic_briefs").fetchone()
+        brief_id = int(row["id"])
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE topic_briefs SET brief_text = '改写' WHERE id = ?", (brief_id,)
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM topic_briefs WHERE id = ?", (brief_id,))
     finally:
         connection.close()
 

@@ -45,6 +45,8 @@ from kol_archive.presentation import (
     list_pinned_versions,
     list_timeline,
 )
+from kol_archive.recall import build_recall_page
+from kol_archive.recall_expand import expand_query, load_expand_settings
 from kol_archive.rewrite import load_rewrite_settings, request_rewrite
 from kol_archive.service import Archive
 from kol_archive.watchlist import add_watchlist_ticker, list_watchlist, remove_watchlist_ticker
@@ -463,6 +465,13 @@ def _home_payload(
                 limit=limit,
             ),
         }
+    if view == "recall":
+        return build_recall_page(
+            connection,
+            values,
+            prompt_version=prompt_version,
+            benchmark_ticker=benchmark_ticker,
+        )
     if view == "analysis":
         return {
             "view": "analysis",
@@ -643,6 +652,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/automation/settings":
                 self._update_automation_settings(form)
+                return
+            if path == "/recall/expand":
+                self._expand_recall_query(form)
                 return
             author_uid = self._author_action_uid(path, suffix="/enrich")
             if author_uid is not None:
@@ -920,6 +932,18 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 _schedule_next_collection(settings)
         _save_automation_settings(self.server)
         self._send_json(HTTPStatus.OK, {"ok": True, **self._automation_settings_payload()})
+
+    def _expand_recall_query(self, form: dict[str, list[str]]) -> None:
+        # 扩词是主题回溯里唯一花费 token 的步骤，且只产出可改的检索词/建议窗，
+        # 不生成结论、不落库。把它放在 POST + CSRF 之后；确定性检索仍走只读 GET。
+        question = self._required_form_value(form, "question")
+        config = load_config(self.server.config_dir)
+        settings = load_expand_settings(config)
+        expansion = expand_query(settings, question)
+        self._send_json(
+            HTTPStatus.OK,
+            {"ok": True, "prompt_version": settings.prompt_version, **expansion.to_payload()},
+        )
 
     def _add_watchlist_ticker(self, form: dict[str, list[str]]) -> None:
         ticker = self._required_form_value(form, "ticker")
@@ -1307,6 +1331,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             or path.startswith("/accounts/")
             or path.startswith("/collect/")
             or path.startswith("/automation/")
+            or path.startswith("/recall/")
             or path.startswith("/authors/")
         ):
             return True

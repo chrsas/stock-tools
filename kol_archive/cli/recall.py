@@ -2,8 +2,11 @@
 
 Phase 11. ``recall --no-llm`` is the free, hallucination-free base: it runs the
 pure-SQL grouped retrieval and prints the matching versions with coverage and
-selection counts. LLM query-expansion and brief synthesis are layered on later;
-this command stands alone so recall quality can be verified without a model.
+selection counts — no model, no prose. ``recall-expand`` is the separate,
+token-spending helper that turns a natural-language question into *editable*
+keyword groups + a suggested window; its output is printed for the user to review
+and feed back into ``recall --group``. Keeping expansion in its own command
+preserves ``recall``'s zero-token, auditable guarantee.
 """
 
 from __future__ import annotations
@@ -12,7 +15,8 @@ import argparse
 from pathlib import Path
 
 from kol_archive.config import load_config
-from kol_archive.recall import RetrievalQuery, TermGroup, retrieve
+from kol_archive.recall import RetrievalQuery, TermGroup, parse_term_group, retrieve
+from kol_archive.recall_expand import expand_query, load_expand_settings
 
 from .common import (
     configured_db_path,
@@ -24,14 +28,10 @@ from .common import (
 
 
 def _parse_group(value: str) -> TermGroup:
-    label, _, terms = value.partition("=")
-    label = label.strip()
-    if not label or not _:
-        raise argparse.ArgumentTypeError(f"--group must be 'label=词1,词2' (got: {value!r})")
-    parsed = tuple(term.strip() for term in terms.split(",") if term.strip())
-    if not parsed:
-        raise argparse.ArgumentTypeError(f"--group '{label}' has no terms")
-    return TermGroup(label=label, terms=parsed)
+    try:
+        return parse_term_group(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def _split_tickers(values: list[str] | None) -> tuple[str, ...]:
@@ -44,11 +44,12 @@ def _split_tickers(values: list[str] | None) -> tuple[str, ...]:
 def _recall_command(args: argparse.Namespace) -> None:
     config = load_config(args.config_dir)
     if not args.group:
-        # LLM query-expansion (turning a bare question into groups) lands in the
-        # next step; until then a deterministic run needs explicit groups.
+        # Deterministic recall needs explicit groups by design (no model in the
+        # loop). Use `recall-expand "<问题>"` to get suggested groups to paste here.
         raise SystemExit(
-            "本步骤需显式分组检索词:请用 --group event=美伊,伊朗 --group market=油价,原油"
-            "（扩词功能将在下一步加入）。"
+            "本命令为确定性检索，需显式分组检索词，如 "
+            "--group event=美伊,伊朗 --group market=油价,原油。"
+            '可先运行 recall-expand "<问题>" 获取建议分组词与时间窗。'
         )
     query = RetrievalQuery(
         groups=tuple(args.group),
@@ -73,6 +74,19 @@ def _recall_command(args: argparse.Namespace) -> None:
         )
     finally:
         connection.close()
+
+
+def _recall_expand_command(args: argparse.Namespace) -> None:
+    config = load_config(args.config_dir)
+    settings = load_expand_settings(config)
+    expansion = expand_query(settings, args.question, today=args.today)
+    print_json(
+        {
+            "question": args.question,
+            "prompt_version": settings.prompt_version,
+            **expansion.to_payload(),
+        }
+    )
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -111,3 +125,14 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     recall_parser.add_argument("--path", type=Path)
     recall_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     recall_parser.set_defaults(handler=_recall_command)
+
+    expand_parser = subparsers.add_parser(
+        "recall-expand",
+        help="把一个中文问题扩成可改的分组检索词 + 建议时间窗（调用 LLM，仅产出检索辅助）",
+    )
+    expand_parser.add_argument("question", help="自然语言主题问题，如「美伊冲突那阵怎么看油价」")
+    expand_parser.add_argument(
+        "--today", help="锚定时间窗推断的「今天」（北京时间 YYYY-MM-DD，默认当天）"
+    )
+    expand_parser.add_argument("--config-dir", type=Path, default=Path("config"))
+    expand_parser.set_defaults(handler=_recall_expand_command)

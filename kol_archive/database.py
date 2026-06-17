@@ -16,7 +16,7 @@ EVIDENCE_TABLES = (
     "post_events",
     "post_images",
 )
-DERIVED_APPEND_ONLY_TABLES = ("crowding_events", "crowding_event_members")
+DERIVED_APPEND_ONLY_TABLES = ("crowding_events", "crowding_event_members", "topic_briefs")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS authors (
@@ -400,6 +400,31 @@ CREATE TABLE IF NOT EXISTS framework_extraction_scans (
     UNIQUE(version_id, prompt_version)
 );
 
+-- Append-only record of a synthesized topic-recall brief (主题回溯 简报合成).
+-- A brief is the only token-spending, prose-generating step of recall, so every
+-- run is archived immutably with full provenance: the confirmed keyword groups and
+-- window that produced it, the coverage/selection denominators *as they stood at
+-- synthesis time*, and the exact version_ids cited. That lets a later reader audit
+-- a brief against the evidence it actually rested on — even after the corpus grows
+-- or source posts disappear. The retrieval base (recall.py) writes nothing here;
+-- only an explicit synthesis action appends a row.
+CREATE TABLE IF NOT EXISTS topic_briefs (
+    id INTEGER PRIMARY KEY,
+    question TEXT NOT NULL CHECK(length(trim(question)) > 0),
+    groups TEXT NOT NULL CHECK(json_valid(groups)),
+    tickers TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(tickers)),
+    date_from TEXT NOT NULL,
+    date_to TEXT NOT NULL,
+    require_all_groups INTEGER NOT NULL CHECK(require_all_groups IN (0, 1)),
+    coverage TEXT NOT NULL CHECK(json_valid(coverage)),
+    selection TEXT NOT NULL CHECK(json_valid(selection)),
+    cited_version_ids TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(cited_version_ids)),
+    brief_text TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 -- Append-only evidence: one row per image-fetch attempt for a version. A
 -- re-download of the same normalized_url appends a new row (never updates), so a
 -- byte swap behind an unchanged URL stays visible as a second row with a
@@ -722,6 +747,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         ON framework_extractions(prompt_version, topic, id);
         CREATE INDEX IF NOT EXISTS idx_framework_scans_version
         ON framework_extraction_scans(version_id, prompt_version);
+        CREATE INDEX IF NOT EXISTS idx_topic_briefs_recent
+        ON topic_briefs(created_at DESC, id DESC);
         """
     )
     _create_index_if_columns(

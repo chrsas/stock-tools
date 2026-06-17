@@ -1030,6 +1030,74 @@ def test_author_viewpoint_shows_recorded_market_relationship(
     assert summary["evaluated_viewpoint_count"] == 1
 
 
+def test_recall_view_returns_form_without_groups(web_server: ArchiveHttpServer) -> None:
+    payload = _get_json(web_server, "/api/home?view=recall")
+    assert payload["view"] == "recall"
+    assert payload["has_results"] is False
+    assert cast(dict[str, object], payload["form"])["groups"] == []
+    assert payload["csrf_token"] == CSRF_TOKEN
+
+
+def test_recall_view_runs_deterministic_retrieval(web_server: ArchiveHttpServer) -> None:
+    # The seeded post ("原始正文 A") falls inside a wide window regardless of run date.
+    query = urlencode(
+        {"view": "recall", "group": "text=原始", "from": "2026-01-01", "to": "2030-12-31"}
+    )
+    payload = _get_json(web_server, f"/api/home?view=recall&{query}")
+    assert payload["has_results"] is True
+    coverage = cast(dict[str, int], payload["coverage"])
+    assert coverage["version_count"] == 1
+    [hit] = cast(list[dict[str, object]], payload["hits"])
+    assert hit["author_platform_uid"] == "100"
+    assert hit["content_text"] == "原始正文 A"
+
+
+def test_recall_expand_web_flow_and_guards(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kol_archive.recall_expand import ExpandedGroup, ExpandedQuery
+
+    captured: list[str] = []
+
+    def fake_expand(settings: object, question: str, **kwargs: object) -> ExpandedQuery:
+        captured.append(question)
+        return ExpandedQuery(
+            groups=(
+                ExpandedGroup("event", ("美伊", "伊朗")),
+                ExpandedGroup("market", ("油价", "原油")),
+            ),
+            date_from="2025-06-10",
+            date_to="2025-06-30",
+            tickers=("SH601857",),
+            notes="拆成事件与标的两组",
+        )
+
+    monkeypatch.setattr("kol_archive.web.expand_query", fake_expand)
+    status, _, content = _request(
+        web_server,
+        "POST",
+        "/recall/expand",
+        {"csrf_token": CSRF_TOKEN, "question": "美伊冲突那阵油价怎么看"},
+    )
+    assert status == 200
+    payload = json.loads(content)
+    assert payload["ok"] is True
+    assert payload["prompt_version"] == "expand-v1"
+    assert payload["groups"] == [
+        {"label": "event", "terms": ["美伊", "伊朗"]},
+        {"label": "market", "terms": ["油价", "原油"]},
+    ]
+    assert payload["date_from"] == "2025-06-10"
+    assert payload["tickers"] == ["SH601857"]
+    assert captured == ["美伊冲突那阵油价怎么看"]
+
+    # Token-spending expansion is POST + CSRF only; GET is rejected as a mutation path.
+    status, _, _ = _request(web_server, "GET", "/recall/expand")
+    assert status == 405
+    status, _, _ = _request(web_server, "POST", "/recall/expand", {"question": "x"})
+    assert status == 403
+
+
 def test_web_settings_default_to_loopback_and_reject_wildcard_addresses() -> None:
     assert load_web_settings({}) == WebSettings()
     assert load_web_settings(
