@@ -93,11 +93,17 @@ class BriefPoint:
     cited versions (a single day, or ``earliest~latest`` when they span several) — so
     a retrospective claim like "5月中旬减仓" is auditable against the actual timeline,
     not just a list of ids. Empty when the point cites no version.
+
+    ``authors`` are the de-sensitized display names behind the cited versions, used by
+    the live panel to group the 当时判断 block per author so each person's timeline reads
+    as one continuous thread. It is *not* folded into ``brief_text`` (the persisted prose
+    already names authors where the model chose to), so it never double-prefixes names.
     """
 
     text: str
     version_ids: tuple[int, ...]
     date_label: str = ""
+    authors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -126,6 +132,7 @@ class TopicBrief:
                             "text": point.text,
                             "version_ids": list(point.version_ids),
                             "date_label": point.date_label,
+                            "authors": list(point.authors),
                         }
                         for point in section.points
                     ],
@@ -235,8 +242,28 @@ def _date_label(version_ids: tuple[int, ...], version_dates: dict[int, str]) -> 
     return dates[0] if len(dates) == 1 else f"{dates[0]}~{dates[-1]}"
 
 
+def _point_authors(
+    version_ids: tuple[int, ...], version_authors: dict[int, str]
+) -> tuple[str, ...]:
+    """The distinct display names behind the cited versions, in first-seen order.
+
+    Used only to group the live 当时判断 panel per author; versions with no recorded
+    author are skipped. Order is stable (first citation wins) so grouping is deterministic.
+    """
+    seen: list[str] = []
+    for version_id in version_ids:
+        author = version_authors.get(version_id)
+        if author and author not in seen:
+            seen.append(author)
+    return tuple(seen)
+
+
 def _clean_points(
-    value: object, *, allowed_ids: set[int], version_dates: dict[int, str]
+    value: object,
+    *,
+    allowed_ids: set[int],
+    version_dates: dict[int, str],
+    version_authors: dict[int, str],
 ) -> list[BriefPoint]:
     if isinstance(value, list):
         items: list[object] = value
@@ -260,6 +287,7 @@ def _clean_points(
                 text=text,
                 version_ids=version_ids,
                 date_label=_date_label(version_ids, version_dates),
+                authors=_point_authors(version_ids, version_authors),
             )
         )
         if len(points) >= MAX_POINTS_PER_BLOCK:
@@ -297,7 +325,11 @@ def _json_content(value: object) -> str:
 
 
 def _parse_brief(
-    payload: dict[str, Any], *, allowed_ids: set[int], version_dates: dict[int, str]
+    payload: dict[str, Any],
+    *,
+    allowed_ids: set[int],
+    version_dates: dict[int, str],
+    version_authors: dict[int, str],
 ) -> TopicBrief:
     try:
         content = payload["choices"][0]["message"]["content"]
@@ -313,7 +345,10 @@ def _parse_brief(
     cited: set[int] = set()
     for key, title in BLOCKS:
         points = _clean_points(
-            parsed.get(key), allowed_ids=allowed_ids, version_dates=version_dates
+            parsed.get(key),
+            allowed_ids=allowed_ids,
+            version_dates=version_dates,
+            version_authors=version_authors,
         )
         for point in points:
             cited.update(point.version_ids)
@@ -348,6 +383,13 @@ def synthesize_brief(
     version_dates = {
         int(cast(int, hit["version_id"])): str(hit.get("viewpoint_at") or "")[:10] for hit in hits
     }
+    # De-sensitized display name per version, so the live panel can group 当时判断 per author.
+    version_authors = {
+        int(cast(int, hit["version_id"])): str(
+            hit.get("author_display_name") or hit.get("author_platform_uid") or ""
+        ).strip()
+        for hit in hits
+    }
     digest = json.dumps(_build_digest(retrieval), ensure_ascii=False, default=str)
     owned_client = client is None
     active_client = client or httpx.Client(timeout=60.0)
@@ -363,6 +405,7 @@ def synthesize_brief(
                 active_client,
                 allowed_ids=allowed_ids,
                 version_dates=version_dates,
+                version_authors=version_authors,
             )
         except ValueError:
             messages.append({"role": "user", "content": RETRY_PROMPT})
@@ -372,6 +415,7 @@ def synthesize_brief(
                 active_client,
                 allowed_ids=allowed_ids,
                 version_dates=version_dates,
+                version_authors=version_authors,
             )
     finally:
         if owned_client:
@@ -385,6 +429,7 @@ def _request_and_parse(
     *,
     allowed_ids: set[int],
     version_dates: dict[int, str],
+    version_authors: dict[int, str],
 ) -> TopicBrief:
     response = client.post(
         f"{settings.base_url}/chat/completions",
@@ -400,5 +445,8 @@ def _request_and_parse(
     if not isinstance(payload, dict):
         raise ValueError("LLM response body must be a JSON object")
     return _parse_brief(
-        cast(dict[str, Any], payload), allowed_ids=allowed_ids, version_dates=version_dates
+        cast(dict[str, Any], payload),
+        allowed_ids=allowed_ids,
+        version_dates=version_dates,
+        version_authors=version_authors,
     )

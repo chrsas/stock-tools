@@ -14,6 +14,7 @@ import { authorName, fmtTime, percent, postTitle, xueqiuUrl } from "./format";
 import AuthorBadge from "./components/AuthorBadge.vue";
 import PostLinks from "./components/PostLinks.vue";
 import QueueCard from "./components/QueueCard.vue";
+import RecallBriefPoint from "./components/RecallBriefPoint.vue";
 import TimelineCard from "./components/TimelineCard.vue";
 import ViewpointCluster from "./components/ViewpointCluster.vue";
 
@@ -204,12 +205,48 @@ function recallFormDiverged(): boolean {
   return recallParams().toString() !== confirmedRecallParams().toString();
 }
 
-function recallPostForVersion(versionId: number): number | null {
-  // Cited versions are validated server-side to be within the retrieved hits, so the
-  // current page's hits carry the post_id needed to link a citation to its evidence.
-  const hits = Array.isArray(page.value?.hits) ? (page.value!.hits as Row[]) : [];
-  const hit = hits.find((item) => Number(item.version_id) === Number(versionId));
-  return hit ? Number(hit.post_id) : null;
+// Coverage points that honestly flag a thin / concentrated sample are the governance
+// signal the reader should see first, so we lift them out of the bullet list into a
+// callout (see recallSplitCoverage). Keyword set tracks the phrasing the brief system
+// prompt mandates ("样本少，不足以代表共识") plus common honesty hedges.
+const RECALL_WARNING_RE =
+  /样本(少|偏少|不足|有限)|不足以代表|不能代表|代表性不足|来源(集中|单一|有限)|集中(于|在)|高估|偏“?干净”?|谨慎(解读|对待)|盲区|幸存/;
+
+function recallIsWarning(point: Row): boolean {
+  return RECALL_WARNING_RE.test(String(point.text || ""));
+}
+
+function recallSplitCoverage(points: Row[]): { warnings: Row[]; rest: Row[] } {
+  const warnings: Row[] = [];
+  const rest: Row[] = [];
+  for (const point of points) (recallIsWarning(point) ? warnings : rest).push(point);
+  return { warnings, rest };
+}
+
+function recallJudgementGroups(points: Row[]): { key: string; author: string; points: Row[] }[] {
+  // Group the 当时判断 block per author so each person's timeline reads as one continuous
+  // thread (看多→减仓→抄底) instead of points scattered across authors. A point that rests
+  // on exactly one author joins that author's group; anything spanning authors (or none)
+  // falls into a shared 多位作者 group. Within a group, points sort by date ascending.
+  const groups = new Map<string, { author: string; points: Row[] }>();
+  const order: string[] = [];
+  for (const point of points) {
+    const authors = Array.isArray(point.authors) ? (point.authors as string[]) : [];
+    const single = authors.length === 1 && Boolean(authors[0]);
+    const key = single ? `a:${authors[0]}` : "multi";
+    const author = single ? String(authors[0]) : "多位作者";
+    if (!groups.has(key)) {
+      groups.set(key, { author, points: [] });
+      order.push(key);
+    }
+    groups.get(key)!.points.push(point);
+  }
+  for (const group of groups.values()) {
+    group.points.sort((a, b) =>
+      String(a.date_label || "").localeCompare(String(b.date_label || "")),
+    );
+  }
+  return order.map((key) => ({ key, ...groups.get(key)! }));
 }
 
 async function generateRecallBrief() {
@@ -953,20 +990,30 @@ onBeforeUnmount(() => {
             <p v-if="recallBriefNotice" class="notice">{{ recallBriefNotice }}</p>
             <section v-if="recallBrief" class="panel recall-brief">
               <div class="stream-label"><span class="eyebrow">本次简报 · {{ recallBrief.prompt_version }} · 引用 {{ (recallBrief.cited_version_ids || []).length }} 个版本</span></div>
-              <div v-for="section in recallBrief.sections" :key="section.key" class="recall-brief-block">
-                <h3>{{ section.title }}</h3>
+              <div v-for="section in recallBrief.sections" :key="section.key" class="recall-brief-block" :data-block="section.key">
+                <div class="recall-brief-head"><span class="eyebrow">{{ section.title }}</span></div>
                 <p v-if="!section.points.length" class="muted small">（本次未生成该部分内容）</p>
-                <ul>
-                  <li v-for="(point, index) in section.points" :key="index">
-                    {{ point.text }}
-                    <span v-if="point.version_ids.length" class="brief-cites">
-                      <span v-if="point.date_label" class="brief-date muted">{{ point.date_label }}</span>
-                      <template v-for="vid in point.version_ids" :key="vid">
-                        <a v-if="recallPostForVersion(vid)" :href="`/posts/${recallPostForVersion(vid)}`" class="brief-cite">v{{ vid }}</a>
-                        <span v-else class="brief-cite">v{{ vid }}</span>
-                      </template>
-                    </span>
-                  </li>
+
+                <!-- 覆盖度：把样本少/来源集中这类诚实提示提为醒目 note（仍保留引用链），普通统计走列表 -->
+                <template v-if="section.key === 'coverage'">
+                  <RecallBriefPoint v-for="(point, index) in recallSplitCoverage(section.points).warnings" :key="`w${index}`" :point="point" :hits="page.hits" variant="warn" />
+                  <ul v-if="recallSplitCoverage(section.points).rest.length">
+                    <RecallBriefPoint v-for="(point, index) in recallSplitCoverage(section.points).rest" :key="index" :point="point" :hits="page.hits" />
+                  </ul>
+                </template>
+
+                <!-- 当时判断：按作者分组，让每个人的时间线连续可读 -->
+                <template v-else-if="section.key === 'contemporaneous_judgement'">
+                  <div v-for="group in recallJudgementGroups(section.points)" :key="group.key" class="brief-author-group">
+                    <h4 class="brief-author">{{ group.author }}</h4>
+                    <ul>
+                      <RecallBriefPoint v-for="(point, index) in group.points" :key="index" :point="point" :hits="page.hits" />
+                    </ul>
+                  </div>
+                </template>
+
+                <ul v-else>
+                  <RecallBriefPoint v-for="(point, index) in section.points" :key="index" :point="point" :hits="page.hits" />
                 </ul>
               </div>
             </section>

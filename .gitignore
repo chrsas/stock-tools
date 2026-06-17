@@ -112,6 +112,11 @@ $RECYCLE.BIN/
 !.vscode/launch.json
 !.vscode/extensions.json
 
+### Claude Code
+# Local harness config: launch.json holds machine-specific preview commands/ports
+# and settings.local.json holds personal settings — neither is team-shared.
+.claude/
+
 # Local History for Visual Studio Code
 .history/
 

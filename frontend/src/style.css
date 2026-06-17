@@ -252,13 +252,36 @@ form, label { display: grid; gap: .5rem; margin: 1rem 0; }
 .recall-group input { margin: 0; }
 .recall-window { display: flex; gap: 1rem; flex-wrap: wrap; align-items: end; }
 .recall-window label { margin: .5rem 0; }
-.recall-brief-block { margin: .6rem 0; }
-.recall-brief-block h3 { margin: .4rem 0 .2rem; }
-.recall-brief-block ul { margin: .2rem 0; padding-left: 1.2rem; }
-.recall-brief-block li { margin: .25rem 0; }
-.brief-cites { margin-left: .35rem; display: inline-flex; gap: .3rem; flex-wrap: wrap; align-items: baseline; }
-.brief-cite { font-size: .82em; }
-.brief-date { font-size: .8em; white-space: nowrap; }
+/* four blocks each get a colored left rail + eyebrow header, so 覆盖度/当时判断/
+   后来描述性结果/缺口与反证 are scannable at a glance. */
+.recall-brief-block { margin: .9rem 0; padding-left: .85rem; border-left: 2.5px solid var(--line); }
+.recall-brief-block[data-block="coverage"] { border-left-color: var(--gold); }
+.recall-brief-block[data-block="contemporaneous_judgement"] { border-left-color: var(--accent); }
+.recall-brief-block[data-block="later_descriptive_outcome"] { border-left-color: var(--c-reason); }
+.recall-brief-block[data-block="gaps_and_counterevidence"] { border-left-color: var(--up); }
+.recall-brief-head { margin: 0 0 .35rem; }
+.recall-brief-block ul { margin: .2rem 0; padding-left: 1.1rem; }
+.brief-point { margin: .32rem 0; }
+.brief-text { line-height: 1.7; }
+
+/* sample-thinness warnings: the governance signal, lifted into a gold note bar.
+   Stacks text over its (still-present) citation chain so the warning stays traceable. */
+.brief-warn { display: flex; flex-direction: column; align-items: flex-start; gap: .25rem;
+  margin: .45rem 0; padding: .55rem .75rem; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--gold) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--gold) 38%, transparent);
+  color: var(--ink); font-size: .9rem; line-height: 1.62; }
+
+/* 当时判断 grouped per author, so each person's timeline reads as one thread. */
+.brief-author-group { margin: .3rem 0 .55rem; }
+.brief-author { margin: .5rem 0 .1rem; font-size: .86rem; font-weight: 650; color: var(--ink); }
+
+/* citation chain folds away: summary keeps the date; v-ids appear muted on expand. */
+.brief-cites { margin: .15rem 0 0; }
+.brief-cites > summary { font-size: .78rem; font-weight: 550; }
+.brief-date { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.brief-cite-list { display: inline-flex; gap: .45rem; flex-wrap: wrap; margin: .25rem 0 0 1.05rem; }
+.brief-cite { font-size: .82em; color: var(--ink-3); }
+a.brief-cite { color: var(--accent); }
 @media (max-width: 760px) { .recall-group { grid-template-columns: 1fr; } }
 textarea, input, select { padding: .7rem; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface-2); }
 textarea { min-height: 6rem; }

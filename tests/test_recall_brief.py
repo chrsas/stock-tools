@@ -127,10 +127,16 @@ def test_synthesize_brief_builds_four_blocks_and_citations() -> None:
     assert "样本少" in brief.brief_text
     judgement = next(s for s in brief.sections if s.key == "contemporaneous_judgement")
     assert judgement.points[0].date_label == "2025-06-15"
+    # Each point carries the de-sensitized authors behind its cited versions, so the live
+    # panel can group 当时判断 per author without re-prefixing names in brief_text.
+    assert judgement.points[0].authors == ("作者甲",)
+    assert judgement.points[1].authors == ("作者乙",)
+    assert "作者甲" not in brief.brief_text  # authors stay out of the persisted prose
     payload_out = brief.to_payload()
     assert payload_out["cited_version_ids"] == [11, 22]
     sections_out = cast(list[dict[str, Any]], payload_out["sections"])
     assert sections_out[1]["points"][0]["date_label"] == "2025-06-15"
+    assert sections_out[1]["points"][0]["authors"] == ["作者甲"]
 
 
 def test_synthesize_brief_drops_hallucinated_version_ids() -> None:
