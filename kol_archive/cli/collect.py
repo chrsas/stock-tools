@@ -21,6 +21,7 @@ from kol_archive.browser import (
     DEFAULT_PROFILE_DIR,
     BrowserError,
     create_xueqiu_browser_client,
+    ensure_dedicated_browser,
     start_dedicated_browser,
 )
 from kol_archive.collector import CollectorSettings, XueqiuCollector, create_xueqiu_client
@@ -137,7 +138,18 @@ def _build_collector_client(config: dict[str, Any]) -> Any:
     if bool(browser.get("enabled", True)):
         cdp_url = str(browser.get("cdp_url") or DEFAULT_CDP_URL)
         landing_url = str(browser.get("landing_url") or DEFAULT_LANDING_URL)
-        LOGGER.info("data path=browser cdp_url=%s", cdp_url)
+        profile_dir = Path(str(browser.get("profile_dir") or DEFAULT_PROFILE_DIR))
+        edge_path = str(browser.get("edge_path") or "") or None
+        # Fold the old separate `login` step into collection: if the dedicated browser
+        # isn't already running, launch it from the persistent profile and wait for CDP.
+        # Trust cookies live in the profile, so a relaunch is usually already logged in.
+        already_running = ensure_dedicated_browser(
+            profile_dir=profile_dir,
+            cdp_url=cdp_url,
+            landing_url=landing_url,
+            edge_path=edge_path,
+        )
+        LOGGER.info("data path=browser cdp_url=%s auto_launched=%s", cdp_url, not already_running)
         return create_xueqiu_browser_client(cdp_url, landing_url=landing_url)
     cookie, cookie_source = resolve_cookie(config)
     LOGGER.info("data path=httpx credential source=%s present=%s", cookie_source, bool(cookie))

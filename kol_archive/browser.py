@@ -20,6 +20,7 @@ on transport failure), so the collector and its offline tests stay untouched.
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlparse
@@ -108,6 +109,11 @@ def start_dedicated_browser(
 ) -> subprocess.Popen[Any]:
     """Launch the real browser as its own process with a persistent profile + CDP port."""
     executable = find_browser_executable(edge_path)
+    # Edge resolves a relative --user-data-dir against an unpredictable working directory
+    # (the serve process's cwd, not the repo root). When it lands on a path that isn't a
+    # valid distinct profile, Edge silently hands the URL off to the user's already-running
+    # Edge and exits — no dedicated process, no debug port. An absolute path is the fix.
+    profile_dir = profile_dir.resolve()
     profile_dir.mkdir(parents=True, exist_ok=True)
     args = [
         str(executable),
@@ -120,6 +126,58 @@ def start_dedicated_browser(
         args.append("--start-minimized")
     args.append(url)
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def is_cdp_reachable(cdp_url: str, *, timeout_seconds: float = 1.0) -> bool:
+    """Return True if the dedicated browser's CDP debug endpoint answers.
+
+    A lightweight ``/json/version`` GET is enough to tell "browser process is up" from
+    "nothing is listening", without paying for a full Playwright CDP attach.
+    """
+    version_url = cdp_url.rstrip("/") + "/json/version"
+    try:
+        response = httpx.get(version_url, timeout=timeout_seconds)
+    except httpx.HTTPError:
+        return False
+    return response.status_code == 200
+
+
+def ensure_dedicated_browser(
+    *,
+    profile_dir: Path,
+    cdp_url: str,
+    landing_url: str,
+    edge_path: str | None = None,
+    minimized: bool = False,
+    startup_timeout_seconds: float = 20.0,
+    poll_interval_seconds: float = 0.5,
+) -> bool:
+    """Make sure the dedicated browser is running; launch it from the persistent profile if not.
+
+    Returns ``True`` if the browser was already up, ``False`` if it had to be launched.
+    Because trust cookies live in ``profile_dir``, a relaunch usually comes back already
+    authenticated, so callers can proceed straight to collecting. Raises ``BrowserError``
+    if the CDP port never becomes reachable within ``startup_timeout_seconds`` (e.g. the
+    window is stuck on a slider / security prompt the user must clear by hand).
+    """
+    if is_cdp_reachable(cdp_url):
+        return True
+    start_dedicated_browser(
+        profile_dir=profile_dir,
+        cdp_url=cdp_url,
+        url=landing_url,
+        edge_path=edge_path,
+        minimized=minimized,
+    )
+    deadline = time.monotonic() + startup_timeout_seconds
+    while time.monotonic() < deadline:
+        if is_cdp_reachable(cdp_url):
+            return False
+        time.sleep(poll_interval_seconds)
+    raise BrowserError(
+        "已尝试自动启动专用雪球浏览器，但调试端口在超时内仍未就绪。"
+        "请查看弹出的窗口是否卡在滑块或安全提示上，手动处理后重试。"
+    )
 
 
 def body_looks_like_challenge(body: str) -> bool:

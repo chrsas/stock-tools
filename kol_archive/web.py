@@ -843,8 +843,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 )
                 failure_response = (
                     HTTPStatus.SERVICE_UNAVAILABLE,
-                    "采集失败：专用雪球浏览器未就绪。"
-                    "请先运行 login 并完成登录/滑块，再保持窗口开着重试。",
+                    "采集失败：已自动尝试启动专用雪球浏览器但未能就绪。"
+                    "请看刚弹出的 Edge 窗口是否卡在滑块/登录，处理完后再点一次采集。",
                 )
         except Exception:
             self._set_collection_status(
