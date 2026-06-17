@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import {
   friendlyRequestError,
   loadAutomationSettings,
@@ -248,6 +248,58 @@ function recallJudgementGroups(points: Row[]): { key: string; author: string; po
   }
   return order.map((key) => ({ key, ...groups.get(key)! }));
 }
+
+// History briefs persist only brief_text — the deterministic markdown render of the
+// sections (_render_brief_text). Reconstruct the same block structure from it so an
+// archived brief reads with the same clarity as a freshly generated one (section heads,
+// lifted sample warnings, collapsible citation chains) instead of a raw <pre> dump.
+// Authors are intentionally not folded into brief_text, so the 当时判断 block reads here as
+// a flat timeline (no per-author grouping) and citations show v-ids without post links —
+// the live panel still owns the fully-linked, author-grouped view.
+const RECALL_BLOCK_KEYS: Record<string, string> = {
+  覆盖度: "coverage",
+  当时判断: "contemporaneous_judgement",
+  后来描述性结果: "later_descriptive_outcome",
+  缺口与反证: "gaps_and_counterevidence",
+};
+
+function parseBriefPoint(body: string): Row {
+  const cite = body.match(/〔([^〕]*)〕\s*$/);
+  if (!cite) return { text: body, date_label: "", version_ids: [] } as unknown as Row;
+  const inner = cite[1];
+  const versionIds = [...inner.matchAll(/v(\d+)/g)].map((match) => Number(match[1]));
+  const sep = inner.indexOf(" · ");
+  const dateLabel = sep >= 0 ? inner.slice(0, sep).trim() : "";
+  return {
+    text: body.slice(0, cite.index).trim(),
+    date_label: dateLabel,
+    version_ids: versionIds,
+  } as unknown as Row;
+}
+
+function parseBriefSections(briefText: string): { key: string; title: string; points: Row[] }[] {
+  const sections: { key: string; title: string; points: Row[] }[] = [];
+  let current: { key: string; title: string; points: Row[] } | null = null;
+  for (const raw of String(briefText || "").split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("## ")) {
+      const title = line.slice(3).trim();
+      current = { key: RECALL_BLOCK_KEYS[title] || title, title, points: [] };
+      sections.push(current);
+    } else if (current && line.startsWith("- ")) {
+      const body = line.slice(2).trim();
+      if (body !== "（本次未生成该部分内容）") current.points.push(parseBriefPoint(body));
+    }
+  }
+  return sections.filter((section) => section.points.length);
+}
+
+const historyBriefViews = computed<Row[]>(() =>
+  (((page.value?.briefs as Row[]) ?? []) as Row[]).map((brief): Row => ({
+    ...brief,
+    sections: parseBriefSections(String(brief.brief_text || "")),
+  })),
+);
 
 async function generateRecallBrief() {
   if (!page.value || recallBriefGenerating.value || busy.value) return;
@@ -1034,10 +1086,10 @@ onBeforeUnmount(() => {
             </section>
           </template>
 
-          <template v-if="page.briefs?.length">
-            <div class="stream-label"><span class="eyebrow">历史简报 {{ page.briefs.length }}</span></div>
+          <template v-if="historyBriefViews.length">
+            <div class="stream-label"><span class="eyebrow">历史简报 {{ historyBriefViews.length }}</span></div>
             <section class="stream">
-              <article v-for="brief in page.briefs" :key="brief.id" class="card">
+              <article v-for="brief in historyBriefViews" :key="brief.id" class="card recall-brief">
                 <header>
                   <h2>{{ brief.question }}</h2>
                   <span class="pill">{{ brief.prompt_version }}</span>
@@ -1048,7 +1100,21 @@ onBeforeUnmount(() => {
                   <span v-if="brief.coverage">· 命中版本 {{ brief.coverage.version_count }} · 博主 {{ brief.coverage.author_count }} · 帖子 {{ brief.coverage.post_count }}</span>
                   <span v-if="brief.selection?.removed_post_count">· 曾被移除 {{ brief.selection.removed_post_count }} 帖</span>
                 </p>
-                <pre>{{ brief.brief_text }}</pre>
+                <template v-if="brief.sections.length">
+                  <div v-for="section in brief.sections" :key="section.key" class="recall-brief-block" :data-block="section.key">
+                    <div class="recall-brief-head"><span class="eyebrow">{{ section.title }}</span></div>
+                    <template v-if="section.key === 'coverage'">
+                      <RecallBriefPoint v-for="(point, index) in recallSplitCoverage(section.points).warnings" :key="`w${index}`" :point="point" variant="warn" />
+                      <ul v-if="recallSplitCoverage(section.points).rest.length">
+                        <RecallBriefPoint v-for="(point, index) in recallSplitCoverage(section.points).rest" :key="index" :point="point" />
+                      </ul>
+                    </template>
+                    <ul v-else>
+                      <RecallBriefPoint v-for="(point, index) in section.points" :key="index" :point="point" />
+                    </ul>
+                  </div>
+                </template>
+                <pre v-else>{{ brief.brief_text }}</pre>
               </article>
             </section>
           </template>
