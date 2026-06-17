@@ -121,10 +121,16 @@ def test_synthesize_brief_builds_four_blocks_and_citations() -> None:
     ]
     assert brief.cited_version_ids == (11, 22)
     assert "## 覆盖度" in brief.brief_text
-    assert "〔v11〕" in brief.brief_text
+    # Each cited point carries the post date of its versions (anchored to "当时").
+    assert "〔2025-06-15 · v11〕" in brief.brief_text
+    assert "〔2025-06-18 · v22〕" in brief.brief_text
     assert "样本少" in brief.brief_text
+    judgement = next(s for s in brief.sections if s.key == "contemporaneous_judgement")
+    assert judgement.points[0].date_label == "2025-06-15"
     payload_out = brief.to_payload()
     assert payload_out["cited_version_ids"] == [11, 22]
+    sections_out = cast(list[dict[str, Any]], payload_out["sections"])
+    assert sections_out[1]["points"][0]["date_label"] == "2025-06-15"
 
 
 def test_synthesize_brief_drops_hallucinated_version_ids() -> None:

@@ -960,6 +960,7 @@ onBeforeUnmount(() => {
                   <li v-for="(point, index) in section.points" :key="index">
                     {{ point.text }}
                     <span v-if="point.version_ids.length" class="brief-cites">
+                      <span v-if="point.date_label" class="brief-date muted">{{ point.date_label }}</span>
                       <template v-for="vid in point.version_ids" :key="vid">
                         <a v-if="recallPostForVersion(vid)" :href="`/posts/${recallPostForVersion(vid)}`" class="brief-cite">v{{ vid }}</a>
                         <span v-else class="brief-cite">v{{ vid }}</span>

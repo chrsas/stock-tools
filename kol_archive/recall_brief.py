@@ -87,10 +87,17 @@ class BriefSettings:
 
 @dataclass(frozen=True)
 class BriefPoint:
-    """One synthesized point plus the retrieved versions it rests on."""
+    """One synthesized point plus the retrieved versions it rests on.
+
+    ``date_label`` anchors the point to *when* it was said — the post date of the
+    cited versions (a single day, or ``earliest~latest`` when they span several) — so
+    a retrospective claim like "5月中旬减仓" is auditable against the actual timeline,
+    not just a list of ids. Empty when the point cites no version.
+    """
 
     text: str
     version_ids: tuple[int, ...]
+    date_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,7 +122,11 @@ class TopicBrief:
                     "key": section.key,
                     "title": section.title,
                     "points": [
-                        {"text": point.text, "version_ids": list(point.version_ids)}
+                        {
+                            "text": point.text,
+                            "version_ids": list(point.version_ids),
+                            "date_label": point.date_label,
+                        }
                         for point in section.points
                     ],
                 }
@@ -212,7 +223,21 @@ def _clean_version_ids(value: object, *, allowed_ids: set[int]) -> tuple[int, ..
     return tuple(seen)
 
 
-def _clean_points(value: object, *, allowed_ids: set[int]) -> list[BriefPoint]:
+def _date_label(version_ids: tuple[int, ...], version_dates: dict[int, str]) -> str:
+    """The post-date span of the cited versions: one day, or ``earliest~latest``.
+
+    Dates are ``YYYY-MM-DD`` strings, so lexical sort is chronological. Versions with
+    no recorded date are skipped; an empty result means no date could be attached.
+    """
+    dates = sorted({version_dates[v] for v in version_ids if version_dates.get(v)})
+    if not dates:
+        return ""
+    return dates[0] if len(dates) == 1 else f"{dates[0]}~{dates[-1]}"
+
+
+def _clean_points(
+    value: object, *, allowed_ids: set[int], version_dates: dict[int, str]
+) -> list[BriefPoint]:
     if isinstance(value, list):
         items: list[object] = value
     elif value:
@@ -229,8 +254,13 @@ def _clean_points(value: object, *, allowed_ids: set[int]) -> list[BriefPoint]:
             raw_ids = None
         if not text:
             continue
+        version_ids = _clean_version_ids(raw_ids, allowed_ids=allowed_ids)
         points.append(
-            BriefPoint(text=text, version_ids=_clean_version_ids(raw_ids, allowed_ids=allowed_ids))
+            BriefPoint(
+                text=text,
+                version_ids=version_ids,
+                date_label=_date_label(version_ids, version_dates),
+            )
         )
         if len(points) >= MAX_POINTS_PER_BLOCK:
             break
@@ -243,11 +273,13 @@ def _render_brief_text(sections: tuple[BriefSection, ...]) -> str:
         lines.append(f"## {section.title}")
         if section.points:
             for point in section.points:
-                citation = (
-                    f"〔{'、'.join(f'v{version_id}' for version_id in point.version_ids)}〕"
-                    if point.version_ids
-                    else ""
-                )
+                if point.version_ids:
+                    ids = "、".join(f"v{version_id}" for version_id in point.version_ids)
+                    citation = (
+                        f"〔{point.date_label} · {ids}〕" if point.date_label else f"〔{ids}〕"
+                    )
+                else:
+                    citation = ""
                 lines.append(f"- {point.text}{citation}")
         else:
             lines.append("- （本次未生成该部分内容）")
@@ -264,7 +296,9 @@ def _json_content(value: object) -> str:
     return content
 
 
-def _parse_brief(payload: dict[str, Any], *, allowed_ids: set[int]) -> TopicBrief:
+def _parse_brief(
+    payload: dict[str, Any], *, allowed_ids: set[int], version_dates: dict[int, str]
+) -> TopicBrief:
     try:
         content = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as error:
@@ -278,7 +312,9 @@ def _parse_brief(payload: dict[str, Any], *, allowed_ids: set[int]) -> TopicBrie
     sections: list[BriefSection] = []
     cited: set[int] = set()
     for key, title in BLOCKS:
-        points = _clean_points(parsed.get(key), allowed_ids=allowed_ids)
+        points = _clean_points(
+            parsed.get(key), allowed_ids=allowed_ids, version_dates=version_dates
+        )
         for point in points:
             cited.update(point.version_ids)
         sections.append(BriefSection(key=key, title=title, points=tuple(points)))
@@ -308,6 +344,10 @@ def synthesize_brief(
     allowed_ids = {int(cast(int, hit["version_id"])) for hit in hits}
     if not allowed_ids:
         raise ValueError("retrieval produced no hits to synthesize a brief from")
+    # Post date per cited version, so every point can be anchored to when it was said.
+    version_dates = {
+        int(cast(int, hit["version_id"])): str(hit.get("viewpoint_at") or "")[:10] for hit in hits
+    }
     digest = json.dumps(_build_digest(retrieval), ensure_ascii=False, default=str)
     owned_client = client is None
     active_client = client or httpx.Client(timeout=60.0)
@@ -317,10 +357,22 @@ def synthesize_brief(
             {"role": "user", "content": digest},
         ]
         try:
-            return _request_and_parse(settings, messages, active_client, allowed_ids=allowed_ids)
+            return _request_and_parse(
+                settings,
+                messages,
+                active_client,
+                allowed_ids=allowed_ids,
+                version_dates=version_dates,
+            )
         except ValueError:
             messages.append({"role": "user", "content": RETRY_PROMPT})
-            return _request_and_parse(settings, messages, active_client, allowed_ids=allowed_ids)
+            return _request_and_parse(
+                settings,
+                messages,
+                active_client,
+                allowed_ids=allowed_ids,
+                version_dates=version_dates,
+            )
     finally:
         if owned_client:
             active_client.close()
@@ -332,6 +384,7 @@ def _request_and_parse(
     client: httpx.Client,
     *,
     allowed_ids: set[int],
+    version_dates: dict[int, str],
 ) -> TopicBrief:
     response = client.post(
         f"{settings.base_url}/chat/completions",
@@ -346,4 +399,6 @@ def _request_and_parse(
     payload = response.json()
     if not isinstance(payload, dict):
         raise ValueError("LLM response body must be a JSON object")
-    return _parse_brief(cast(dict[str, Any], payload), allowed_ids=allowed_ids)
+    return _parse_brief(
+        cast(dict[str, Any], payload), allowed_ids=allowed_ids, version_dates=version_dates
+    )
