@@ -153,7 +153,20 @@ function recallParams(): URLSearchParams {
 }
 
 function submitRecall() {
-  window.location.assign(`/?${recallParams().toString()}`);
+  // Deterministic retrieval is driven by the term groups, not the question alone.
+  // Validate client-side so a missing group/window gives instant feedback instead of
+  // a silent no-op navigation (the backend stays quiet on an empty form by design).
+  const params = recallParams();
+  if (!params.has("group")) {
+    error.value = "请先添加至少一组检索词分组（或点「扩词建议」自动生成）：确定性检索由分组检索词决定，仅有主题问题不会触发检索。";
+    return;
+  }
+  if (!recallFrom.value || !recallTo.value) {
+    error.value = "请填写回溯时间窗的起止日期（北京时间）。";
+    return;
+  }
+  error.value = "";
+  window.location.assign(`/?${params.toString()}`);
 }
 
 function confirmedRecallParams(): URLSearchParams {
