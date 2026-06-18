@@ -18,7 +18,7 @@ from kol_archive.claims import (
     request_claim_proposals,
 )
 from kol_archive.config import load_config
-from kol_archive.enrich import load_enrich_settings, request_enrichment
+from kol_archive.enrich import enrich_targets, load_enrich_settings
 from kol_archive.framework import load_framework_settings, request_framework_extraction
 from kol_archive.market import OUTCOME_METHOD_VERSION
 
@@ -38,15 +38,17 @@ def _enrich_command(args: argparse.Namespace) -> None:
             settings.prompt_version, post_id=args.post_id, limit=args.limit
         )
         enriched = skipped = failed = 0
-        for target in targets:
-            try:
-                result = request_enrichment(settings, target.original_text)
-            except (httpx.HTTPError, ValueError) as error:
+        # LLM calls run concurrently (settings.concurrency); results stream back
+        # in completion order and are persisted here, serially, by this single
+        # thread — the lone SQLite writer stays uncontended.
+        for target, result, error in enrich_targets(settings, targets):
+            if error is not None:
                 # One bad version (LLM/network/parse failure) must not abort the
                 # batch; it stays pending so a later run retries it.
                 failed += 1
                 LOGGER.warning("enrichment failed for version %s: %s", target.version_id, error)
                 continue
+            assert result is not None  # error is None ⟹ result present
             enrichment_id = archive.add_enrichment(
                 target,
                 result,

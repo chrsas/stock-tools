@@ -16,10 +16,16 @@ import pytest
 
 from kol_archive.cli import claims as kol_main
 from kol_archive.database import connect_database, initialize_database
-from kol_archive.enrich import EnrichSettings, load_enrich_settings, request_enrichment
+from kol_archive.enrich import (
+    EnrichSettings,
+    enrich_targets,
+    load_enrich_settings,
+    request_enrichment,
+)
 from kol_archive.models import (
     ContentFidelity,
     EnrichmentResult,
+    EnrichmentTarget,
     FeedRun,
     IngestMode,
     LoginState,
@@ -360,6 +366,109 @@ def test_request_enrichment_restores_original_quote_style_in_snippet() -> None:
     with httpx.Client(transport=_llm_response(payload)) as client:
         result = request_enrichment(_settings(), original, client=client)
     assert result.evidence_snippet == original
+
+
+# ── concurrent batch runner ──────────────────────────────────────────────
+
+
+def _valid_payload() -> dict[str, object]:
+    # All labels false + empty snippet is the minimal contract-valid response.
+    return {
+        "post_type": "观点",
+        "label_first_hand_info": False,
+        "label_transferable_framework": False,
+        "label_reasoned_non_consensus": False,
+        "rationale": "示例依据",
+        "stance_summary": "",
+        "evidence_snippet": "",
+    }
+
+
+def _make_target(n: int) -> EnrichmentTarget:
+    return EnrichmentTarget(post_id=n, version_id=n, original_text=f"原文{n}", raw_payload=None)
+
+
+def test_load_enrich_settings_reads_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEST_LLM_KEY", "secret-key")
+    base = {
+        "provider": "openai_compatible",
+        "base_url": "https://llm.example/v1",
+        "model": "test-model",
+        "api_key_env": "TEST_LLM_KEY",
+    }
+    assert load_enrich_settings({"llm": base}).concurrency == 1
+    assert load_enrich_settings({"llm": {**base, "enrich_concurrency": 6}}).concurrency == 6
+    with pytest.raises(ValueError, match="enrich_concurrency"):
+        load_enrich_settings({"llm": {**base, "enrich_concurrency": 0}})
+
+
+def test_enrich_targets_runs_llm_calls_in_parallel() -> None:
+    # A barrier of N only releases once all N requests are simultaneously in
+    # flight, so it would deadlock (BrokenBarrierError) under a sequential runner.
+    import threading
+
+    targets = [_make_target(n) for n in range(4)]
+    barrier = threading.Barrier(len(targets), timeout=5)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        barrier.wait()
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_valid_payload())}}]},
+        )
+
+    settings = dataclasses.replace(_settings(), concurrency=len(targets))
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        results = list(enrich_targets(settings, targets, client=client))
+
+    assert len(results) == len(targets)
+    assert all(result is not None and error is None for _, result, error in results)
+    assert {target.version_id for target, _, _ in results} == {t.version_id for t in targets}
+
+
+def test_enrich_targets_surfaces_per_target_errors_without_aborting() -> None:
+    targets = [_make_target(n) for n in range(3)]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        text = json.loads(request.content.decode())["messages"][1]["content"]
+        if text == "原文1":
+            return httpx.Response(200, json={"choices": [{"message": {"content": "not json"}}]})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_valid_payload())}}]},
+        )
+
+    settings = dataclasses.replace(_settings(), concurrency=3)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        by_version = {
+            target.version_id: (result, error)
+            for target, result, error in enrich_targets(settings, targets, client=client)
+        }
+
+    assert len(by_version) == 3
+    result_1, error_1 = by_version[1]
+    assert result_1 is None and isinstance(error_1, ValueError)
+    for version_id in (0, 2):
+        result, error = by_version[version_id]
+        assert error is None and result is not None
+
+
+def test_enrich_targets_sequential_preserves_input_order() -> None:
+    targets = [_make_target(n) for n in range(5)]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_valid_payload())}}]},
+        )
+
+    settings = dataclasses.replace(_settings(), concurrency=1)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        order = [
+            target.version_id for target, _, _ in enrich_targets(settings, targets, client=client)
+        ]
+
+    assert order == [t.version_id for t in targets]
 
 
 # ── service: targets + persistence ───────────────────────────────────────
@@ -987,13 +1096,15 @@ def test_enrich_command_labels_pending_versions_and_survives_failures(
 
     calls: list[str] = []
 
-    def fake_request(settings: EnrichSettings, text: str) -> EnrichmentResult:
+    def fake_request(
+        settings: EnrichSettings, text: str, *, client: object = None
+    ) -> EnrichmentResult:
         calls.append(text)
         if text == "B":
             raise httpx.ConnectError("boom")  # one version fails this run
         return make_result(first_hand=True, post_type="研究")
 
-    monkeypatch.setattr(kol_main, "request_enrichment", fake_request)
+    monkeypatch.setattr("kol_archive.enrich.request_enrichment", fake_request)
     stdout = io.StringIO()
     monkeypatch.setattr(sys, "stdout", stdout)
 

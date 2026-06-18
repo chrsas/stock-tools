@@ -31,7 +31,7 @@ from kol_archive.claims import list_claim_proposals
 from kol_archive.config import load_config
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.decisions import list_decisions
-from kol_archive.enrich import load_enrich_settings, request_enrichment
+from kol_archive.enrich import enrich_targets, load_enrich_settings
 from kol_archive.maintenance import redact_text
 from kol_archive.models import EnrichmentTarget, FeedState, WatchMode
 from kol_archive.presentation import (
@@ -1062,24 +1062,19 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 )
                 enriched = failed = 0
                 details: list[dict[str, object]] = []
+                # The LLM calls run concurrently (settings.concurrency); this loop
+                # consumes them in completion order and persists each result here,
+                # in the single request thread, so the lone SQLite writer is never
+                # contended. add_enrichment failures (sqlite3.Error) surface here;
+                # network/parse failures arrive as the third tuple element.
                 with httpx.Client(timeout=30.0) as client:
-                    for index, target in enumerate(targets, start=1):
-                        self._set_enrichment_status(
-                            running=True,
-                            author_uid=author_uid,
-                            phase=f"正在富化 {index}/{len(targets)}",
-                            processed=index - 1,
-                            total=len(targets),
-                            enriched=enriched,
-                            failed=failed,
-                            details=details,
-                        )
+                    for index, (target, result, error) in enumerate(
+                        enrich_targets(settings, targets, client=client), start=1
+                    ):
                         try:
-                            result = request_enrichment(
-                                settings,
-                                target.original_text,
-                                client=client,
-                            )
+                            if error is not None:
+                                raise error
+                            assert result is not None  # error is None ⟹ result present
                             if (
                                 archive.add_enrichment(
                                     target,
@@ -1092,19 +1087,19 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                             ):
                                 enriched += 1
                                 details.append(self._enrichment_detail(target, status="success"))
-                        except (httpx.HTTPError, sqlite3.Error, ValueError) as error:
+                        except (httpx.HTTPError, sqlite3.Error, ValueError) as failure:
                             failed += 1
                             details.append(
                                 self._enrichment_detail(
                                     target,
                                     status="failed",
-                                    error=error,
+                                    error=failure,
                                 )
                             )
                             LOGGER.warning(
                                 "web enrichment failed version_id=%s type=%s",
                                 target.version_id,
-                                type(error).__name__,
+                                type(failure).__name__,
                             )
                         self._set_enrichment_status(
                             running=True,
