@@ -72,13 +72,18 @@ class RetrievalQuery:
     date_from: str
     date_to: str
     tickers: tuple[str, ...] = ()
+    authors: tuple[str, ...] = ()
     require_all_groups: bool = True
     limit: int = 200
     question: str = ""
 
     def validate(self) -> None:
-        if not self.groups or not any(group.terms for group in self.groups):
-            raise ValueError("at least one keyword group with terms is required")
+        # Keyword groups are optional: a window alone (optionally narrowed by
+        # author/ticker) is a valid "那段时间博主们说了啥" query. A group, if given,
+        # must still carry at least one term.
+        for group in self.groups:
+            if not group.terms:
+                raise ValueError("a keyword group must carry at least one term")
         if self.limit < 1:
             raise ValueError("limit must be positive")
         # Surface a malformed window early rather than as an empty result set.
@@ -155,6 +160,18 @@ def _ticker_clause(tickers: tuple[str, ...]) -> tuple[str, list[str]]:
     return clause, [ticker.upper() for ticker in tickers]
 
 
+# Authored-by filter, keyed on the platform uid the user picked. Written as an
+# EXISTS over authors (not a join on alias `a`) so the same clause is valid in the
+# coverage/selection queries, which only join posts — not authors.
+def _author_clause(authors: tuple[str, ...]) -> tuple[str, list[str]]:
+    placeholders = ",".join("?" for _ in authors)
+    clause = (
+        "EXISTS (SELECT 1 FROM authors au"
+        f" WHERE au.id = p.author_id AND au.platform_uid IN ({placeholders}))"
+    )
+    return clause, list(authors)
+
+
 def _where(query: RetrievalQuery) -> tuple[str, list[object]]:
     """Build the shared WHERE: live versions, in window, matching the groups."""
     clauses: list[str] = [
@@ -173,8 +190,13 @@ def _where(query: RetrievalQuery) -> tuple[str, list[object]]:
         clause, group_params = _group_clause(group)
         group_sqls.append(clause)
         params.extend(group_params)
-    joiner = " AND " if query.require_all_groups else " OR "
-    clauses.append("(" + joiner.join(group_sqls) + ")")
+    if group_sqls:
+        joiner = " AND " if query.require_all_groups else " OR "
+        clauses.append("(" + joiner.join(group_sqls) + ")")
+    if query.authors:
+        clause, author_params = _author_clause(query.authors)
+        clauses.append(clause)
+        params.extend(author_params)
     if query.tickers:
         clause, ticker_params = _ticker_clause(query.tickers)
         clauses.append(clause)
@@ -338,6 +360,10 @@ def _count_group_versions(
     group_sql, group_params = _group_clause(group)
     clauses.append(group_sql)
     params.extend(group_params)
+    if query.authors:
+        author_sql, author_params = _author_clause(query.authors)
+        clauses.append(author_sql)
+        params.extend(author_params)
     if query.tickers:
         ticker_sql, ticker_params = _ticker_clause(query.tickers)
         clauses.append(ticker_sql)
@@ -395,6 +421,7 @@ def _query_echo(query: RetrievalQuery) -> dict[str, object]:
         "question": query.question,
         "groups": [{"label": g.label, "terms": list(g.terms)} for g in query.groups if g.terms],
         "tickers": list(query.tickers),
+        "authors": list(query.authors),
         "date_from": parse_window_bound(query.date_from),
         "date_to": parse_window_bound(query.date_to, end_of_day=True),
         "require_all_groups": query.require_all_groups,
@@ -424,6 +451,62 @@ def _split_tickers(values: dict[str, list[str]]) -> tuple[str, ...]:
     return tuple(tickers)
 
 
+def _split_authors(values: dict[str, list[str]]) -> tuple[str, ...]:
+    """Collect selected author platform uids (repeatable + comma-joined), deduped.
+
+    Uids are opaque platform identifiers, so unlike tickers they are not upper-cased.
+    """
+    authors: list[str] = []
+    for raw in values.get("author") or []:
+        for part in raw.split(","):
+            uid = part.strip()
+            if uid and uid not in authors:
+                authors.append(uid)
+    return tuple(authors)
+
+
+def recall_author_options(connection: sqlite3.Connection) -> list[dict[str, object]]:
+    """Authors with at least one live version, for the recall page's blogger picker.
+
+    Self-contained (no ``prompt_version`` dependency) and lightweight: just the uid,
+    a display name (latest current-version screen_name, falling back to the stored
+    note), and a live-version count so the picker can show who is worth filtering on.
+    Names are shown as-is in the live UI — the same real names the authors page uses;
+    redaction only applies to exported/synthesized text.
+    """
+    rows = connection.execute(
+        """
+        SELECT
+            a.platform_uid AS uid,
+            COALESCE(
+                (
+                    SELECT json_extract(v2.raw_payload, '$.user.screen_name')
+                    FROM posts p2
+                    JOIN post_versions v2 ON v2.id = p2.current_version_id
+                    WHERE p2.author_id = a.id
+                    ORDER BY p2.id DESC LIMIT 1
+                ),
+                a.notes
+            ) AS name,
+            COUNT(*) AS version_count
+        FROM post_versions v
+        JOIN posts p ON p.id = v.post_id
+        JOIN authors a ON a.id = p.author_id
+        WHERE v.ingest_mode = 'live'
+        GROUP BY a.id
+        ORDER BY name COLLATE NOCASE, a.platform_uid
+        """
+    ).fetchall()
+    return [
+        {
+            "uid": str(row["uid"]),
+            "name": str(row["name"] or row["uid"]),
+            "version_count": int(row["version_count"]),
+        }
+        for row in rows
+    ]
+
+
 def recall_query_from_values(
     values: dict[str, list[str]],
 ) -> tuple[RetrievalQuery | None, dict[str, object], str | None]:
@@ -441,6 +524,7 @@ def recall_query_from_values(
     date_to = _first(values, "to")
     require_all_groups = _first(values, "any") != "1"
     tickers = _split_tickers(values)
+    authors = _split_authors(values)
 
     groups: list[TermGroup] = []
     invalid_groups: list[str] = []
@@ -462,6 +546,7 @@ def recall_query_from_values(
         "question": question,
         "groups": [{"label": group.label, "terms": list(group.terms)} for group in groups],
         "tickers": list(tickers),
+        "authors": list(authors),
         "date_from": date_from,
         "date_to": date_to,
         "require_all_groups": require_all_groups,
@@ -469,17 +554,27 @@ def recall_query_from_values(
         "invalid_groups": invalid_groups,
     }
 
-    if not groups:
-        error = "检索词分组格式应为 label=词1,词2。" if invalid_groups else None
-        return None, form, error
-    if not date_from or not date_to:
-        return None, form, "请填写回溯时间窗的起止日期（北京时间）。"
+    has_narrowing = bool(groups or authors or tickers)
+    has_window = bool(date_from)
+
+    # A malformed group with nothing else to run on: tell the user the syntax rather
+    # than silently dropping it.
+    if invalid_groups and not has_narrowing:
+        return None, form, "检索词分组格式应为 label=词1,词2。"
+    # Nothing entered yet — still incomplete, not an error (no nag on an empty form).
+    if not has_narrowing and not has_window:
+        return None, form, None
+    # A start date always bounds the retrieval; the end date is optional and, when
+    # omitted, the window is that single start day ("默认时间返回一天").
+    if not has_window:
+        return None, form, "请填写回溯时间窗的起始日期（北京时间）。"
 
     query = RetrievalQuery(
         groups=tuple(groups),
         date_from=date_from,
-        date_to=date_to,
+        date_to=date_to or date_from,
         tickers=tickers,
+        authors=authors,
         require_all_groups=require_all_groups,
         limit=limit,
         question=question,
@@ -508,6 +603,7 @@ def build_recall_page(
         "view": "recall",
         "form": form,
         "has_results": False,
+        "author_options": recall_author_options(connection),
         "briefs": list_recent_topic_briefs(connection),
     }
     if query is None:
@@ -552,10 +648,10 @@ def append_topic_brief(
     cursor = connection.execute(
         """
         INSERT INTO topic_briefs(
-            question, groups, tickers, date_from, date_to, require_all_groups,
+            question, groups, tickers, authors, date_from, date_to, require_all_groups,
             coverage, selection, cited_version_ids, brief_text, model,
             prompt_version, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             query.question,
@@ -564,6 +660,7 @@ def append_topic_brief(
                 ensure_ascii=False,
             ),
             json.dumps(list(query.tickers), ensure_ascii=False),
+            json.dumps(list(query.authors), ensure_ascii=False),
             parse_window_bound(query.date_from),
             parse_window_bound(query.date_to, end_of_day=True),
             1 if query.require_all_groups else 0,
@@ -588,6 +685,7 @@ def _topic_brief_row(row: sqlite3.Row) -> dict[str, object]:
         "question": row["question"],
         "groups": json.loads(str(row["groups"])),
         "tickers": _json_list(row["tickers"]),
+        "authors": _json_list(row["authors"]),
         "date_from": row["date_from"],
         "date_to": row["date_to"],
         "require_all_groups": bool(row["require_all_groups"]),

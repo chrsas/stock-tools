@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import httpx
 
-from kol_archive.models import EnrichmentResult
+from kol_archive.models import EnrichmentResult, EnrichmentTarget
 
 SYSTEM_PROMPT = """你在协助用户给一条 KOL 发言原文打结构化标签，用于过滤注意力，不替用户下判断。
 只依据输入原文明确表达的内容，不得补造标的、事实、信息来源或观点。
@@ -48,6 +50,11 @@ class EnrichSettings:
     model: str
     api_key: str = field(repr=False)
     prompt_version: str = "enrich-v2"
+    # How many LLM calls to keep in flight at once. Each post is enriched
+    # independently (UNIQUE(version_id, prompt_version)), so the batch is
+    # embarrassingly parallel; the cap doubles as the rate-limit guard against
+    # the provider. 1 keeps the old strictly-sequential behaviour.
+    concurrency: int = 1
 
 
 def _required_text(mapping: dict[str, Any], key: str) -> str:
@@ -68,11 +75,16 @@ def load_enrich_settings(config: dict[str, Any]) -> EnrichSettings:
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise ValueError(f"LLM API key environment variable is missing: {api_key_env}")
+    concurrency_value = llm.get("enrich_concurrency")
+    concurrency = 1 if concurrency_value is None else int(concurrency_value)
+    if concurrency < 1:
+        raise ValueError("llm.enrich_concurrency must be a positive integer")
     return EnrichSettings(
         base_url=str(llm.get("base_url") or "https://api.openai.com/v1").rstrip("/"),
         model=_required_text(llm, "model"),
         api_key=api_key,
         prompt_version=str(llm.get("enrich_prompt_version") or "enrich-v2").strip(),
+        concurrency=concurrency,
     )
 
 
@@ -230,3 +242,58 @@ def _request_and_parse(
     if not isinstance(payload, dict):
         raise ValueError("LLM response body must be a JSON object")
     return _parse_result(cast(dict[str, Any], payload), original_text)
+
+
+def _settle_target(
+    settings: EnrichSettings,
+    target: EnrichmentTarget,
+    client: httpx.Client,
+) -> tuple[EnrichmentTarget, EnrichmentResult | None, Exception | None]:
+    try:
+        return target, request_enrichment(settings, target.original_text, client=client), None
+    except (httpx.HTTPError, ValueError) as error:
+        # One bad version (network / parse failure) must not sink the batch; it
+        # stays pending so a later run retries it. Persisting failures (sqlite3
+        # errors) happen in the caller's thread and are not caught here.
+        return target, None, error
+
+
+def enrich_targets(
+    settings: EnrichSettings,
+    targets: Sequence[EnrichmentTarget],
+    *,
+    client: httpx.Client | None = None,
+) -> Iterator[tuple[EnrichmentTarget, EnrichmentResult | None, Exception | None]]:
+    """Yield ``(target, result, error)`` as each target's LLM call settles.
+
+    The LLM HTTP calls — the slow, IO-bound part — run in a thread pool of
+    ``settings.concurrency`` workers; callers persist each result serially in
+    their own thread, so the single SQLite writer is never contended. Results
+    stream in completion order (not input order), so progress advances as the
+    fastest calls return. ``settings.concurrency == 1`` keeps the strictly
+    ordered sequential path. ``httpx.Client`` is shared across workers — it is
+    thread-safe and pools connections.
+    """
+    if settings.concurrency < 1:
+        raise ValueError("concurrency must be positive")
+    if not targets:
+        return
+    owned_client = client is None
+    active_client = client or httpx.Client(timeout=30.0)
+    try:
+        if settings.concurrency == 1:
+            for target in targets:
+                yield _settle_target(settings, target, active_client)
+            return
+        with ThreadPoolExecutor(
+            max_workers=settings.concurrency, thread_name_prefix="enrich"
+        ) as executor:
+            futures = [
+                executor.submit(_settle_target, settings, target, active_client)
+                for target in targets
+            ]
+            for future in as_completed(futures):
+                yield future.result()
+    finally:
+        if owned_client:
+            active_client.close()

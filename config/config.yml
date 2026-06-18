@@ -110,6 +110,7 @@ llm:
   api_key_env: LLM_API_KEY     # API Key 仅从环境变量读取
   prompt_version: rewrite-v1   # 阶段 2 改写训练 prompt 版本
   enrich_prompt_version: enrich-v2   # 输出契约或判断逻辑变化必须升版本
+  enrich_concurrency: 4              # 批量富化并发的 LLM 请求数；同时也是对供应商限流的上限。1=串行
   claim_prompt_version: claim-v1     # 可证伪命题提取契约版本
   expand_prompt_version: expand-v1   # 主题回溯「扩词」prompt 版本（仅产出可改检索词+建议窗）
   brief_prompt_version: brief-v1     # 主题回溯「简报合成」prompt 版本（固定四块、每条带 version_id 引用）

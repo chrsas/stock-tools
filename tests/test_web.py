@@ -458,7 +458,7 @@ def test_enrich_author_web_flow(
             stance_summary="",
         )
 
-    monkeypatch.setattr("kol_archive.web.request_enrichment", fake_enrichment)
+    monkeypatch.setattr("kol_archive.enrich.request_enrichment", fake_enrichment)
     status, _, content = _request(
         web_server,
         "POST",
@@ -619,7 +619,7 @@ def test_enrich_author_observed_since_excludes_old_backlog(
     ) -> EnrichmentResult:
         raise AssertionError("old backlog must not be enriched")
 
-    monkeypatch.setattr("kol_archive.web.request_enrichment", unexpected_enrichment)
+    monkeypatch.setattr("kol_archive.enrich.request_enrichment", unexpected_enrichment)
     status, _, content = _request(
         web_server,
         "POST",
@@ -655,7 +655,7 @@ def test_enrich_author_counts_database_failure_and_keeps_batch_status(
     def locked(*args: object, **kwargs: object) -> int | None:
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr("kol_archive.web.request_enrichment", fake_enrichment)
+    monkeypatch.setattr("kol_archive.enrich.request_enrichment", fake_enrichment)
     monkeypatch.setattr(Archive, "add_enrichment", locked)
     status, _, content = _request(
         web_server,

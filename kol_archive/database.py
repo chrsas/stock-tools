@@ -413,6 +413,7 @@ CREATE TABLE IF NOT EXISTS topic_briefs (
     question TEXT NOT NULL CHECK(length(trim(question)) > 0),
     groups TEXT NOT NULL CHECK(json_valid(groups)),
     tickers TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(tickers)),
+    authors TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(authors)),
     date_from TEXT NOT NULL,
     date_to TEXT NOT NULL,
     require_all_groups INTEGER NOT NULL CHECK(require_all_groups IN (0, 1)),
@@ -706,6 +707,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         "claim_outcomes",
         "outcome_method_version",
         "outcome_method_version TEXT NOT NULL DEFAULT 'legacy-unknown'",
+    )
+    # Author filter on recall, added after topic_briefs shipped. Pre-upgrade briefs
+    # were synthesized with no author narrowing, so '[]' (all authors) is the honest
+    # back-fill for their pinned query.
+    _ensure_column(
+        connection,
+        "topic_briefs",
+        "authors",
+        "authors TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(authors))",
     )
     _backfill_market_relation(connection)
     _backfill_version_tickers(connection)

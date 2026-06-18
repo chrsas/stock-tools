@@ -250,8 +250,16 @@ button.secondary:hover { color: var(--ink); border-color: var(--ink-3); }
 form, label { display: grid; gap: .5rem; margin: 1rem 0; }
 .recall-group { display: grid; grid-template-columns: 160px 1fr auto; gap: .6rem; align-items: center; margin: .5rem 0; }
 .recall-group input { margin: 0; }
+.recall-window-box { margin: .6rem 0; }
+.recall-window-box > summary { cursor: pointer; list-style-position: inside; padding: .2rem 0; }
+.recall-window-box > summary::-webkit-details-marker { color: var(--ink-2); }
+.recall-presets { display: flex; gap: .4rem; flex-wrap: wrap; margin: .3rem 0 .2rem; }
+.recall-presets .secondary { padding: .3rem .7rem; font-size: .85rem; }
 .recall-window { display: flex; gap: 1rem; flex-wrap: wrap; align-items: end; }
 .recall-window label { margin: .5rem 0; }
+.recall-authors { display: flex; flex-direction: column; gap: .4rem; margin: .5rem 0; max-width: 28rem; }
+.recall-authors select { margin: 0; }
+.recall-authors .secondary { align-self: start; }
 /* four blocks each get a colored left rail + eyebrow header, so 覆盖度/当时判断/
    后来描述性结果/缺口与反证 are scannable at a glance. */
 .recall-brief-block { margin: .9rem 0; padding-left: .85rem; border-left: 2.5px solid var(--line); }
