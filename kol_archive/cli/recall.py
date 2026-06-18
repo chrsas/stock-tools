@@ -34,12 +34,6 @@ from .common import (
     section,
 )
 
-_NO_GROUPS_HINT = (
-    "本命令为确定性检索，需显式分组检索词，如 "
-    "--group event=美伊,伊朗 --group market=油价,原油。"
-    '可先运行 recall-expand "<问题>" 获取建议分组词与时间窗。'
-)
-
 
 def _parse_group(value: str) -> TermGroup:
     try:
@@ -55,12 +49,20 @@ def _split_tickers(values: list[str] | None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(tickers))
 
 
+def _split_authors(values: list[str] | None) -> tuple[str, ...]:
+    authors: list[str] = []
+    for value in values or []:
+        authors.extend(part.strip() for part in value.split(",") if part.strip())
+    return tuple(dict.fromkeys(authors))
+
+
 def _query_from_args(args: argparse.Namespace) -> RetrievalQuery:
     return RetrievalQuery(
-        groups=tuple(args.group),
+        groups=tuple(args.group or ()),
         date_from=args.date_from,
-        date_to=args.date_to,
+        date_to=args.date_to or args.date_from,
         tickers=_split_tickers(args.ticker),
+        authors=_split_authors(args.author),
         require_all_groups=not args.any_group,
         limit=args.limit,
         question=args.question,
@@ -69,10 +71,6 @@ def _query_from_args(args: argparse.Namespace) -> RetrievalQuery:
 
 def _recall_command(args: argparse.Namespace) -> None:
     config = load_config(args.config_dir)
-    if not args.group:
-        # Deterministic recall needs explicit groups by design (no model in the
-        # loop). Use `recall-expand "<问题>"` to get suggested groups to paste here.
-        raise SystemExit(_NO_GROUPS_HINT)
     query = _query_from_args(args)
     benchmark = str((section(config, "prices")).get("benchmark_ticker") or "SH000300").upper()
     prompt_version = enrich_prompt_version(config, None)
@@ -92,8 +90,6 @@ def _recall_command(args: argparse.Namespace) -> None:
 
 def _recall_brief_command(args: argparse.Namespace) -> None:
     config = load_config(args.config_dir)
-    if not args.group:
-        raise SystemExit(_NO_GROUPS_HINT)
     if not args.question.strip():
         raise SystemExit("简报需要一个非空主题问题作为可追溯标题。")
     query = _query_from_args(args)
@@ -155,15 +151,25 @@ def _add_retrieval_args(parser: argparse.ArgumentParser) -> None:
         action="append",
         type=_parse_group,
         metavar="label=词1,词2",
-        help="一组 OR 检索词，可重复；组间默认 AND。如 --group market=油价,原油,布油",
+        help="一组 OR 检索词，可重复；组间默认 AND。如 --group market=油价,原油,布油。"
+        "可省略：不给分组词时按时间窗(+可选博主/标的)回看当时所有发言",
     )
     parser.add_argument(
         "--ticker", action="append", help="可选标的过滤（与分组 AND），逗号分隔，可重复"
     )
     parser.add_argument(
+        "--author",
+        action="append",
+        metavar="平台uid",
+        help="可选博主过滤（按雪球 uid，与分组/标的 AND），逗号分隔，可重复；"
+        "分组词可省略，只按博主+时间窗回看其当时发言",
+    )
+    parser.add_argument(
         "--from", dest="date_from", required=True, help="起始日期（北京时间，YYYY-MM-DD）"
     )
-    parser.add_argument("--to", dest="date_to", required=True, help="结束日期（北京时间，含当日）")
+    parser.add_argument(
+        "--to", dest="date_to", help="结束日期（北京时间，含当日；省略则只回看起始当天）"
+    )
     parser.add_argument(
         "--any-group",
         action="store_true",

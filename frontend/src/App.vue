@@ -47,6 +47,7 @@ const recallGroups = ref<{ label: string; terms: string }[]>([]);
 const recallFrom = ref("");
 const recallTo = ref("");
 const recallTickers = ref("");
+const recallAuthors = ref<string[]>([]);
 const recallAnyGroup = ref(false);
 const recallLimit = ref(200);
 const recallExpanding = ref(false);
@@ -87,6 +88,7 @@ function syncRecallForm() {
   recallFrom.value = String(form.date_from || "");
   recallTo.value = String(form.date_to || "");
   recallTickers.value = (Array.isArray(form.tickers) ? form.tickers : []).join(", ");
+  recallAuthors.value = (Array.isArray(form.authors) ? form.authors : []).map(String);
   recallAnyGroup.value = !form.require_all_groups;
   recallLimit.value = Number(form.limit || 200);
 }
@@ -148,27 +150,76 @@ function recallParams(): URLSearchParams {
   if (recallFrom.value) params.set("from", recallFrom.value);
   if (recallTo.value) params.set("to", recallTo.value);
   for (const ticker of splitRecallTerms(recallTickers.value)) params.append("ticker", ticker);
+  for (const uid of recallAuthors.value) if (uid) params.append("author", uid);
   if (recallAnyGroup.value) params.set("any", "1");
   if (recallLimit.value) params.set("limit", String(recallLimit.value));
   return params;
 }
 
 function submitRecall() {
-  // Deterministic retrieval is driven by the term groups, not the question alone.
-  // Validate client-side so a missing group/window gives instant feedback instead of
-  // a silent no-op navigation (the backend stays quiet on an empty form by design).
+  // Retrieval is bounded by the start date; the end date is optional (a lone start
+  // means that single day) and narrowing (groups / authors / tickers) is optional too
+  // — a window alone returns "那段时间博主们说了啥". Validate the start date client-side
+  // so a missing date gives instant feedback instead of a silent no-op.
   const params = recallParams();
-  if (!params.has("group")) {
-    error.value = "请先添加至少一组检索词分组（或点「扩词建议」自动生成）：确定性检索由分组检索词决定，仅有主题问题不会触发检索。";
-    return;
-  }
-  if (!recallFrom.value || !recallTo.value) {
-    error.value = "请填写回溯时间窗的起止日期（北京时间）。";
+  if (!recallFrom.value) {
+    error.value = "请填写回溯时间窗的起始日期（北京时间）。";
     return;
   }
   error.value = "";
   window.location.assign(`/?${params.toString()}`);
 }
+
+function fmtRecallDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// Quick time-window presets. Calendar presets (本周/上周/本月/上月) use real period
+// bounds; this-week/this-month cap the end at today since the future has no data.
+// Relative presets count back from today (Beijing local clock on the user's machine).
+function applyRecallPreset(kind: string) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  let from = new Date(today);
+  let to = new Date(today);
+  const mondayOffset = (today.getDay() + 6) % 7; // Mon=0 … Sun=6
+  if (kind === "day") {
+    // 最近一天：只看今天。
+  } else if (kind === "last7") {
+    from.setDate(today.getDate() - 6);
+  } else if (kind === "thisWeek") {
+    from.setDate(today.getDate() - mondayOffset);
+  } else if (kind === "lastWeek") {
+    from.setDate(today.getDate() - mondayOffset - 7);
+    to = new Date(from);
+    to.setDate(from.getDate() + 6);
+  } else if (kind === "thisMonth") {
+    from = new Date(today.getFullYear(), today.getMonth(), 1);
+  } else if (kind === "lastMonth") {
+    from = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    to = new Date(today.getFullYear(), today.getMonth(), 0);
+  } else if (kind === "last30") {
+    from.setDate(today.getDate() - 29);
+  } else if (kind === "lastQuarter") {
+    from.setMonth(today.getMonth() - 3);
+  }
+  recallFrom.value = fmtRecallDate(from);
+  recallTo.value = fmtRecallDate(to);
+}
+
+const RECALL_PRESETS: { kind: string; label: string }[] = [
+  { kind: "day", label: "最近一天" },
+  { kind: "last7", label: "最近一周" },
+  { kind: "thisWeek", label: "本周" },
+  { kind: "lastWeek", label: "上周" },
+  { kind: "thisMonth", label: "本月" },
+  { kind: "lastMonth", label: "上月" },
+  { kind: "last30", label: "最近一个月" },
+  { kind: "lastQuarter", label: "最近一个季度" },
+];
 
 function confirmedRecallParams(): URLSearchParams {
   // The brief must be synthesized over the *confirmed* query that produced the
@@ -193,6 +244,10 @@ function confirmedRecallParams(): URLSearchParams {
   for (const ticker of (Array.isArray(form.tickers) ? form.tickers : []) as unknown[]) {
     const value = String(ticker).trim();
     if (value) params.append("ticker", value);
+  }
+  for (const uid of (Array.isArray(form.authors) ? form.authors : []) as unknown[]) {
+    const value = String(uid).trim();
+    if (value) params.append("author", value);
   }
   if (!form.require_all_groups) params.set("any", "1");
   if (form.limit) params.set("limit", String(form.limit));
@@ -1001,19 +1056,31 @@ onBeforeUnmount(() => {
             </div>
             <p v-if="recallNotice" class="notice">{{ recallNotice }}</p>
             <p v-if="recallNotes" class="muted small">模型说明：{{ recallNotes }}</p>
-            <div class="stream-label"><span class="eyebrow">检索词分组（组内 OR、组间默认 AND）</span></div>
+            <div class="stream-label"><span class="eyebrow">检索词分组（可选 · 组内 OR、组间默认 AND）</span></div>
+            <p class="muted small">不填分组时，按下方时间窗（可叠加博主/标的）回看当时所有发言。</p>
             <div v-for="(group, index) in recallGroups" :key="index" class="recall-group">
               <input v-model="group.label" placeholder="维度名 如 event">
               <input v-model="group.terms" placeholder="同义词，逗号分隔 如 美伊,伊朗,霍尔木兹">
               <button class="secondary" @click="removeRecallGroup(index)">删除</button>
             </div>
             <div class="actions"><button class="secondary" @click="addRecallGroup">+ 添加分组</button></div>
+            <div class="stream-label"><span class="eyebrow">时间窗（只填起始即可，结束默认起始当天）</span></div>
+            <div class="recall-presets">
+              <button v-for="preset in RECALL_PRESETS" :key="preset.kind" type="button" class="secondary" @click="applyRecallPreset(preset.kind)">{{ preset.label }}</button>
+            </div>
             <div class="recall-window">
               <label>起始日期<input v-model="recallFrom" type="date"></label>
-              <label>结束日期<input v-model="recallTo" type="date"></label>
+              <label>结束日期（可选，默认起始当天）<input v-model="recallTo" type="date"></label>
               <label>标的过滤（可选，逗号分隔）<input v-model="recallTickers" placeholder="SH601857"></label>
               <label>最多命中<input v-model.number="recallLimit" type="number" min="1" max="500"></label>
             </div>
+            <label v-if="page.author_options?.length" class="recall-authors">
+              <span>博主过滤（可选，多选；按住 Ctrl/⌘ 选多位）</span>
+              <select v-model="recallAuthors" multiple size="5">
+                <option v-for="opt in page.author_options" :key="opt.uid" :value="opt.uid">{{ opt.name }}（{{ opt.version_count }}）</option>
+              </select>
+              <button v-if="recallAuthors.length" type="button" class="secondary" @click="recallAuthors = []">清空所选博主</button>
+            </label>
             <label class="toggle-row"><input v-model="recallAnyGroup" type="checkbox"><span>组间改为 OR（放宽召回；默认 AND 提高精度）</span></label>
             <div class="actions"><button :disabled="busy" @click="submitRecall">检索</button></div>
           </section>

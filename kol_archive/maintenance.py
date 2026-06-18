@@ -57,6 +57,7 @@ JSON_COLUMNS = {
     # through the heuristic credential redaction. cited_version_ids/tickers are ids.
     ("topic_briefs", "groups"),
     ("topic_briefs", "tickers"),
+    ("topic_briefs", "authors"),
     ("topic_briefs", "coverage"),
     ("topic_briefs", "selection"),
     ("topic_briefs", "cited_version_ids"),

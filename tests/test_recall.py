@@ -15,6 +15,7 @@ from kol_archive.recall import (
     list_recent_topic_briefs,
     parse_term_group,
     parse_window_bound,
+    recall_author_options,
     recall_query_from_values,
     retrieve,
 )
@@ -370,12 +371,31 @@ def test_build_recall_page_without_groups_returns_form_only(tmp_path: Path) -> N
         connection.close()
 
 
-def test_build_recall_page_requires_window_when_groups_present(tmp_path: Path) -> None:
+def test_build_recall_page_start_date_alone_runs_single_day(tmp_path: Path) -> None:
     connection = _connection(tmp_path)
     try:
-        page = _recall_page(connection, {"group": ["event=伊朗"], "from": [WINDOW_FROM]})
+        _post(connection, "a", "伊朗当天发言", "2025-06-15T01:00:00+00:00")
+        # 起始当天命中，前一天/后一天落在单日窗外。
+        _post(connection, "b", "伊朗前一天", "2025-06-14T01:00:00+00:00")
+        _post(connection, "c", "伊朗后一天", "2025-06-16T01:00:00+00:00")
+
+        page = _recall_page(connection, {"group": ["event=伊朗"], "from": ["2025-06-15"]})
+
+        assert "error" not in page
+        assert page["has_results"] is True
+        hits = cast(list[dict[str, object]], page["hits"])
+        assert [hit["author_platform_uid"] for hit in hits] == ["a"]
+    finally:
+        connection.close()
+
+
+def test_build_recall_page_requires_start_date(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        # 只给结束日期、缺起始 —— 仍需起始日期。
+        page = _recall_page(connection, {"group": ["event=伊朗"], "to": [WINDOW_TO]})
         assert page["has_results"] is False
-        assert "时间窗" in str(page["error"])
+        assert "起始" in str(page["error"])
     finally:
         connection.close()
 
@@ -566,6 +586,165 @@ def test_build_recall_page_lists_recent_briefs(tmp_path: Path) -> None:
         page = _recall_page(connection, {})
         briefs = cast(list[dict[str, object]], page["briefs"])
         assert [brief["question"] for brief in briefs] == ["历史问题"]
+    finally:
+        connection.close()
+
+
+def test_author_filter_narrows_to_selected_bloggers(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        _post(connection, "a", "伊朗局势紧张，油价可能冲高", "2025-06-15T01:00:00+00:00")
+        _post(connection, "b", "伊朗与油价同样命中", "2025-06-16T01:00:00+00:00")
+        _post(connection, "c", "伊朗与油价命中但不选他", "2025-06-17T01:00:00+00:00")
+        event, market = _event_market()
+
+        result = retrieve(
+            connection,
+            RetrievalQuery((event, market), WINDOW_FROM, WINDOW_TO, authors=("a", "b")),
+        )
+
+        hits = cast(list[dict[str, object]], result["hits"])
+        assert {hit["author_platform_uid"] for hit in hits} == {"a", "b"}
+        coverage = cast(dict[str, object], result["coverage"])
+        # Coverage denominators honour the author filter, not just the detail rows.
+        assert coverage["author_count"] == 2
+        assert coverage["version_count"] == 2
+        # Per-group in-window counts are also scoped to the selected authors.
+        groups = {g["label"]: g for g in cast(list[dict[str, object]], coverage["groups"])}
+        assert groups["event"]["version_count"] == 2
+    finally:
+        connection.close()
+
+
+def test_window_only_query_returns_all_in_window_without_groups(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        _post(connection, "a", "随便聊聊行情", "2025-06-15T01:00:00+00:00")
+        _post(connection, "b", "今天天气不错", "2025-06-16T01:00:00+00:00")
+        # 窗外不计。
+        _post(connection, "c", "窗外发言", "2025-05-16T01:00:00+00:00")
+
+        result = retrieve(connection, RetrievalQuery((), WINDOW_FROM, WINDOW_TO))
+
+        hits = cast(list[dict[str, object]], result["hits"])
+        assert {hit["author_platform_uid"] for hit in hits} == {"a", "b"}
+        coverage = cast(dict[str, object], result["coverage"])
+        assert coverage["version_count"] == 2
+        assert coverage["groups"] == []
+    finally:
+        connection.close()
+
+
+def test_window_plus_author_only_query(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        _post(connection, "a", "甲说的话", "2025-06-15T01:00:00+00:00")
+        _post(connection, "b", "乙说的话", "2025-06-16T01:00:00+00:00")
+
+        result = retrieve(connection, RetrievalQuery((), WINDOW_FROM, WINDOW_TO, authors=("a",)))
+
+        hits = cast(list[dict[str, object]], result["hits"])
+        assert [hit["author_platform_uid"] for hit in hits] == ["a"]
+    finally:
+        connection.close()
+
+
+def test_recall_author_options_lists_live_authors_with_counts(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        _post(connection, "a", "发言一", "2025-06-15T01:00:00+00:00")
+        _post(connection, "a", "发言二", "2025-06-16T01:00:00+00:00")
+        _post(connection, "b", "发言三", "2025-06-17T01:00:00+00:00")
+        # backfill-only 作者不进选择器（无 live 版本）。
+        _post(connection, "c", "回填", "2025-06-18T01:00:00+00:00", ingest_mode="backfill")
+
+        options = recall_author_options(connection)
+        by_uid = {opt["uid"]: opt for opt in options}
+        assert set(by_uid) == {"a", "b"}
+        assert by_uid["a"]["version_count"] == 2
+        assert by_uid["b"]["version_count"] == 1
+        assert by_uid["a"]["name"] == "作者a"
+    finally:
+        connection.close()
+
+
+def test_recall_query_from_values_parses_authors_and_allows_window_only() -> None:
+    # Window-only (no groups, no authors) is now runnable, not a silent no-op.
+    query, form, error = recall_query_from_values({"from": [WINDOW_FROM], "to": [WINDOW_TO]})
+    assert error is None
+    assert query is not None
+    assert query.groups == ()
+
+    # Author selection (repeatable + comma-joined) is deduped and threaded through.
+    query, form, error = recall_query_from_values(
+        {"from": [WINDOW_FROM], "to": [WINDOW_TO], "author": ["a, b", "a", "c"]}
+    )
+    assert error is None
+    assert query is not None
+    assert query.authors == ("a", "b", "c")
+    assert form["authors"] == ["a", "b", "c"]
+
+    # A lone start date defaults the end to that same day (single-day window).
+    query, form, error = recall_query_from_values({"group": ["event=伊朗"], "from": [WINDOW_FROM]})
+    assert error is None
+    assert query is not None
+    assert query.date_from == WINDOW_FROM
+    assert query.date_to == WINDOW_FROM
+    # The raw form still echoes the empty end so the input repopulates as empty.
+    assert form["date_to"] == ""
+
+
+def test_build_recall_page_exposes_author_options_and_round_trips_filter(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        _post(connection, "a", "伊朗与油价", "2025-06-15T01:00:00+00:00")
+        _post(connection, "b", "伊朗与油价", "2025-06-16T01:00:00+00:00")
+
+        page = _recall_page(connection, {})
+        options = cast(list[dict[str, object]], page["author_options"])
+        assert {opt["uid"] for opt in options} == {"a", "b"}
+
+        page = _recall_page(
+            connection,
+            {
+                "group": ["event=伊朗", "market=油价"],
+                "from": [WINDOW_FROM],
+                "to": [WINDOW_TO],
+                "author": ["a"],
+            },
+        )
+        assert page["has_results"] is True
+        hits = cast(list[dict[str, object]], page["hits"])
+        assert [hit["author_platform_uid"] for hit in hits] == ["a"]
+        form = cast(dict[str, object], page["form"])
+        assert form["authors"] == ["a"]
+    finally:
+        connection.close()
+
+
+def test_append_topic_brief_persists_authors(tmp_path: Path) -> None:
+    connection = _connection(tmp_path)
+    try:
+        query = RetrievalQuery(
+            groups=(TermGroup("event", ("伊朗",)),),
+            date_from=WINDOW_FROM,
+            date_to=WINDOW_TO,
+            authors=("a", "b"),
+            question="只看这两位",
+        )
+        append_topic_brief(
+            connection,
+            query=query,
+            coverage={},
+            selection={},
+            cited_version_ids=(),
+            brief_text="正文",
+            model="m",
+            prompt_version="brief-v1",
+            created_at="2025-07-01T00:00:00+00:00",
+        )
+        [brief] = list_recent_topic_briefs(connection)
+        assert brief["authors"] == ["a", "b"]
     finally:
         connection.close()
 
