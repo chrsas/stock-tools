@@ -48,6 +48,7 @@ const recallFrom = ref("");
 const recallTo = ref("");
 const recallTickers = ref("");
 const recallAuthors = ref<string[]>([]);
+const recallWindowOpen = ref(false);
 const recallAnyGroup = ref(false);
 const recallLimit = ref(200);
 const recallExpanding = ref(false);
@@ -91,6 +92,15 @@ function syncRecallForm() {
   recallAuthors.value = (Array.isArray(form.authors) ? form.authors : []).map(String);
   recallAnyGroup.value = !form.require_all_groups;
   recallLimit.value = Number(form.limit || 200);
+  // Fresh page (no window chosen yet) lands on the last half month, so a search can
+  // run without expanding the collapsed time-window box. A window from the URL/echo
+  // is kept as-is. The box stays collapsed unless an error needs the dates shown.
+  if (!recallFrom.value && !recallTo.value) applyRecallPreset("halfMonth");
+  recallWindowOpen.value = Boolean(page.value?.error);
+}
+
+function onRecallWindowToggle(event: Event) {
+  recallWindowOpen.value = (event.target as HTMLDetailsElement).open;
 }
 
 function mapRecallGroups(groups: unknown): { label: string; terms: string }[] {
@@ -190,6 +200,8 @@ function applyRecallPreset(kind: string) {
     // 最近一天：只看今天。
   } else if (kind === "last7") {
     from.setDate(today.getDate() - 6);
+  } else if (kind === "halfMonth") {
+    from.setDate(today.getDate() - 14);
   } else if (kind === "thisWeek") {
     from.setDate(today.getDate() - mondayOffset);
   } else if (kind === "lastWeek") {
@@ -213,6 +225,7 @@ function applyRecallPreset(kind: string) {
 const RECALL_PRESETS: { kind: string; label: string }[] = [
   { kind: "day", label: "最近一天" },
   { kind: "last7", label: "最近一周" },
+  { kind: "halfMonth", label: "最近半个月" },
   { kind: "thisWeek", label: "本周" },
   { kind: "lastWeek", label: "上周" },
   { kind: "thisMonth", label: "本月" },
@@ -1064,13 +1077,18 @@ onBeforeUnmount(() => {
               <button class="secondary" @click="removeRecallGroup(index)">删除</button>
             </div>
             <div class="actions"><button class="secondary" @click="addRecallGroup">+ 添加分组</button></div>
-            <div class="stream-label"><span class="eyebrow">时间窗（只填起始即可，结束默认起始当天）</span></div>
-            <div class="recall-presets">
-              <button v-for="preset in RECALL_PRESETS" :key="preset.kind" type="button" class="secondary" @click="applyRecallPreset(preset.kind)">{{ preset.label }}</button>
-            </div>
+            <details class="recall-window-box" :open="recallWindowOpen" @toggle="onRecallWindowToggle">
+              <summary><span class="eyebrow">时间窗</span> <span class="muted small">{{ recallFrom || "未设起始" }} ~ {{ recallTo || "起始当天" }}</span></summary>
+              <p class="muted small">只填起始即可，结束为空默认起始当天；默认最近半个月。</p>
+              <div class="recall-presets">
+                <button v-for="preset in RECALL_PRESETS" :key="preset.kind" type="button" class="secondary" @click="applyRecallPreset(preset.kind)">{{ preset.label }}</button>
+              </div>
+              <div class="recall-window">
+                <label>起始日期<input v-model="recallFrom" type="date"></label>
+                <label>结束日期（可选，默认起始当天）<input v-model="recallTo" type="date"></label>
+              </div>
+            </details>
             <div class="recall-window">
-              <label>起始日期<input v-model="recallFrom" type="date"></label>
-              <label>结束日期（可选，默认起始当天）<input v-model="recallTo" type="date"></label>
               <label>标的过滤（可选，逗号分隔）<input v-model="recallTickers" placeholder="SH601857"></label>
               <label>最多命中<input v-model.number="recallLimit" type="number" min="1" max="500"></label>
             </div>

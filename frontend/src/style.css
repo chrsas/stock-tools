@@ -250,6 +250,9 @@ button.secondary:hover { color: var(--ink); border-color: var(--ink-3); }
 form, label { display: grid; gap: .5rem; margin: 1rem 0; }
 .recall-group { display: grid; grid-template-columns: 160px 1fr auto; gap: .6rem; align-items: center; margin: .5rem 0; }
 .recall-group input { margin: 0; }
+.recall-window-box { margin: .6rem 0; }
+.recall-window-box > summary { cursor: pointer; list-style-position: inside; padding: .2rem 0; }
+.recall-window-box > summary::-webkit-details-marker { color: var(--ink-2); }
 .recall-presets { display: flex; gap: .4rem; flex-wrap: wrap; margin: .3rem 0 .2rem; }
 .recall-presets .secondary { padding: .3rem .7rem; font-size: .85rem; }
 .recall-window { display: flex; gap: 1rem; flex-wrap: wrap; align-items: end; }
