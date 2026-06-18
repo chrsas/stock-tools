@@ -1,7 +1,8 @@
 # stock-tools
 
 本地单用户 KOL 发言证据存档。当前已完成追加式归档、证据卡片、本地网页、批量富化、
-博主市场相关观点总览，以及图片下载、OCR 和 VLM 描述基线。
+博主市场相关观点总览、图片下载/OCR/VLM 描述、个人决策日志、关注列表、中性统计分析、
+分析框架提取、日线 K 线行情，以及主题回溯与历史简报（词法 RAG）。
 
 ## 初始化
 
@@ -229,7 +230,47 @@ $env:LLM_API_KEY = "<本地密钥>"
 强化、更新或相关回复。可通过本地配置 `web.viewpoint_cluster_window_days` 扩大窗口。具有 `claim`
 但无法归并到单一代码的观点独立展示。
 
-## 图片证据（下载 / OCR / VLM）
+## 分析框架提取
+
+从已富化、含明确市场关联的版本里结构化抽取作者**自述的分析框架**，落入派生表
+`framework_extractions`：主题、一句话概括、输入变量、推理链、结论形态、适用条件、失效条件
+和原文片段。无可抽取框架的版本写入 `framework_scans`，避免重复调用模型。抽取按
+`(version_id, prompt_version)` 幂等，是推断产物，绝不写回证据正文。修改抽取契约时升级
+`llm.framework_prompt_version`：
+
+```powershell
+$env:LLM_API_KEY = "<本地密钥>"
+.\.venv\Scripts\python.exe -m kol_archive extract-frameworks --config-dir config
+```
+
+可用 `--limit` 限本轮数量、`--prompt-version` 临时覆盖版本。结果在网页「框架库」
+（`/?view=frameworks`）按主题汇总展示，每条可回溯到来源版本与原文片段。
+
+## 主题回溯与历史简报（词法 RAG）
+
+按「分组检索词 + 时间窗」回溯当时发言：先做**确定性**词法检索（不调用 LLM、可逐条复核），
+再在检索结果上**按需**合成主题简报。组内 OR、组间默认 AND（`--any-group` 放宽为 OR），
+可选标的过滤。检索只覆盖现存归档，并中性列出窗内曾被明确移除的帖子数以便折扣解读，不做归因：
+
+```powershell
+# 1) 把一个中文问题扩成可改的分组检索词 + 建议时间窗（调用 LLM，仅产出检索辅助，不下判断）
+.\.venv\Scripts\python.exe -m kol_archive recall-expand "存储这轮行情大家怎么看" --config-dir config
+# 2) 确定性检索（不调用 LLM）
+.\.venv\Scripts\python.exe -m kol_archive recall "存储这轮行情" `
+  --group subject=存储,NAND,DRAM,内存 --group market=行情,涨价,周期 `
+  --from 2026-04-18 --to 2026-06-18
+# 3) 在检索结果上合成简报（固定四块、每条带 version_id 引用）
+$env:LLM_API_KEY = "<本地密钥>"
+.\.venv\Scripts\python.exe -m kol_archive recall-brief "存储这轮行情" `
+  --group subject=存储,NAND,DRAM,内存 --group market=行情,涨价,周期 `
+  --from 2026-04-18 --to 2026-06-18
+```
+
+简报固定四块——覆盖度、当时判断、后来描述性结果、缺口与反证——每条要点锚定发言时间并附
+`version_id` 引用，所引版本服务端校验必须落在本次检索命中集内，杜绝幻觉。生成的简报连同**当时**
+的覆盖度/选择性一起追加进 `topic_briefs`（append-only，不可改写），日后可对照其所凭证据复核。
+网页「主题回溯」（`/?view=recall`）提供同样的表单、即时简报与历史简报列表；历史简报从持久化
+`brief_text` 反解出同样的四块结构展示，与即时生成时观感一致。
 
 帖子正文里的 K 线图、收益截图、持仓图常常和文字同等重要，且最易随删帖一并失效。
 采集时帖子的图片 URL 已随 `raw_payload` 入库，但图片**字节**需要在失效前单独固化。
@@ -301,6 +342,15 @@ npm run build
 .\.venv\Scripts\python.exe -m kol_archive import-prices data/prices.csv --config-dir config
 ```
 
+也可直接从雪球拉日线 OHLC（经专用浏览器过 WAF，须先 `login` 并保持浏览器开着）。默认拉取全部
+被跟踪标的，写入 `prices` 的 OHLC 列；观点簇「发言后市场变化」里的蜡烛图据此渲染：
+
+```powershell
+.\.venv\Scripts\python.exe -m kol_archive fetch-kline --config-dir config
+# 指定标的与基准、调整拉取根数
+.\.venv\Scripts\python.exe -m kol_archive fetch-kline --ticker SH688303 --benchmark SH000300 --count 250 --config-dir config
+```
+
 页面顶部可选择跟随系统、浅色或暗色主题。手动选择会保存在当前浏览器中；跟随系统会实时响应
 操作系统的明暗主题变化。
 
@@ -314,6 +364,8 @@ npm run build
 - `/?view=decisions`：个人决策日志，可录入原始论点与证伪条件、人工关闭并追加复盘。
 - `/?view=watchlist`：关注列表，可增删标的并查看累计提醒次数。
 - `/?view=analysis`：中性统计分析，展示选择性删除分布与跨博主拥挤事件。
+- `/?view=frameworks`：框架库，按主题汇总作者自述的分析框架，每条可回溯来源版本。
+- `/?view=recall`：主题回溯，按分组词 + 时间窗确定性检索，可在结果上生成并归档历史简报。
 - `/authors/<uid>`：单个博主的观点簇、市场变化与最近帖子。
 - `/posts/<post_id>`：单帖证据卡片。
 
