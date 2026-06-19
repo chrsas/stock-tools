@@ -1259,7 +1259,7 @@ def test_read_routes_return_redacted_timeline_and_evidence_card(
     assert item["author_display_name"] == "测试作者 & QA"
     assert item["current_text"] == "原始正文 A"
     assert cast(dict[str, str], item["status"])["human_label"] == (
-        "feed：在场；来源：未复查；监控：近期窗口"
+        "列表观察：在场；来源：未复查；监控：近期窗口"
     )
     assert item["url"] == "https://xueqiu.com/100/post-1"
 

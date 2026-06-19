@@ -41,7 +41,7 @@ def _status_summary(
 ) -> dict[str, str]:
     summary = {
         "human_label": (
-            f"feed：{_feed_label(feed_state)}；来源：{_source_label(source_state)}；"
+            f"列表观察：{_feed_label(feed_state)}；来源：{_source_label(source_state)}；"
             f"监控：{_watch_label(watch_mode)}"
         ),
     }
@@ -58,7 +58,7 @@ def _status_summary(
     if feed_state is FeedState.ABSENT_CONFIRMED:
         return summary | {
             "deletion_signal_level": "weak",
-            "deletion_signal_label": "弱信号：feed 内连续健康轮次缺席，未经直链确认",
+            "deletion_signal_label": "弱信号：列表观察连续健康轮次缺席，未经直链确认",
         }
     if feed_state is FeedState.OUT_OF_SCOPE and watch_mode is WatchMode.INACTIVE:
         return summary | {
@@ -68,7 +68,7 @@ def _status_summary(
     if feed_state is FeedState.PRESENT:
         return summary | {
             "deletion_signal_level": "none",
-            "deletion_signal_label": "无删帖信号：最近 feed 观察为在场",
+            "deletion_signal_label": "无删帖信号：最近列表观察为在场",
         }
     return summary | {
         "deletion_signal_level": "none",
@@ -1411,7 +1411,7 @@ def framework_library(
                 else None,
                 "url": row["url"],
                 "source_status_label": (
-                    f"feed：{_feed_label(feed_state)}；来源：{_source_label(source_state)}"
+                    f"列表观察：{_feed_label(feed_state)}；来源：{_source_label(source_state)}"
                     + ("" if is_current else "；非当前版本（原帖其后有内容变化）")
                 ),
                 "source_readable": source_readable,

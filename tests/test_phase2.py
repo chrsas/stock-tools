@@ -181,7 +181,7 @@ def test_timeline_keeps_feed_presence_visible_when_direct_link_is_unavailable(
     status = cast(dict[str, str], list_timeline(archive.connection)[0]["status"])
 
     assert status["deletion_signal_level"] == "weak"
-    assert "feed：在场" in status["human_label"]
+    assert "列表观察：在场" in status["human_label"]
     assert "来源：直链当前不可访问" in status["human_label"]
 
 

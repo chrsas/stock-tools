@@ -179,7 +179,7 @@ $snapshotPath = Get-ChildItem .\data\backups\kol-*.sqlite3 |
 - [x] 连续运行多轮 `run-once`，确认新观察持续追加，时间线稳定可读。
 - [ ] 出现正文变化时，确认生成新版本并展示 diff。
 - [ ] 出现 feed 连续健康缺席时，确认弱信号、streak 与复查队列符合预期。
-- [ ] 出现直链临时不可访问时，确认 `human_label` 同时显示 `feed：在场` 与 `来源：直链当前不可访问`，并确认 `deletion_signal_level=weak`。
+- [ ] 出现直链临时不可访问时，确认 `human_label` 同时显示 `列表观察：在场` 与 `来源：直链当前不可访问`，并确认 `deletion_signal_level=weak`。
 - [ ] 出现来源页明确移除提示时，确认只显示强信号，不归因移除主体。
 - [x] 定期确认自动快照数量遵守保留上限。
 
