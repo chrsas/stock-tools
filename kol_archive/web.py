@@ -282,10 +282,9 @@ def _save_automation_settings(server: ArchiveHttpServer) -> None:
     temporary.replace(path)
 
 
-def _schedule_next_collection(settings: AutomationSettings) -> None:
-    settings.next_collection_at = (
-        datetime.now(tz=UTC) + timedelta(minutes=settings.collection_interval_minutes)
-    ).isoformat()
+def _schedule_next_collection(settings: AutomationSettings, *, immediate: bool = False) -> None:
+    delay = 0 if immediate else settings.collection_interval_minutes
+    settings.next_collection_at = (datetime.now(tz=UTC) + timedelta(minutes=delay)).isoformat()
 
 
 def _local_post(server: ArchiveHttpServer, path: str, values: dict[str, str] | None = None) -> None:
@@ -520,6 +519,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
     server: ArchiveHttpServer
 
     def log_message(self, format_string: str, *args: object) -> None:
+        if self.path == "/api/operations/status":
+            LOGGER.debug("web request " + format_string, *args)
+            return
         LOGGER.info("web request " + format_string, *args)
 
     def do_GET(self) -> None:
@@ -933,11 +935,16 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         auto_enrich = self._form_value(form, "auto_enrich") == "true"
         with self.server.automation_settings_lock:
             settings = self.server.automation_settings
+            was_enabled = settings.collection_enabled
+            interval_changed = settings.collection_interval_minutes != interval
             settings.collection_enabled = enabled
             settings.collection_interval_minutes = interval
             settings.auto_enrich = auto_enrich
-            settings.next_collection_at = None
-            if enabled:
+            if not enabled:
+                settings.next_collection_at = None
+            elif not was_enabled:
+                _schedule_next_collection(settings, immediate=True)
+            elif interval_changed or settings.next_collection_at is None:
                 _schedule_next_collection(settings)
         _save_automation_settings(self.server)
         self._send_json(HTTPStatus.OK, {"ok": True, **self._automation_settings_payload()})

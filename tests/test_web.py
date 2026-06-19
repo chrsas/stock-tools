@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import re
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlencode
@@ -505,9 +506,10 @@ def test_operations_home_lists_authors(web_server: ArchiveHttpServer) -> None:
 
 
 def test_operations_status_combines_task_and_automation_state(
-    web_server: ArchiveHttpServer,
+    web_server: ArchiveHttpServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    payload = _get_json(web_server, "/api/operations/status")
+    with caplog.at_level(logging.INFO, logger="kol_archive.web"):
+        payload = _get_json(web_server, "/api/operations/status")
     collection = cast(dict[str, object], payload["collection"])
     enrichment = cast(dict[str, object], payload["enrichment"])
     automation = cast(dict[str, object], payload["automation"])
@@ -515,6 +517,7 @@ def test_operations_status_combines_task_and_automation_state(
     assert collection["phase"] == "尚未开始采集"
     assert enrichment["phase"] == "尚未开始富化"
     assert automation["collection_interval_minutes"] == 180
+    assert not any("/api/operations/status" in record.getMessage() for record in caplog.records)
 
 
 def test_automation_settings_web_flow(web_server: ArchiveHttpServer) -> None:
@@ -540,6 +543,8 @@ def test_automation_settings_web_flow(web_server: ArchiveHttpServer) -> None:
     assert payload["collection_interval_minutes"] == 45
     assert payload["auto_enrich"] is False
     assert payload["next_collection_at"] is not None
+    next_collection_at = datetime.fromisoformat(str(payload["next_collection_at"]))
+    assert next_collection_at <= datetime.now(tz=UTC) + timedelta(seconds=2)
     saved = json.loads(
         (web_server.db_path.parent / "web-automation.json").read_text(encoding="utf-8")
     )

@@ -39,7 +39,9 @@ const automationSettings = ref<Row>({
   auto_enrich: true,
   next_collection_at: null,
 });
+const persistedAutomationSettings = ref<Row | null>(null);
 const automationNotice = ref("");
+const automationSaving = ref(false);
 const addAuthorNotice = ref("");
 const theme = ref(localStorage.getItem("kol-theme") || "system");
 const recallQuestion = ref("");
@@ -62,9 +64,14 @@ let pollingCollectStatus = false;
 let enrichStatusTimer: number | undefined;
 let pollingEnrichStatus = false;
 let operationsStatusTimer: number | undefined;
+let operationsPollingActive = false;
+let pollingOperationsStatus = false;
 let activeEnrichAuthorUid = "";
 let enrichRunObserved = false;
 let enrichRequestPending = false;
+const OPERATIONS_ACTIVE_POLL_MS = 3000;
+const OPERATIONS_IDLE_POLL_MS = 30000;
+const OPERATIONS_HIDDEN_POLL_MS = 120000;
 
 function applyTheme() {
   document.documentElement.dataset.theme = theme.value === "system"
@@ -541,27 +548,48 @@ async function restoreCollectStatus() {
 
 async function restoreAutomationSettings() {
   try {
-    automationSettings.value = await loadAutomationSettings();
+    const settings = await loadAutomationSettings();
+    automationSettings.value = settings;
+    persistedAutomationSettings.value = settings;
   } catch {
     // Automation settings do not block archive browsing.
   }
 }
 
+function automationIntervalMinutes(): number | null {
+  const value = automationSettings.value.collection_interval_minutes;
+  if (value === "" || value == null) return null;
+  const minutes = Number(value);
+  return Number.isInteger(minutes) && minutes >= 5 && minutes <= 10080 ? minutes : null;
+}
+
 async function saveAutomationSettings() {
-  if (!page.value || busy.value) return;
+  if (!page.value || busy.value || automationSaving.value) return;
+  const interval = automationIntervalMinutes();
+  if (interval === null) {
+    automationNotice.value = "请先填写 5 至 10080 之间的采集周期。";
+    return;
+  }
+  const wasEnabled = Boolean(persistedAutomationSettings.value?.collection_enabled);
+  automationSaving.value = true;
   busy.value = true;
   error.value = "";
   automationNotice.value = "";
   try {
-    automationSettings.value = await mutate("/automation/settings", page.value.csrf_token, {
+    const settings = await mutate("/automation/settings", page.value.csrf_token, {
       collection_enabled: String(Boolean(automationSettings.value.collection_enabled)),
-      collection_interval_minutes: String(automationSettings.value.collection_interval_minutes),
+      collection_interval_minutes: String(interval),
       auto_enrich: String(Boolean(automationSettings.value.auto_enrich)),
     });
-    automationNotice.value = "自动化配置已保存。";
+    automationSettings.value = settings;
+    persistedAutomationSettings.value = settings;
+    automationNotice.value = settings.collection_enabled && !wasEnabled
+      ? "自动化配置已保存，首轮采集会立即启动。"
+      : "自动化配置已保存。";
   } catch (reason) {
     error.value = friendlyRequestError(reason);
   } finally {
+    automationSaving.value = false;
     busy.value = false;
   }
 }
@@ -571,25 +599,58 @@ function enrichmentProgress(): number {
   return Math.min(100, Math.round((enrichProcessed.value / enrichTotal.value) * 100));
 }
 
-function startOperationsStatusPolling() {
-  if (operationsStatusTimer !== undefined) return;
-  operationsStatusTimer = window.setInterval(async () => {
+function operationsPollDelay(): number {
+  if (document.hidden) return OPERATIONS_HIDDEN_POLL_MS;
+  return collecting.value || enriching.value ? OPERATIONS_ACTIVE_POLL_MS : OPERATIONS_IDLE_POLL_MS;
+}
+
+function scheduleOperationsStatusPolling(delay = operationsPollDelay()) {
+  if (!operationsPollingActive) return;
+  clearOperationsStatusTimer();
+  operationsStatusTimer = window.setTimeout(() => { void pollOperationsStatus(); }, delay);
+}
+
+async function pollOperationsStatus() {
+  if (!operationsPollingActive || pollingOperationsStatus || page.value?.view !== "operations") return;
+  pollingOperationsStatus = true;
+  try {
     if (collectStatusTimer !== undefined || enrichStatusTimer !== undefined) return;
-    try {
-      const status = await loadOperationsStatus();
-      applyCollectionStatus(status.collection || {});
-      applyEnrichmentStatus(status.enrichment || {}, true);
+    const status = await loadOperationsStatus();
+    applyCollectionStatus(status.collection || {});
+    applyEnrichmentStatus(status.enrichment || {}, true);
+    if (!automationSaving.value) {
       automationSettings.value = status.automation || automationSettings.value;
-    } catch {
-      // The dedicated actions report connection failures with actionable text.
+      persistedAutomationSettings.value = status.automation || persistedAutomationSettings.value;
     }
-  }, 3000);
+  } catch {
+    // The dedicated actions report connection failures with actionable text.
+  } finally {
+    pollingOperationsStatus = false;
+    if (operationsPollingActive && page.value?.view === "operations") scheduleOperationsStatusPolling();
+  }
+}
+
+function startOperationsStatusPolling() {
+  if (operationsPollingActive) return;
+  operationsPollingActive = true;
+  void pollOperationsStatus();
+}
+
+function clearOperationsStatusTimer() {
+  if (operationsStatusTimer !== undefined) {
+    window.clearTimeout(operationsStatusTimer);
+    operationsStatusTimer = undefined;
+  }
 }
 
 function stopOperationsStatusPolling() {
-  if (operationsStatusTimer !== undefined) {
-    window.clearInterval(operationsStatusTimer);
-    operationsStatusTimer = undefined;
+  operationsPollingActive = false;
+  clearOperationsStatusTimer();
+}
+
+function handleVisibilityChange() {
+  if (operationsPollingActive && page.value?.view === "operations") {
+    scheduleOperationsStatusPolling(operationsPollDelay());
   }
 }
 
@@ -677,11 +738,13 @@ onMounted(async () => {
   await restoreCollectStatus();
   await restoreEnrichStatus();
   if (page.value?.view === "operations") startOperationsStatusPolling();
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 });
 onBeforeUnmount(() => {
   stopCollectStatusPolling();
   stopEnrichStatusPolling();
   stopOperationsStatusPolling();
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
 });
 </script>
 
@@ -743,18 +806,20 @@ onBeforeUnmount(() => {
               </p>
             </div>
             <label class="toggle-row">
-              <input v-model="automationSettings.collection_enabled" type="checkbox">
+              <input v-model="automationSettings.collection_enabled" type="checkbox" :disabled="busy" @change="saveAutomationSettings">
               <span>自动采集</span>
             </label>
             <label class="compact-field">
               <span>采集周期（分钟）</span>
-              <input v-model.number="automationSettings.collection_interval_minutes" type="number" min="5" max="10080" step="5">
+              <input v-model.number="automationSettings.collection_interval_minutes" type="number" min="5" max="10080" step="5" :disabled="busy" @change="saveAutomationSettings">
             </label>
             <label class="toggle-row">
-              <input v-model="automationSettings.auto_enrich" type="checkbox">
+              <input v-model="automationSettings.auto_enrich" type="checkbox" :disabled="busy" @change="saveAutomationSettings">
               <span>采集完成后自动富化</span>
             </label>
-            <button :disabled="busy" @click="saveAutomationSettings">保存配置</button>
+            <button :disabled="busy || automationSaving" @click="saveAutomationSettings">
+              {{ automationSaving ? "保存中…" : "保存配置" }}
+            </button>
             <span v-if="automationNotice" class="muted">{{ automationNotice }}</span>
           </section>
           <div class="operations-grid">
