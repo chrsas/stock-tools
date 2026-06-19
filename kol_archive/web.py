@@ -293,6 +293,7 @@ def _local_post(server: ArchiveHttpServer, path: str, values: dict[str, str] | N
         f"http://{host}:{port}{path}",
         data={"csrf_token": server.csrf_token, **(values or {})},
         timeout=3600,
+        trust_env=False,
     )
     response.raise_for_status()
 

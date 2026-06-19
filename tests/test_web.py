@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from urllib.parse import urlencode
 
 import pytest
@@ -34,6 +34,7 @@ from kol_archive.web import (
     ArchiveRequestHandler,
     WebSettings,
     _load_automation_settings,
+    _local_post,
     _start_auto_enrichment,
     create_server,
     load_web_settings,
@@ -324,6 +325,38 @@ def test_collect_run_once_web_flow(
     payload = json.loads(content)
     assert payload["healthy"] is False
     assert "run-once 连续失败" in payload["message"]
+
+
+def test_local_post_uses_server_csrf_and_ignores_proxy_env(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    import kol_archive.cli.collect as collect_module
+
+    calls: list[Path] = []
+    captured: list[dict[str, Any]] = []
+    original_post = httpx.post
+
+    def fake_run(
+        config_dir: Path, *, progress: Callable[[str], None] | None = None
+    ) -> collect_module.RunOnceResult:
+        calls.append(config_dir)
+        return collect_module.RunOnceResult(healthy=True, reason=None)
+
+    def capture_post(url: httpx.URL | str, **kwargs: Any) -> httpx.Response:
+        captured.append(dict(kwargs))
+        return original_post(url, **kwargs)
+
+    monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
+    monkeypatch.setattr("kol_archive.web.httpx.post", capture_post)
+
+    _local_post(web_server, "/collect/run-once")
+
+    assert calls == [web_server.config_dir]
+    assert captured[0]["trust_env"] is False
+    data = cast(dict[str, str], captured[0]["data"])
+    assert data["csrf_token"] == CSRF_TOKEN
 
 
 def test_collect_run_once_reports_browser_not_ready(
