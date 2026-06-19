@@ -298,6 +298,102 @@ def _local_post(server: ArchiveHttpServer, path: str, values: dict[str, str] | N
     response.raise_for_status()
 
 
+def _set_collection_status(
+    server: ArchiveHttpServer, *, running: bool, phase: str, healthy: bool | None
+) -> None:
+    now = datetime.now(tz=UTC).isoformat()
+    with server.collection_status_lock:
+        status = server.collection_status
+        if running and not status.running:
+            status.started_at = now
+            status.finished_at = None
+            status.logs = []
+        status.running = running
+        status.phase = phase
+        status.updated_at = now
+        status.healthy = healthy
+        if not status.logs or status.logs[-1]["message"] != phase:
+            status.logs.append({"at": now, "message": phase})
+        if not running:
+            status.finished_at = now
+
+
+def _execute_collection(
+    server: ArchiveHttpServer,
+) -> tuple[dict[str, object] | None, tuple[HTTPStatus, str] | None]:
+    if not server.collect_lock.acquire(blocking=False):
+        return None, (HTTPStatus.CONFLICT, "采集正在进行中，请稍候。")
+    collection_started_at = datetime.now(tz=UTC).isoformat()
+    _set_collection_status(server, running=True, phase="正在启动采集", healthy=None)
+    result: Any | None = None
+    failure_response: tuple[HTTPStatus, str] | None = None
+    try:
+        # Deferred import: kol_archive.cli.collect pulls in the CLI package, which
+        # imports this module back. Importing it lazily avoids the load-time cycle.
+        from kol_archive.browser import BrowserError
+        from kol_archive.cli.collect import RunLockError, execute_run_once
+
+        try:
+            result = execute_run_once(
+                server.config_dir,
+                progress=lambda phase: _set_collection_status(
+                    server,
+                    running=True,
+                    phase=phase,
+                    healthy=None,
+                ),
+            )
+        except RunLockError:
+            _set_collection_status(
+                server,
+                running=False,
+                phase="采集未启动，另一处采集正在运行",
+                healthy=False,
+            )
+            failure_response = (
+                HTTPStatus.CONFLICT,
+                "采集正在进行中（已被其他进程占用），请稍候。",
+            )
+        except BrowserError:
+            _set_collection_status(
+                server,
+                running=False,
+                phase="采集失败，专用雪球浏览器未就绪",
+                healthy=False,
+            )
+            failure_response = (
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "采集失败：已自动尝试启动专用雪球浏览器但未能就绪。"
+                "请看刚弹出的 Edge 窗口是否卡在滑块/登录，处理完后再点一次采集。",
+            )
+    except Exception:
+        _set_collection_status(
+            server, running=False, phase="采集失败，请查看服务日志", healthy=False
+        )
+        raise
+    finally:
+        server.collect_lock.release()
+    if failure_response is not None:
+        return None, failure_response
+    assert result is not None
+    message = "采集完成。" if result.healthy else f"采集完成，但有告警：{result.reason}"
+    _set_collection_status(server, running=False, phase=message, healthy=result.healthy)
+    with server.automation_settings_lock:
+        if server.automation_settings.collection_enabled:
+            _schedule_next_collection(server.automation_settings)
+    auto_enrich_started = _start_auto_enrichment(server, collection_started_at)
+    return (
+        {
+            "ok": True,
+            "healthy": result.healthy,
+            "reason": result.reason,
+            "message": message,
+            "auto_enrich_started": auto_enrich_started,
+        },
+        None,
+    )
+
+
 def _automation_loop(server: ArchiveHttpServer) -> None:
     while not server.automation_stop.wait(1):
         with server.automation_settings_lock:
@@ -314,7 +410,9 @@ def _automation_loop(server: ArchiveHttpServer) -> None:
         if not due:
             continue
         try:
-            _local_post(server, "/collect/run-once")
+            _, failure_response = _execute_collection(server)
+            if failure_response is not None:
+                LOGGER.warning("automatic web collection failed status=%s", failure_response[0])
         except Exception:
             LOGGER.warning("automatic web collection failed")
 
@@ -804,96 +902,15 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
 
     def _run_collection(self, form: dict[str, list[str]]) -> None:
         del form
-        # The collection shares one dedicated browser session and writes the archive;
-        # never let two run-once passes overlap. Reject (not queue) a concurrent click.
-        if not self.server.collect_lock.acquire(blocking=False):
-            self._send_text(HTTPStatus.CONFLICT, "采集正在进行中，请稍候。")
-            return
-        collection_started_at = datetime.now(tz=UTC).isoformat()
-        self._set_collection_status(running=True, phase="正在启动采集", healthy=None)
-        failure_response: tuple[HTTPStatus, str] | None = None
-        try:
-            # Deferred import: kol_archive.cli.collect pulls in the CLI package, which
-            # imports this module back — importing it lazily avoids the load-time cycle.
-            # The import sits inside the try so a failure still releases the lock below.
-            from kol_archive.browser import BrowserError
-            from kol_archive.cli.collect import RunLockError, execute_run_once
-
-            try:
-                result = execute_run_once(
-                    self.server.config_dir,
-                    progress=lambda phase: self._set_collection_status(
-                        running=True,
-                        phase=phase,
-                        healthy=None,
-                    ),
-                )
-            except RunLockError:
-                self._set_collection_status(
-                    running=False,
-                    phase="采集未启动，另一处采集正在运行",
-                    healthy=False,
-                )
-                failure_response = (
-                    HTTPStatus.CONFLICT,
-                    "采集正在进行中（已被其他进程占用），请稍候。",
-                )
-            except BrowserError:
-                self._set_collection_status(
-                    running=False,
-                    phase="采集失败，专用雪球浏览器未就绪",
-                    healthy=False,
-                )
-                failure_response = (
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                    "采集失败：已自动尝试启动专用雪球浏览器但未能就绪。"
-                    "请看刚弹出的 Edge 窗口是否卡在滑块/登录，处理完后再点一次采集。",
-                )
-        except Exception:
-            self._set_collection_status(
-                running=False,
-                phase="采集失败，请查看服务日志",
-                healthy=False,
-            )
-            raise
-        finally:
-            self.server.collect_lock.release()
+        payload, failure_response = _execute_collection(self.server)
         if failure_response is not None:
             self._send_text(*failure_response)
             return
-        message = "采集完成。" if result.healthy else f"采集完成，但有告警：{result.reason}"
-        self._set_collection_status(running=False, phase=message, healthy=result.healthy)
-        with self.server.automation_settings_lock:
-            if self.server.automation_settings.collection_enabled:
-                _schedule_next_collection(self.server.automation_settings)
-        auto_enrich_started = _start_auto_enrichment(self.server, collection_started_at)
-        self._send_json(
-            HTTPStatus.OK,
-            {
-                "ok": True,
-                "healthy": result.healthy,
-                "reason": result.reason,
-                "message": message,
-                "auto_enrich_started": auto_enrich_started,
-            },
-        )
+        assert payload is not None
+        self._send_json(HTTPStatus.OK, payload)
 
     def _set_collection_status(self, *, running: bool, phase: str, healthy: bool | None) -> None:
-        now = datetime.now(tz=UTC).isoformat()
-        with self.server.collection_status_lock:
-            status = self.server.collection_status
-            if running and not status.running:
-                status.started_at = now
-                status.finished_at = None
-                status.logs = []
-            status.running = running
-            status.phase = phase
-            status.updated_at = now
-            status.healthy = healthy
-            if not status.logs or status.logs[-1]["message"] != phase:
-                status.logs.append({"at": now, "message": phase})
-            if not running:
-                status.finished_at = now
+        _set_collection_status(self.server, running=running, phase=phase, healthy=healthy)
 
     def _collection_status_payload(self) -> dict[str, object]:
         with self.server.collection_status_lock:

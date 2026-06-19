@@ -33,6 +33,7 @@ from kol_archive.web import (
     ArchiveHttpServer,
     ArchiveRequestHandler,
     WebSettings,
+    _automation_loop,
     _load_automation_settings,
     _local_post,
     _start_auto_enrichment,
@@ -536,6 +537,43 @@ def test_operations_home_lists_authors(web_server: ArchiveHttpServer) -> None:
     assert payload["view"] == "operations"
     assert authors[0]["author_platform_uid"] == "100"
     assert authors[0]["pending_enrichment_count"] == 1
+
+
+def test_automation_loop_runs_collection_without_local_http_post(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kol_archive.cli.collect as collect_module
+
+    calls: list[Path] = []
+    completed = threading.Event()
+
+    def fake_run(
+        config_dir: Path, *, progress: Callable[[str], None] | None = None
+    ) -> collect_module.RunOnceResult:
+        calls.append(config_dir)
+        completed.set()
+        web_server.automation_stop.set()
+        return collect_module.RunOnceResult(healthy=True, reason=None)
+
+    def fail_local_post(*args: object, **kwargs: object) -> None:
+        raise AssertionError("automation collection must not self-post")
+
+    monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
+    monkeypatch.setattr("kol_archive.web._local_post", fail_local_post)
+    monkeypatch.setattr("kol_archive.web._start_auto_enrichment", lambda *args: False)
+
+    with web_server.automation_settings_lock:
+        web_server.automation_settings.collection_enabled = True
+        web_server.automation_settings.next_collection_at = datetime.now(tz=UTC).isoformat()
+
+    thread = threading.Thread(target=_automation_loop, args=(web_server,), daemon=True)
+    thread.start()
+    assert completed.wait(timeout=3)
+    thread.join(timeout=3)
+
+    assert calls == [web_server.config_dir]
+    status_payload = _get_json(web_server, "/api/collect/status")
+    assert status_payload["phase"] == "采集完成。"
 
 
 def test_operations_status_combines_task_and_automation_state(
