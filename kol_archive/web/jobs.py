@@ -1,0 +1,358 @@
+"""Collection and enrichment execution: the long-running jobs the web triggers."""
+
+from __future__ import annotations
+
+import logging
+import re
+import sqlite3
+import threading
+from dataclasses import replace
+from datetime import UTC, datetime
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Any
+
+import httpx
+
+from kol_archive.config import load_config
+from kol_archive.database import connect_database
+from kol_archive.enrich import enrich_targets, load_enrich_settings
+from kol_archive.maintenance import redact_text
+from kol_archive.models import EnrichmentTarget
+from kol_archive.service import Archive
+
+from .settings import EnrichmentStatus
+
+if TYPE_CHECKING:
+    from .settings import ArchiveHttpServer
+
+LOGGER = logging.getLogger("kol_archive.web")
+
+
+def _set_collection_status(
+    server: ArchiveHttpServer, *, running: bool, phase: str, healthy: bool | None
+) -> None:
+    now = datetime.now(tz=UTC).isoformat()
+    with server.collection_status_lock:
+        status = server.collection_status
+        if running and not status.running:
+            status.started_at = now
+            status.finished_at = None
+            status.logs = []
+        status.running = running
+        status.phase = phase
+        status.updated_at = now
+        status.healthy = healthy
+        if not status.logs or status.logs[-1]["message"] != phase:
+            status.logs.append({"at": now, "message": phase})
+        if not running:
+            status.finished_at = now
+
+
+def _execute_collection(
+    server: ArchiveHttpServer,
+) -> tuple[dict[str, object] | None, tuple[HTTPStatus, str] | None]:
+    if not server.collect_lock.acquire(blocking=False):
+        return None, (HTTPStatus.CONFLICT, "采集正在进行中，请稍候。")
+    collection_started_at = datetime.now(tz=UTC).isoformat()
+    _set_collection_status(server, running=True, phase="正在启动采集", healthy=None)
+    result: Any | None = None
+    failure_response: tuple[HTTPStatus, str] | None = None
+    try:
+        # Deferred import: kol_archive.cli.collect pulls in the CLI package, which
+        # imports this module back. Importing it lazily avoids the load-time cycle.
+        from kol_archive.browser import BrowserError
+        from kol_archive.cli.collect import RunLockError, execute_run_once
+
+        try:
+            result = execute_run_once(
+                server.config_dir,
+                progress=lambda phase: _set_collection_status(
+                    server,
+                    running=True,
+                    phase=phase,
+                    healthy=None,
+                ),
+            )
+        except RunLockError:
+            _set_collection_status(
+                server,
+                running=False,
+                phase="采集未启动，另一处采集正在运行",
+                healthy=False,
+            )
+            failure_response = (
+                HTTPStatus.CONFLICT,
+                "采集正在进行中（已被其他进程占用），请稍候。",
+            )
+        except BrowserError:
+            _set_collection_status(
+                server,
+                running=False,
+                phase="采集失败，专用雪球浏览器未就绪",
+                healthy=False,
+            )
+            failure_response = (
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "采集失败：已自动尝试启动专用雪球浏览器但未能就绪。"
+                "请看刚弹出的 Edge 窗口是否卡在滑块/登录，处理完后再点一次采集。",
+            )
+    except Exception:
+        _set_collection_status(
+            server, running=False, phase="采集失败，请查看服务日志", healthy=False
+        )
+        raise
+    finally:
+        server.collect_lock.release()
+    if failure_response is not None:
+        return None, failure_response
+    assert result is not None
+    message = "采集完成。" if result.healthy else f"采集完成，但有告警：{result.reason}"
+    _set_collection_status(server, running=False, phase=message, healthy=result.healthy)
+    auto_enrich_started = _start_auto_enrichment(server, collection_started_at)
+    return (
+        {
+            "ok": True,
+            "healthy": result.healthy,
+            "reason": result.reason,
+            "message": message,
+            "auto_enrich_started": auto_enrich_started,
+        },
+        None,
+    )
+
+
+def _enrichment_detail(
+    target: EnrichmentTarget,
+    *,
+    status: str,
+    error: Exception | None = None,
+) -> dict[str, object]:
+    original_text = re.sub(r"\s+", " ", target.original_text).strip()
+    detail: dict[str, object] = {
+        "post_id": target.post_id,
+        "version_id": target.version_id,
+        "status": status,
+        "excerpt": original_text[:120],
+    }
+    if error is not None:
+        detail["error_type"] = type(error).__name__
+        detail["error"] = redact_text(str(error)).strip()[:500] or "未提供错误详情"
+    return detail
+
+
+def _set_enrichment_status(
+    server: ArchiveHttpServer,
+    *,
+    running: bool,
+    author_uid: str,
+    phase: str,
+    processed: int,
+    total: int,
+    enriched: int,
+    failed: int,
+    details: list[dict[str, object]],
+) -> None:
+    now = datetime.now(tz=UTC).isoformat()
+    with server.enrichment_status_lock:
+        previous = server.enrichment_status
+        logs = [] if running and not previous.running else list(previous.logs)
+        if not logs or logs[-1]["message"] != phase:
+            logs.append({"at": now, "message": phase})
+        server.enrichment_status = EnrichmentStatus(
+            running=running,
+            author_uid=author_uid,
+            phase=phase,
+            processed=processed,
+            total=total,
+            enriched=enriched,
+            failed=failed,
+            details=list(details),
+            logs=logs,
+        )
+
+
+def _execute_author_enrichment(
+    server: ArchiveHttpServer, author_uid: str, observed_since: str | None
+) -> tuple[dict[str, object] | None, tuple[HTTPStatus, str] | None]:
+    if not server.enrichment_lock.acquire(blocking=False):
+        return None, (HTTPStatus.CONFLICT, "富化正在进行中，请稍候。")
+    _set_enrichment_status(
+        server,
+        running=True,
+        author_uid=author_uid,
+        phase="正在准备富化",
+        processed=0,
+        total=0,
+        enriched=0,
+        failed=0,
+        details=[],
+    )
+    settings = None
+    targets: list[EnrichmentTarget] = []
+    enriched = failed = 0
+    details: list[dict[str, object]] = []
+    try:
+        config = load_config(server.config_dir)
+        settings = replace(
+            load_enrich_settings(config),
+            prompt_version=server.enrich_prompt_version,
+        )
+        connection = connect_database(server.db_path)
+        archive = Archive(connection)
+        try:
+            author_row = connection.execute(
+                "SELECT id FROM authors WHERE platform = 'xueqiu' AND platform_uid = ?",
+                (author_uid,),
+            ).fetchone()
+            if author_row is None:
+                raise ValueError("author not found")
+            targets = archive.enrichment_targets(
+                settings.prompt_version,
+                author_id=int(author_row["id"]),
+                current_only=True,
+                observed_since=observed_since,
+            )
+            _set_enrichment_status(
+                server,
+                running=True,
+                author_uid=author_uid,
+                phase=f"准备富化 {len(targets)} 条发言",
+                processed=0,
+                total=len(targets),
+                enriched=0,
+                failed=0,
+                details=[],
+            )
+            with httpx.Client(timeout=30.0) as client:
+                for index, (target, result, error) in enumerate(
+                    enrich_targets(settings, targets, client=client), start=1
+                ):
+                    try:
+                        if error is not None:
+                            raise error
+                        assert result is not None
+                        if (
+                            archive.add_enrichment(
+                                target,
+                                result,
+                                settings.model,
+                                settings.prompt_version,
+                                datetime.now(tz=UTC).isoformat(),
+                            )
+                            is not None
+                        ):
+                            enriched += 1
+                            details.append(_enrichment_detail(target, status="success"))
+                    except (httpx.HTTPError, sqlite3.Error, ValueError) as failure:
+                        failed += 1
+                        details.append(
+                            _enrichment_detail(
+                                target,
+                                status="failed",
+                                error=failure,
+                            )
+                        )
+                        LOGGER.warning(
+                            "web enrichment failed version_id=%s type=%s",
+                            target.version_id,
+                            type(failure).__name__,
+                        )
+                    _set_enrichment_status(
+                        server,
+                        running=True,
+                        author_uid=author_uid,
+                        phase=f"正在富化 {index}/{len(targets)}",
+                        processed=index,
+                        total=len(targets),
+                        enriched=enriched,
+                        failed=failed,
+                        details=details,
+                    )
+            _set_enrichment_status(
+                server,
+                running=False,
+                author_uid=author_uid,
+                phase=f"富化完成，成功 {enriched} 条，失败 {failed} 条",
+                processed=len(targets),
+                total=len(targets),
+                enriched=enriched,
+                failed=failed,
+                details=details,
+            )
+        finally:
+            connection.close()
+    except Exception:
+        with server.enrichment_status_lock:
+            status = server.enrichment_status
+            processed = status.processed
+            total = status.total
+            enriched = status.enriched
+            failed = status.failed
+            details = status.details
+        _set_enrichment_status(
+            server,
+            running=False,
+            author_uid=author_uid,
+            phase=f"富化中止，已处理 {processed}/{total}，成功 {enriched} 条，失败 {failed} 条",
+            processed=processed,
+            total=total,
+            enriched=enriched,
+            failed=failed,
+            details=details,
+        )
+        raise
+    finally:
+        server.enrichment_lock.release()
+    assert settings is not None
+    return (
+        {
+            "ok": True,
+            "prompt_version": settings.prompt_version,
+            "candidates": len(targets),
+            "enriched": enriched,
+            "failed": failed,
+            "details": details,
+            "message": f"富化完成，成功 {enriched} 条，失败 {failed} 条。",
+        },
+        None,
+    )
+
+
+def _start_auto_enrichment(server: ArchiveHttpServer, observed_since: str) -> bool:
+    with server.automation_settings_lock:
+        if not server.automation_active or not server.automation_settings.auto_enrich:
+            return False
+
+    def run() -> None:
+        connection = connect_database(server.db_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT a.platform_uid
+                FROM authors a
+                JOIN posts p ON p.author_id = a.id
+                JOIN post_versions v ON v.id = p.current_version_id
+                LEFT JOIN enrichments e
+                  ON e.version_id = v.id AND e.prompt_version = ?
+                WHERE e.id IS NULL AND v.first_observed_at >= ?
+                ORDER BY a.id
+                """,
+                (server.enrich_prompt_version, observed_since),
+            ).fetchall()
+        finally:
+            connection.close()
+        for row in rows:
+            author_uid = str(row["platform_uid"])
+            try:
+                _, failure_response = _execute_author_enrichment(server, author_uid, observed_since)
+                if failure_response is not None:
+                    LOGGER.warning(
+                        "automatic web enrichment failed author_uid=%s status=%s",
+                        author_uid,
+                        failure_response[0],
+                    )
+            except Exception:
+                LOGGER.warning("automatic web enrichment failed author_uid=%s", author_uid)
+
+    threading.Thread(target=run, name="web-auto-enrichment", daemon=True).start()
+    return True

@@ -291,7 +291,7 @@ def test_collect_run_once_web_flow(
         return True
 
     monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
-    monkeypatch.setattr("kol_archive.web._start_auto_enrichment", fake_auto_enrich)
+    monkeypatch.setattr("kol_archive.web.jobs._start_auto_enrichment", fake_auto_enrich)
     status, _, content = _request(
         web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
     )
@@ -724,7 +724,7 @@ def test_automation_loop_runs_collection_without_local_http_post(
         return collect_module.RunOnceResult(healthy=True, reason=None)
 
     monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
-    monkeypatch.setattr("kol_archive.web._start_auto_enrichment", lambda *args: False)
+    monkeypatch.setattr("kol_archive.web.jobs._start_auto_enrichment", lambda *args: False)
 
     with web_server.automation_settings_lock:
         web_server.automation_settings.collection_enabled = True
@@ -753,7 +753,7 @@ def test_automation_loop_retries_soon_when_collection_lock_is_busy(
         web_server.automation_stop.set()
         return None, (HTTPStatus.CONFLICT, "busy")
 
-    monkeypatch.setattr("kol_archive.web._execute_collection", busy)
+    monkeypatch.setattr("kol_archive.web.jobs._execute_collection", busy)
     with web_server.automation_settings_lock:
         web_server.automation_settings.collection_enabled = True
         web_server.automation_settings.next_collection_at = datetime.now(tz=UTC).isoformat()
@@ -861,7 +861,7 @@ def test_auto_enrichment_runs_without_local_http_post(
         completed.set()
         return {"ok": True}, None
 
-    monkeypatch.setattr("kol_archive.web._execute_author_enrichment", fake_execute)
+    monkeypatch.setattr("kol_archive.web.jobs._execute_author_enrichment", fake_execute)
 
     assert _start_auto_enrichment(web_server, BASE_TIME) is True
     assert completed.wait(timeout=5)
@@ -1344,7 +1344,7 @@ def test_recall_expand_web_flow_and_guards(
             notes="拆成事件与标的两组",
         )
 
-    monkeypatch.setattr("kol_archive.web.expand_query", fake_expand)
+    monkeypatch.setattr("kol_archive.web.handler.expand_query", fake_expand)
     status, _, content = _request(
         web_server,
         "POST",
@@ -1397,7 +1397,7 @@ def test_recall_brief_web_flow_persists_lists_and_guards(
             cited_version_ids=(version_id,),
         )
 
-    monkeypatch.setattr("kol_archive.web.synthesize_brief", fake_synthesize)
+    monkeypatch.setattr("kol_archive.web.handler.synthesize_brief", fake_synthesize)
 
     status, _, content = _request(
         web_server,
@@ -1633,7 +1633,7 @@ def test_rewrite_route_locks_version_and_pins_post(
 ) -> None:
     _, version_id = _read_post_row(web_server)
     monkeypatch.setattr(
-        "kol_archive.web.request_rewrite",
+        "kol_archive.web.handler.request_rewrite",
         lambda settings, original_text: RewriteSuggestion(
             rewritten_claim=f"命题：{original_text}",
             rationale=f"模型：{settings.model}",
