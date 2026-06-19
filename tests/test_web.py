@@ -9,8 +9,9 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from http import HTTPStatus
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 from urllib.parse import urlencode
 
 import pytest
@@ -34,9 +35,11 @@ from kol_archive.web import (
     ArchiveRequestHandler,
     WebSettings,
     _automation_loop,
+    _execute_author_enrichment,
     _load_automation_settings,
-    _local_post,
+    _prime_startup_collection_schedule,
     _start_auto_enrichment,
+    _startup_collection_due_at,
     create_server,
     load_web_settings,
 )
@@ -328,38 +331,6 @@ def test_collect_run_once_web_flow(
     assert "run-once 连续失败" in payload["message"]
 
 
-def test_local_post_uses_server_csrf_and_ignores_proxy_env(
-    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import httpx
-
-    import kol_archive.cli.collect as collect_module
-
-    calls: list[Path] = []
-    captured: list[dict[str, Any]] = []
-    original_post = httpx.post
-
-    def fake_run(
-        config_dir: Path, *, progress: Callable[[str], None] | None = None
-    ) -> collect_module.RunOnceResult:
-        calls.append(config_dir)
-        return collect_module.RunOnceResult(healthy=True, reason=None)
-
-    def capture_post(url: httpx.URL | str, **kwargs: Any) -> httpx.Response:
-        captured.append(dict(kwargs))
-        return original_post(url, **kwargs)
-
-    monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
-    monkeypatch.setattr("kol_archive.web.httpx.post", capture_post)
-
-    _local_post(web_server, "/collect/run-once")
-
-    assert calls == [web_server.config_dir]
-    assert captured[0]["trust_env"] is False
-    data = cast(dict[str, str], captured[0]["data"])
-    assert data["csrf_token"] == CSRF_TOKEN
-
-
 def test_collect_run_once_reports_browser_not_ready(
     web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -539,6 +510,203 @@ def test_operations_home_lists_authors(web_server: ArchiveHttpServer) -> None:
     assert authors[0]["pending_enrichment_count"] == 1
 
 
+def test_startup_collection_schedule_runs_immediately_when_last_run_failed(
+    web_server: ArchiveHttpServer,
+) -> None:
+    connection = connect_database(web_server.db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO fetch_runs(
+                author_id, platform, started_at, finished_at, status, login_state,
+                pages_fetched, pagination_complete, covered_from, covered_to,
+                rate_limited, http_error_count, ingest_mode, adapter_version,
+                parse_failure_count, reached_timeline_end
+            ) VALUES (1, 'xueqiu', ?, ?, 'failed', 'valid', 0, 0, NULL, NULL,
+                      0, 1, 'live', 'xueqiu-2', 0, 0)
+            """,
+            (
+                "2026-06-19T00:00:00+00:00",
+                "2026-06-19T00:01:00+00:00",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    now = datetime(2026, 6, 19, 0, 2, tzinfo=UTC)
+
+    assert _startup_collection_due_at(web_server.db_path, 180, now=now) == now
+
+
+def test_startup_collection_schedule_checks_each_author_latest_run(
+    web_server: ArchiveHttpServer,
+) -> None:
+    connection = connect_database(web_server.db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO authors(platform, platform_uid, live_monitoring_started_at, notes)
+            VALUES ('xueqiu', '200', ?, NULL)
+            """,
+            (BASE_TIME,),
+        )
+        row = connection.execute("SELECT id FROM authors WHERE platform_uid = '200'").fetchone()
+        author_id = int(row["id"])
+        connection.execute(
+            """
+            INSERT INTO fetch_runs(
+                author_id, platform, started_at, finished_at, status, login_state,
+                pages_fetched, pagination_complete, covered_from, covered_to,
+                rate_limited, http_error_count, ingest_mode, adapter_version,
+                parse_failure_count, reached_timeline_end
+            ) VALUES (?, 'xueqiu', ?, ?, 'failed', 'valid', 0, 0, NULL, NULL,
+                      0, 1, 'live', 'xueqiu-2', 0, 0)
+            """,
+            (
+                author_id,
+                "2026-06-01T00:10:00+00:00",
+                "2026-06-01T00:11:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO fetch_runs(
+                author_id, platform, started_at, finished_at, status, login_state,
+                pages_fetched, pagination_complete, covered_from, covered_to,
+                rate_limited, http_error_count, ingest_mode, adapter_version,
+                parse_failure_count, reached_timeline_end
+            ) VALUES (1, 'xueqiu', ?, ?, 'ok', 'valid', 1, 1, ?, ?,
+                      0, 0, 'live', 'xueqiu-2', 0, 0)
+            """,
+            (
+                "2026-06-01T00:20:00+00:00",
+                "2026-06-01T00:21:00+00:00",
+                "2026-05-01T00:00:00+00:00",
+                "2026-06-01T00:20:00+00:00",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    now = datetime(2026, 6, 1, 0, 30, tzinfo=UTC)
+
+    assert (
+        _startup_collection_due_at(
+            web_server.db_path,
+            180,
+            active_author_uids={"100", "200"},
+            now=now,
+        )
+        == now
+    )
+
+
+def test_startup_collection_schedule_ignores_removed_author_failure(
+    web_server: ArchiveHttpServer,
+) -> None:
+    connection = connect_database(web_server.db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO authors(platform, platform_uid, live_monitoring_started_at, notes)
+            VALUES ('xueqiu', 'removed', ?, NULL)
+            """,
+            (BASE_TIME,),
+        )
+        row = connection.execute("SELECT id FROM authors WHERE platform_uid = 'removed'").fetchone()
+        removed_author_id = int(row["id"])
+        connection.execute(
+            """
+            INSERT INTO fetch_runs(
+                author_id, platform, started_at, finished_at, status, login_state,
+                pages_fetched, pagination_complete, covered_from, covered_to,
+                rate_limited, http_error_count, ingest_mode, adapter_version,
+                parse_failure_count, reached_timeline_end
+            ) VALUES (?, 'xueqiu', ?, ?, 'failed', 'valid', 0, 0, NULL, NULL,
+                      0, 1, 'live', 'xueqiu-2', 0, 0)
+            """,
+            (
+                removed_author_id,
+                "2026-06-01T00:20:00+00:00",
+                "2026-06-01T00:21:00+00:00",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    now = datetime(2026, 6, 1, 1, 0, tzinfo=UTC)
+
+    assert _startup_collection_due_at(
+        web_server.db_path,
+        180,
+        active_author_uids={"100"},
+        now=now,
+    ) == datetime.fromisoformat(BASE_TIME) + timedelta(minutes=180)
+
+
+def test_startup_collection_schedule_keeps_partial_without_failures_on_cadence(
+    web_server: ArchiveHttpServer,
+) -> None:
+    connection = connect_database(web_server.db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO fetch_runs(
+                author_id, platform, started_at, finished_at, status, login_state,
+                pages_fetched, pagination_complete, covered_from, covered_to,
+                rate_limited, http_error_count, ingest_mode, adapter_version,
+                parse_failure_count, reached_timeline_end
+            ) VALUES (1, 'xueqiu', ?, ?, 'partial', 'valid', 1, 0, ?, ?,
+                      0, 0, 'live', 'xueqiu-2', 1, 0)
+            """,
+            (
+                "2026-06-01T00:10:00+00:00",
+                "2026-06-01T00:12:00+00:00",
+                "2026-05-01T00:00:00+00:00",
+                "2026-06-01T00:10:00+00:00",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    now = datetime(2026, 6, 1, 1, 0, tzinfo=UTC)
+
+    assert _startup_collection_due_at(web_server.db_path, 180, now=now) == datetime(
+        2026, 6, 1, 3, 12, tzinfo=UTC
+    )
+
+
+def test_startup_collection_schedule_keeps_remaining_interval_after_success(
+    web_server: ArchiveHttpServer,
+) -> None:
+    now = datetime(2026, 6, 1, 1, 0, tzinfo=UTC)
+    due_at = _startup_collection_due_at(web_server.db_path, 180, now=now)
+
+    assert due_at == datetime.fromisoformat(BASE_TIME) + timedelta(minutes=180)
+
+
+def test_prime_startup_collection_schedule_uses_immediate_due_time(
+    web_server: ArchiveHttpServer,
+) -> None:
+    with web_server.automation_settings_lock:
+        web_server.automation_settings.collection_enabled = True
+        web_server.automation_settings.collection_interval_minutes = 180
+        web_server.automation_settings.next_collection_at = None
+
+    _prime_startup_collection_schedule(web_server)
+
+    with web_server.automation_settings_lock:
+        assert web_server.automation_settings.next_collection_at is not None
+        next_collection_at = datetime.fromisoformat(
+            web_server.automation_settings.next_collection_at
+        )
+    assert next_collection_at <= datetime.now(tz=UTC)
+
+
 def test_automation_loop_runs_collection_without_local_http_post(
     web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -555,11 +723,7 @@ def test_automation_loop_runs_collection_without_local_http_post(
         web_server.automation_stop.set()
         return collect_module.RunOnceResult(healthy=True, reason=None)
 
-    def fail_local_post(*args: object, **kwargs: object) -> None:
-        raise AssertionError("automation collection must not self-post")
-
     monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
-    monkeypatch.setattr("kol_archive.web._local_post", fail_local_post)
     monkeypatch.setattr("kol_archive.web._start_auto_enrichment", lambda *args: False)
 
     with web_server.automation_settings_lock:
@@ -574,6 +738,36 @@ def test_automation_loop_runs_collection_without_local_http_post(
     assert calls == [web_server.config_dir]
     status_payload = _get_json(web_server, "/api/collect/status")
     assert status_payload["phase"] == "采集完成。"
+
+
+def test_automation_loop_retries_soon_when_collection_lock_is_busy(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    completed = threading.Event()
+
+    def busy(
+        server: ArchiveHttpServer,
+    ) -> tuple[dict[str, object] | None, tuple[HTTPStatus, str] | None]:
+        assert server is web_server
+        completed.set()
+        web_server.automation_stop.set()
+        return None, (HTTPStatus.CONFLICT, "busy")
+
+    monkeypatch.setattr("kol_archive.web._execute_collection", busy)
+    with web_server.automation_settings_lock:
+        web_server.automation_settings.collection_enabled = True
+        web_server.automation_settings.next_collection_at = datetime.now(tz=UTC).isoformat()
+
+    before = datetime.now(tz=UTC)
+    thread = threading.Thread(target=_automation_loop, args=(web_server,), daemon=True)
+    thread.start()
+    assert completed.wait(timeout=3)
+    thread.join(timeout=3)
+
+    with web_server.automation_settings_lock:
+        assert web_server.automation_settings.next_collection_at is not None
+        retry_at = datetime.fromisoformat(web_server.automation_settings.next_collection_at)
+    assert before < retry_at <= datetime.now(tz=UTC) + timedelta(seconds=90)
 
 
 def test_operations_status_combines_task_and_automation_state(
@@ -652,39 +846,41 @@ def test_load_automation_settings_ignores_non_object_json(tmp_path: Path, conten
     assert settings.auto_enrich is True
 
 
-def test_auto_enrichment_encodes_uid_and_passes_collection_boundary(
+def test_auto_enrichment_runs_without_local_http_post(
     web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    connection = connect_database(web_server.db_path)
-    try:
-        connection.execute(
-            "UPDATE authors SET platform_uid = ? WHERE platform_uid = '100'",
-            ("a/b %",),
-        )
-        connection.commit()
-    finally:
-        connection.close()
     web_server.automation_active = True
-    calls: list[tuple[str, dict[str, str] | None]] = []
+    calls: list[tuple[str, str | None]] = []
     completed = threading.Event()
 
-    def fake_local_post(
-        server: ArchiveHttpServer, path: str, values: dict[str, str] | None = None
-    ) -> None:
+    def fake_execute(
+        server: ArchiveHttpServer, author_uid: str, observed_since: str | None
+    ) -> tuple[dict[str, object] | None, tuple[object, str] | None]:
         assert server is web_server
-        calls.append((path, values))
+        calls.append((author_uid, observed_since))
         completed.set()
+        return {"ok": True}, None
 
-    monkeypatch.setattr("kol_archive.web._local_post", fake_local_post)
+    monkeypatch.setattr("kol_archive.web._execute_author_enrichment", fake_execute)
 
     assert _start_auto_enrichment(web_server, BASE_TIME) is True
     assert completed.wait(timeout=5)
-    assert calls == [
-        (
-            "/authors/a%2Fb%20%25/enrich",
-            {"observed_since": BASE_TIME},
-        )
-    ]
+    assert calls == [("100", BASE_TIME)]
+
+
+def test_execute_author_enrichment_reports_conflict_when_long_task_runs(
+    web_server: ArchiveHttpServer,
+) -> None:
+    assert web_server.enrichment_lock.acquire(blocking=False)
+    try:
+        payload, failure_response = _execute_author_enrichment(web_server, "100", None)
+    finally:
+        web_server.enrichment_lock.release()
+
+    assert payload is None
+    assert failure_response is not None
+    assert failure_response[0] == HTTPStatus.CONFLICT
+    assert "富化正在进行中" in failure_response[1]
 
 
 def test_enrich_author_observed_since_excludes_old_backlog(
