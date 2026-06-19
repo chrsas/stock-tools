@@ -10,7 +10,7 @@ import {
   mutate,
   type Row,
 } from "./api";
-import { authorName, fmtTime, percent, postTitle, xueqiuUrl } from "./format";
+import { authorName, fmtTime, orderedVersions, percent, postTitle, xueqiuUrl } from "./format";
 import AuthorBadge from "./components/AuthorBadge.vue";
 import PostLinks from "./components/PostLinks.vue";
 import QueueCard from "./components/QueueCard.vue";
@@ -1284,15 +1284,38 @@ onBeforeUnmount(() => {
 
         <template v-else-if="page?.view === 'post'">
           <div class="page-title"><div><h1>证据卡片：{{ postTitle(page.card.post) }}</h1><AuthorBadge :item="page.card.post" /></div><PostLinks :item="page.card.post" /></div>
-          <section class="panel">
-            <p>{{ page.card.post.status?.human_label }}</p>
-            <p class="muted">{{ page.card.post.status?.deletion_signal_label }}</p>
+
+          <!-- 状态条：当前状态 + 删帖信号 + pin，参照信息置顶且紧凑 -->
+          <section class="panel post-status">
+            <div>
+              <span class="eyebrow">当前状态</span>
+              <p class="status-line">{{ page.card.post.status?.human_label }}</p>
+              <p v-if="page.card.post.status?.deletion_signal_label" class="muted small">{{ page.card.post.status.deletion_signal_label }}</p>
+            </div>
             <div class="actions"><button @click="action(`/posts/${page.card.post.id}/pin`)">钉住</button><button class="secondary" @click="action(`/posts/${page.card.post.id}/unpin`)">取消钉住</button></div>
-            <form v-if="page.card.post.current_version_id" @submit.prevent="submitAttention">
+          </section>
+
+          <!-- 主体：博主到底说了什么（观察版本，当前版本置顶并高亮） -->
+          <section>
+            <div class="stream-label"><span class="eyebrow">发言内容 · {{ page.card.versions.length }} 个观察版本</span></div>
+            <article v-for="version in orderedVersions(page.card.versions, page.card.post.current_version_id)" :key="version.version_id" class="card" :class="{ current: version.version_id === page.card.post.current_version_id }">
+              <header><h3>版本 {{ version.version_id }}</h3><span v-if="version.version_id === page.card.post.current_version_id" class="pill">当前</span></header>
+              <p class="muted small">首次 {{ fmtTime(version.first_observed_at) }} · 最后 {{ fmtTime(version.last_observed_at) }}</p>
+              <pre>{{ version.content_text }}</pre>
+              <details v-if="version.diff_from_prior_observed_version"><summary>相对上一版本 diff</summary><pre>{{ version.diff_from_prior_observed_version }}</pre></details>
+            </article>
+          </section>
+
+          <!-- 我的操作：关注理由 / 改写训练，与状态、内容分开 -->
+          <section v-if="page.card.post.current_version_id" class="panel">
+            <div class="stream-label"><span class="eyebrow">我的操作</span></div>
+            <form @submit.prevent="submitAttention">
               <label>关注理由<textarea name="reason" required></textarea></label><label>我的预期<textarea name="expectation"></textarea></label><button>记录关注理由并钉住</button>
             </form>
-            <button v-if="page.card.post.current_version_id" @click="action(`/posts/${page.card.post.id}/rewrite`, { version_id: page.card.post.current_version_id })">生成单条改写训练</button>
+            <button class="secondary" @click="action(`/posts/${page.card.post.id}/rewrite`, { version_id: page.card.post.current_version_id })">生成单条改写训练</button>
           </section>
+
+          <!-- 上下文：该作者在本标的的历史 -->
           <section>
             <div class="stream-label"><span class="eyebrow">该作者与本帖标的</span></div>
             <p v-if="page.card.ticker_history.empty_label" class="empty">{{ page.card.ticker_history.empty_label }}</p>
@@ -1304,8 +1327,15 @@ onBeforeUnmount(() => {
               <p v-for="event in item.events" :key="`${event.detected_at}-${event.dimension}`" class="muted">{{ event.detected_at }} · {{ event.dimension }}：{{ event.from_value || "无" }} → {{ event.to_value }}</p>
             </article>
           </section>
-          <section><div class="stream-label"><span class="eyebrow">观察版本</span></div><article v-for="version in page.card.versions" :key="version.version_id" class="card"><h3>观察版本 {{ version.version_id }}</h3><p class="muted">首次 {{ fmtTime(version.first_observed_at) }} · 最后 {{ fmtTime(version.last_observed_at) }}</p><pre>{{ version.content_text }}</pre><details><summary>相对上一版本 diff</summary><pre>{{ version.diff_from_prior_observed_version || "首个观察版本" }}</pre></details></article></section>
-          <section v-for="name in ['feed_observations', 'direct_probes', 'events', 'attention_log', 'rewrite_exercises', 'enrichments']" :key="name"><div class="stream-label"><span class="eyebrow">{{ name }}</span></div><pre class="data">{{ JSON.stringify(page.card[name], null, 2) }}</pre></section>
+
+          <!-- 原始数据流：默认折叠、空流不渲染，降为次级调试信息 -->
+          <section class="raw-streams">
+            <div class="stream-label"><span class="eyebrow">原始数据流</span><small class="muted">调试与溯源用，默认收起</small></div>
+            <template v-for="name in ['feed_observations', 'direct_probes', 'events', 'attention_log', 'rewrite_exercises', 'enrichments']" :key="name">
+              <details v-if="page.card[name]?.length"><summary>{{ name }} · {{ page.card[name].length }}</summary><pre class="data">{{ JSON.stringify(page.card[name], null, 2) }}</pre></details>
+            </template>
+            <p v-if="!['feed_observations', 'direct_probes', 'events', 'attention_log', 'rewrite_exercises', 'enrichments'].some(n => page?.card?.[n]?.length)" class="muted small">暂无原始数据流记录。</p>
+          </section>
         </template>
       </main>
     </div>

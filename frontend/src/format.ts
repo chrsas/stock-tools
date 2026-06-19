@@ -40,3 +40,15 @@ export function originalUrl(item: Row): string {
 export function xueqiuUrl(item: Row): string {
   return item.author_platform_uid ? `https://xueqiu.com/u/${encodeURIComponent(item.author_platform_uid)}` : "";
 }
+
+// 证据卡片的观察版本列表：后端按 version_id 升序返回，当前版本通常排在最后。
+// 这里把 current_version_id 对应的版本提到首位，其余保持原有时间顺序，
+// 让证据卡片的“发言内容”一眼能看到当前生效的那条。
+export function orderedVersions(versions: Row[] | undefined, currentVersionId: unknown): Row[] {
+  const list = Array.isArray(versions) ? versions.slice() : [];
+  if (currentVersionId == null) return list;
+  const currentIndex = list.findIndex((version) => version.version_id === currentVersionId);
+  if (currentIndex < 0) return list;
+  const [current] = list.splice(currentIndex, 1);
+  return [current, ...list];
+}
