@@ -1,9 +1,9 @@
 # 已完成阶段规范归档
 
 > 本文件保存 `tasks.md` 中**已完成并有测试兜底**的阶段原始规范与 DoD，供追溯。
-> 日常开发无需阅读本文件；宪章（第 0 节）、数据模型（第 2 节）与质量约束（第 6 节）
-> 仍以 `tasks.md` 为准。每完成一个阶段，将其详细规范从 `tasks.md` 移入此处，
-> 原位置只留一行交付摘要。
+> 日常开发无需阅读本文件；宪章与质量约束以 `tasks.md` 为准，数据模型与状态机细节见
+> `docs/architecture.md`。每完成一个阶段，将其详细规范从 `tasks.md` 移入此处，原位置只留
+> 一行交付摘要。
 
 ---
 
@@ -15,7 +15,7 @@
 **1b 存档与双轨状态机**
 - 单进程 + SQLite(WAL)，连接级 `PRAGMA foreign_keys=ON`；建全部表、视图、UNIQUE/部分唯一索引、FK。
 - 触发器：六张证据表只追加；`posts` 禁删与身份字段不可改。
-- feed 与直链两任务，各按第 2 节事务顺序原子写入；实现 2.2–2.6 全部规则。
+- feed 与直链两任务，各按 `docs/architecture.md` 的事务顺序原子写入；实现该文件 Track A/B、内容版本处理、末次观察推导、钉住与队列全部规则。
 
 **1c 备份与导出**
 SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JSON/CSV 导出；API 密钥仅环境变量，登录 cookie 可用环境变量或被忽略的本地配置，任何凭据绝不进导出文件。
@@ -26,7 +26,7 @@ SQLite backup API 或 `VACUUM INTO` 定时多份快照，定期恢复验证；JS
 
 ### 阶段 2：原始时间线 + 证据卡片 + 关注理由 + 改写训练
 不建批量富化。时间线（三维状态人读标签、删帖强弱信号分级）；证据卡片（无 LLM，单帖观察历史、版本 diff、变迁及证据 run、附注、钉住开关）；`attention_log`（锁 `version_id`、创建即自动钉住）；改写训练（按需单条 LLM 改写写 `rewrite_exercises` 含 `version_id`、创建即自动钉住）。
-**DoD**：原始流与诚实观察时间可见；钉/取消钉遵守 2.6；写理由或改写训练自动钉住并锁版本。
+**DoD**：原始流与诚实观察时间可见；钉/取消钉遵守 `docs/architecture.md` 的钉住与队列规则；写理由或改写训练自动钉住并锁版本。
 
 ### 阶段 2b：轻量网页界面 + 手机私网访问
 前端源码放在 `frontend/`，构建产物由现有 `serve` 命令托管。网页与 CLI 共用现有 SQLite、
@@ -177,3 +177,15 @@ claim_proposals
 
 **DoD**：选择性删除分析同期限同口径可重算，样本不足无结论性文案；拥挤事件只追加且可下钻全部
 组成证据；单帖历史面板包含已移除版本，不暗示精确删改时刻；单帖查询使用持久化索引。
+
+### 阶段 10：框架提取 enrich-v3
+
+已完成。交付 `framework_extractions` 与 `framework_extraction_scans` 派生表，幂等键包含
+`prompt_version`，零结果扫描留痕不重试。新增 `extract-frameworks` CLI 与框架库网页
+`?view=frameworks`，按主题和输入变量聚合，逐条链回 `version_id`。
+
+原帖不可读时，框架仍可用，并以中性措辞标注来源状态。prompt 版本走
+`llm.framework_prompt_version`，默认 `framework-v1`；升级后旧行保留，新版本重扫。
+
+**DoD**：框架提取按 `version_id + prompt_version` 幂等；零结果扫描不会反复调用 LLM；框架库可按
+主题和变量聚合并下钻到版本证据；原帖不可读时文案保持中性；prompt 升级不覆盖旧结果。
