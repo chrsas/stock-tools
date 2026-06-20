@@ -12,6 +12,7 @@ from kol_archive.database import connect_database, initialize_database
 
 from .automation import (
     _automation_loop,
+    _enrichment_worker_loop,
     _load_automation_settings,
     _prime_startup_collection_schedule,
 )
@@ -65,6 +66,7 @@ def create_server(
     server.automation_settings = _load_automation_settings(db_path)
     server.automation_stop = threading.Event()
     server.automation_active = False
+    server.enrich_wake = threading.Event()
     return server
 
 
@@ -79,11 +81,22 @@ def serve_archive(db_path: Path, config_dir: Path, settings: WebSettings) -> Non
         daemon=True,
     )
     automation_thread.start()
+    enrichment_thread = threading.Thread(
+        target=_enrichment_worker_loop,
+        args=(server,),
+        name="web-enrichment-worker",
+        daemon=True,
+    )
+    enrichment_thread.start()
     host, port = cast(tuple[str, int], server.server_address)
     LOGGER.info("web archive listening http://%s:%s", host, port)
     try:
         server.serve_forever()
     finally:
         server.automation_stop.set()
+        # Wake the worker so it sees the stop flag immediately instead of waiting out
+        # its poll timeout.
+        server.enrich_wake.set()
         automation_thread.join(timeout=2)
+        enrichment_thread.join(timeout=2)
         server.server_close()

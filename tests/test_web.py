@@ -35,10 +35,10 @@ from kol_archive.web import (
     ArchiveRequestHandler,
     WebSettings,
     _automation_loop,
+    _drain_pending_enrichments,
     _execute_author_enrichment,
     _load_automation_settings,
     _prime_startup_collection_schedule,
-    _start_auto_enrichment,
     _startup_collection_due_at,
     create_server,
     load_web_settings,
@@ -276,7 +276,6 @@ def test_collect_run_once_web_flow(
     import kol_archive.cli.collect as collect_module
 
     calls: list[Path] = []
-    auto_enrich_calls: list[tuple[ArchiveHttpServer, str]] = []
 
     def fake_run(
         config_dir: Path, *, progress: Callable[[str], None] | None = None
@@ -286,12 +285,10 @@ def test_collect_run_once_web_flow(
             progress("正在检查采集结果")
         return collect_module.RunOnceResult(healthy=True, reason=None)
 
-    def fake_auto_enrich(server: ArchiveHttpServer, observed_since: str) -> bool:
-        auto_enrich_calls.append((server, observed_since))
-        return True
-
     monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
-    monkeypatch.setattr("kol_archive.web.jobs._start_auto_enrichment", fake_auto_enrich)
+    # Auto-enrich is gated on the background worker being active; with it on, a
+    # completed collection nudges the resident worker instead of enriching inline.
+    web_server.automation_active = True
     status, _, content = _request(
         web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
     )
@@ -302,9 +299,9 @@ def test_collect_run_once_web_flow(
     assert payload["message"] == "采集完成。"
     assert payload["auto_enrich_started"] is True
     assert calls == [web_server.config_dir]
-    assert len(auto_enrich_calls) == 1
-    assert auto_enrich_calls[0][0] is web_server
-    assert datetime.fromisoformat(auto_enrich_calls[0][1]).tzinfo is not None
+    # The nudge wakes the resident enrichment worker; the worker (not started here)
+    # is what would then drain the queue.
+    assert web_server.enrich_wake.is_set() is True
     status_payload = _get_json(web_server, "/api/collect/status")
     assert status_payload["running"] is False
     assert status_payload["phase"] == "采集完成。"
@@ -724,7 +721,6 @@ def test_automation_loop_runs_collection_without_local_http_post(
         return collect_module.RunOnceResult(healthy=True, reason=None)
 
     monkeypatch.setattr(collect_module, "execute_run_once", fake_run)
-    monkeypatch.setattr("kol_archive.web.jobs._start_auto_enrichment", lambda *args: False)
 
     with web_server.automation_settings_lock:
         web_server.automation_settings.collection_enabled = True
@@ -846,26 +842,24 @@ def test_load_automation_settings_ignores_non_object_json(tmp_path: Path, conten
     assert settings.auto_enrich is True
 
 
-def test_auto_enrichment_runs_without_local_http_post(
+def test_drain_pending_enrichments_runs_without_local_http_post(
     web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    web_server.automation_active = True
     calls: list[tuple[str, str | None]] = []
-    completed = threading.Event()
 
     def fake_execute(
         server: ArchiveHttpServer, author_uid: str, observed_since: str | None
     ) -> tuple[dict[str, object] | None, tuple[object, str] | None]:
         assert server is web_server
         calls.append((author_uid, observed_since))
-        completed.set()
         return {"ok": True}, None
 
     monkeypatch.setattr("kol_archive.web.jobs._execute_author_enrichment", fake_execute)
 
-    assert _start_auto_enrichment(web_server, BASE_TIME) is True
-    assert completed.wait(timeout=5)
-    assert calls == [("100", BASE_TIME)]
+    _drain_pending_enrichments(web_server)
+    # The resident worker drains the full pending queue, so no per-collection time
+    # bound is passed: observed_since is None.
+    assert calls == [("100", None)]
 
 
 def test_execute_author_enrichment_reports_conflict_when_long_task_runs(

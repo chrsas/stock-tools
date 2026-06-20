@@ -493,7 +493,7 @@ onBeforeUnmount(() => {
             </label>
             <label class="toggle-row">
               <input v-model="automationSettings.auto_enrich" type="checkbox" :disabled="busy" @change="saveAutomationSettings">
-              <span>采集完成后自动富化</span>
+              <span>后台自动富化新发言</span>
             </label>
             <button :disabled="busy || automationSaving" @click="saveAutomationSettings">
               {{ automationSaving ? "保存中…" : "保存配置" }}

@@ -17,12 +17,18 @@ from __future__ import annotations
 
 from .automation import (
     _automation_loop,
+    _enrichment_worker_loop,
     _load_automation_settings,
     _prime_startup_collection_schedule,
     _startup_collection_due_at,
 )
 from .handler import ArchiveRequestHandler
-from .jobs import _execute_author_enrichment, _execute_collection, _start_auto_enrichment
+from .jobs import (
+    _drain_pending_enrichments,
+    _execute_author_enrichment,
+    _execute_collection,
+    _nudge_enrichment,
+)
 from .lifecycle import create_server, serve_archive
 from .payload import _home_payload
 from .settings import (
@@ -45,11 +51,13 @@ __all__ = [
     "load_web_settings",
     "serve_archive",
     "_automation_loop",
+    "_drain_pending_enrichments",
+    "_enrichment_worker_loop",
     "_execute_author_enrichment",
     "_execute_collection",
     "_home_payload",
     "_load_automation_settings",
+    "_nudge_enrichment",
     "_prime_startup_collection_schedule",
-    "_start_auto_enrichment",
     "_startup_collection_due_at",
 ]

@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger("kol_archive.web")
 AUTO_COLLECTION_RETRY_DELAY_MINUTES = 1
+# The nudge (enrich_wake) is the primary trigger; this poll is only a safety net for
+# writes that did not nudge or a drain that bailed on a busy lock, so it can be slow.
+ENRICHMENT_POLL_INTERVAL_SECONDS = 60
 
 
 def _automation_path(db_path: Path) -> Path:
@@ -182,6 +185,30 @@ def _schedule_after_automatic_collection(
             _schedule_collection_retry(server.automation_settings)
         else:
             _schedule_next_collection(server.automation_settings)
+
+
+def _enrichment_worker_loop(server: ArchiveHttpServer) -> None:
+    """Resident consumer: drain the enrichment queue on wake or periodic poll.
+
+    Decoupled from collection so enrichment starts as soon as any source writes new
+    versions, instead of waiting for every collector in a run to finish. Collection
+    (and, later, manual import / Tier B feeds) nudges ``enrich_wake``; the periodic
+    timeout is a safety net for rows written by a path that forgot to nudge, or a
+    drain that bailed because the shared lock was busy.
+    """
+    while not server.automation_stop.is_set():
+        server.enrich_wake.wait(timeout=ENRICHMENT_POLL_INTERVAL_SECONDS)
+        server.enrich_wake.clear()
+        if server.automation_stop.is_set():
+            break
+        with server.automation_settings_lock:
+            active = server.automation_active and server.automation_settings.auto_enrich
+        if not active:
+            continue
+        try:
+            jobs._drain_pending_enrichments(server)
+        except Exception:
+            LOGGER.warning("resident enrichment worker iteration failed")
 
 
 def _automation_loop(server: ArchiveHttpServer) -> None:

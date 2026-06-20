@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
-import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -53,7 +52,6 @@ def _execute_collection(
 ) -> tuple[dict[str, object] | None, tuple[HTTPStatus, str] | None]:
     if not server.collect_lock.acquire(blocking=False):
         return None, (HTTPStatus.CONFLICT, "采集正在进行中，请稍候。")
-    collection_started_at = datetime.now(tz=UTC).isoformat()
     _set_collection_status(server, running=True, phase="正在启动采集", healthy=None)
     result: Any | None = None
     failure_response: tuple[HTTPStatus, str] | None = None
@@ -108,7 +106,9 @@ def _execute_collection(
     assert result is not None
     message = "采集完成。" if result.healthy else f"采集完成，但有告警：{result.reason}"
     _set_collection_status(server, running=False, phase=message, healthy=result.healthy)
-    auto_enrich_started = _start_auto_enrichment(server, collection_started_at)
+    # The DB is the enrichment queue; collection just wrote new current versions, so
+    # wake the resident worker to drain them instead of enriching inline here.
+    auto_enrich_started = _nudge_enrichment(server)
     return (
         {
             "ok": True,
@@ -318,41 +318,59 @@ def _execute_author_enrichment(
     )
 
 
-def _start_auto_enrichment(server: ArchiveHttpServer, observed_since: str) -> bool:
+def _nudge_enrichment(server: ArchiveHttpServer) -> bool:
+    """Wake the resident enrichment worker after new versions land.
+
+    Returns whether auto-enrichment is active, so the caller can report it. This is
+    only a nudge: the worker drains the full pending queue regardless of who wrote
+    the rows, so there is no per-collection scope to pass along.
+    """
     with server.automation_settings_lock:
         if not server.automation_active or not server.automation_settings.auto_enrich:
             return False
-
-    def run() -> None:
-        connection = connect_database(server.db_path)
-        try:
-            rows = connection.execute(
-                """
-                SELECT DISTINCT a.platform_uid
-                FROM authors a
-                JOIN posts p ON p.author_id = a.id
-                JOIN post_versions v ON v.id = p.current_version_id
-                LEFT JOIN enrichments e
-                  ON e.version_id = v.id AND e.prompt_version = ?
-                WHERE e.id IS NULL AND v.first_observed_at >= ?
-                ORDER BY a.id
-                """,
-                (server.enrich_prompt_version, observed_since),
-            ).fetchall()
-        finally:
-            connection.close()
-        for row in rows:
-            author_uid = str(row["platform_uid"])
-            try:
-                _, failure_response = _execute_author_enrichment(server, author_uid, observed_since)
-                if failure_response is not None:
-                    LOGGER.warning(
-                        "automatic web enrichment failed author_uid=%s status=%s",
-                        author_uid,
-                        failure_response[0],
-                    )
-            except Exception:
-                LOGGER.warning("automatic web enrichment failed author_uid=%s", author_uid)
-
-    threading.Thread(target=run, name="web-auto-enrichment", daemon=True).start()
+    server.enrich_wake.set()
     return True
+
+
+def _drain_pending_enrichments(server: ArchiveHttpServer) -> None:
+    """Enrich every current version still missing a label for the prompt version.
+
+    The DB is the queue: this selects the pending set and drains it author by
+    author, regardless of which collector produced the rows or when. Idempotent via
+    ``UNIQUE(version_id, prompt_version)``, so a partial drain (e.g. the shared
+    collect/enrich lock is busy) just leaves the rest for the next wake or poll.
+    """
+    connection = connect_database(server.db_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT a.platform_uid
+            FROM authors a
+            JOIN posts p ON p.author_id = a.id
+            JOIN post_versions v ON v.id = p.current_version_id
+            LEFT JOIN enrichments e
+              ON e.version_id = v.id AND e.prompt_version = ?
+            WHERE e.id IS NULL
+            ORDER BY a.id
+            """,
+            (server.enrich_prompt_version,),
+        ).fetchall()
+    finally:
+        connection.close()
+    for row in rows:
+        author_uid = str(row["platform_uid"])
+        try:
+            _, failure_response = _execute_author_enrichment(server, author_uid, None)
+        except Exception:
+            LOGGER.warning("resident enrichment failed author_uid=%s", author_uid)
+            continue
+        if failure_response is not None:
+            # CONFLICT means the shared collect/enrich lock is busy; every remaining
+            # author would hit the same wall, so stop and let the next wake retry.
+            if failure_response[0] == HTTPStatus.CONFLICT:
+                return
+            LOGGER.warning(
+                "resident enrichment failed author_uid=%s status=%s",
+                author_uid,
+                failure_response[0],
+            )

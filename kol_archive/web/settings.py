@@ -80,6 +80,7 @@ class ArchiveHttpServer(ThreadingHTTPServer):
     automation_settings: AutomationSettings
     automation_stop: threading.Event
     automation_active: bool
+    enrich_wake: threading.Event
 
 
 def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
