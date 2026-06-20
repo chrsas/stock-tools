@@ -19,6 +19,7 @@ from typing import Any, cast
 import httpx
 
 from kol_archive.models import EnrichmentResult, EnrichmentTarget
+from kol_archive.obs import http_client
 
 SYSTEM_PROMPT = """你在协助用户给一条 KOL 发言原文打结构化标签，用于过滤注意力，不替用户下判断。
 只依据输入原文明确表达的内容，不得补造标的、事实、信息来源或观点。
@@ -206,7 +207,7 @@ def request_enrichment(
     client: httpx.Client | None = None,
 ) -> EnrichmentResult:
     owned_client = client is None
-    active_client = client or httpx.Client(timeout=30.0)
+    active_client = client or http_client(timeout=30.0)
     try:
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -279,7 +280,7 @@ def enrich_targets(
     if not targets:
         return
     owned_client = client is None
-    active_client = client or httpx.Client(timeout=30.0)
+    active_client = client or http_client(timeout=30.0)
     try:
         if settings.concurrency == 1:
             for target in targets:

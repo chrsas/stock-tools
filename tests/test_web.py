@@ -1075,6 +1075,70 @@ def test_layout_offers_persistent_light_dark_and_system_themes(
         assert label in assets
 
 
+def test_verbose_response_body_logged_with_csrf_redacted(
+    web_server: ArchiveHttpServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger="kol_archive.web"):
+        status, _, content = _request(web_server, "GET", "/api/home")
+    assert status == 200
+    # The real response still carries the token; only the log line is scrubbed.
+    assert CSRF_TOKEN in content
+    body_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("response body")
+    ]
+    assert body_lines, "expected a verbose response-body log line"
+    joined = "\n".join(body_lines)
+    assert '"csrf_token": "[REDACTED]"' in joined
+    assert CSRF_TOKEN not in joined
+
+
+def test_get_query_credential_is_redacted_in_logs(
+    web_server: ArchiveHttpServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A URL-encoded secret in the query (token%3Dsecret) must not survive into the
+    # inbound line or the responded line.
+    with caplog.at_level(logging.DEBUG, logger="kol_archive.web"):
+        status, _, _ = _request(
+            web_server, "GET", "/api/automation/settings?group=text%3Dtoken%3Dsupersecret"
+        )
+    assert status == 200
+    request_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("request GET")
+    ]
+    assert request_lines, "expected inbound and responded lines"
+    joined = "\n".join(request_lines)
+    assert "supersecret" not in joined
+    assert "[REDACTED]" in joined
+
+
+def test_verbose_request_body_logged_with_csrf_dropped(
+    web_server: ArchiveHttpServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The request body is logged before dispatch, so an unknown path (404) still
+    # exercises it without depending on any endpoint's validation.
+    with caplog.at_level(logging.DEBUG, logger="kol_archive.web"):
+        status, _, _ = _request(
+            web_server,
+            "POST",
+            "/__trace_probe__",
+            {"csrf_token": CSRF_TOKEN, "note": "存储这轮怎么看"},
+        )
+    assert status == 404
+    body_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("request body")
+    ]
+    assert body_lines, "expected a verbose request-body log line"
+    joined = "\n".join(body_lines)
+    assert "note=存储这轮怎么看" in joined
+    assert "csrf_token" not in joined
+
+
 def test_queue_view_keeps_label_guide(web_server: ArchiveHttpServer) -> None:
     _enrich_post_one(web_server, non_consensus=True)
     payload = _get_json(web_server, "/api/home?view=queue")

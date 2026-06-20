@@ -94,6 +94,13 @@ browser:
   landing_url: https://xueqiu.com      # 连上后落地页，同源 fetch 复用其 cookie 与指纹
   edge_path: ""                        # 留空自动探测 msedge.exe；可手动指向 msedge.exe 或 chrome.exe
 
+# ── 日志（serve 全链路追踪）────────────────────────────────────────
+# 控制台只打 INFO 摘要；完整 DEBUG 追踪（SQL、请求/响应/三方 body）写到
+# data/logs/kol.log，每日午夜滚动、保留 retention_days 天。
+logging:
+  retention_days: 15   # 滚动日志保留天数
+  body_limit: 2000     # 单条 body 日志最大字符数，超出截断；<=0 不截断
+
 # ── 本地网页（阶段 2b）──────────────────────────────────────────
 web:
   bind_host: 127.0.0.1                 # 手机访问时仅在 local 配置覆盖为 Tailscale 地址

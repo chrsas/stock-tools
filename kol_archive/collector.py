@@ -30,6 +30,7 @@ from kol_archive.models import (
     ProbeRun,
     RunStatus,
 )
+from kol_archive.obs import http_client
 from kol_archive.service import Archive
 from kol_archive.time import parse_utc_timestamp, timestamp_at_or_before
 
@@ -96,7 +97,7 @@ def _json_payload(response: httpx.Response) -> tuple[dict[str, Any] | None, str 
 
 
 def create_xueqiu_client(cookie: str | None, *, timeout_seconds: float = 20.0) -> httpx.Client:
-    client = httpx.Client(headers=HEADERS, timeout=timeout_seconds, follow_redirects=False)
+    client = http_client(headers=HEADERS, timeout=timeout_seconds, follow_redirects=False)
     try:
         client.get(f"{BASE_URL}/")
     except BaseException:

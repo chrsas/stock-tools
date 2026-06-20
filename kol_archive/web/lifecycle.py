@@ -8,7 +8,14 @@ import threading
 from pathlib import Path
 from typing import cast
 
+from kol_archive.config import load_config
 from kol_archive.database import connect_database, initialize_database
+from kol_archive.obs import (
+    DEFAULT_BODY_LIMIT,
+    DEFAULT_LOG_RETENTION_DAYS,
+    add_rotating_file_log,
+    set_body_limit,
+)
 
 from .automation import (
     _automation_loop,
@@ -70,7 +77,30 @@ def create_server(
     return server
 
 
+def _logging_section(config_dir: Path) -> dict[str, object]:
+    section = load_config(config_dir).get("logging") or {}
+    return section if isinstance(section, dict) else {}
+
+
+def _config_int(section: dict[str, object], key: str, default: int) -> int:
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return default
+    try:
+        return max(0, int(value))
+    except TypeError, ValueError:
+        return default
+
+
 def serve_archive(db_path: Path, config_dir: Path, settings: WebSettings) -> None:
+    # Persist the full trace to a daily-rotating file so a long-running server keeps
+    # a durable, grep-able trail. The console stays an INFO summary.
+    section = _logging_section(config_dir)
+    set_body_limit(_config_int(section, "body_limit", DEFAULT_BODY_LIMIT))
+    add_rotating_file_log(
+        db_path.parent / "logs" / "kol.log",
+        _config_int(section, "retention_days", DEFAULT_LOG_RETENTION_DAYS),
+    )
     server = create_server(db_path, config_dir, settings)
     server.automation_active = True
     _prime_startup_collection_schedule(server)

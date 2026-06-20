@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from kol_archive.config import load_config
 from kol_archive.database import connect_database
+from kol_archive.obs import trace_scope
 
 from . import jobs
 from .settings import AutomationSettings
@@ -206,7 +207,8 @@ def _enrichment_worker_loop(server: ArchiveHttpServer) -> None:
         if not active:
             continue
         try:
-            jobs._drain_pending_enrichments(server)
+            with trace_scope():
+                jobs._drain_pending_enrichments(server)
         except Exception:
             LOGGER.warning("resident enrichment worker iteration failed")
 
@@ -225,10 +227,11 @@ def _automation_loop(server: ArchiveHttpServer) -> None:
         if not due:
             continue
         try:
-            _, failure_response = jobs._execute_collection(server)
-            if failure_response is not None:
-                LOGGER.warning("automatic web collection failed status=%s", failure_response[0])
-            _schedule_after_automatic_collection(server, failure_response)
+            with trace_scope():
+                _, failure_response = jobs._execute_collection(server)
+                if failure_response is not None:
+                    LOGGER.warning("automatic web collection failed status=%s", failure_response[0])
+                _schedule_after_automatic_collection(server, failure_response)
         except Exception:
             LOGGER.warning("automatic web collection failed")
             _schedule_after_automatic_collection(

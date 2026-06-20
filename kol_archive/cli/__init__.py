@@ -15,7 +15,8 @@
 from __future__ import annotations
 
 import argparse
-import logging
+
+from kol_archive.obs import configure_logging
 
 from . import (
     accounts,
@@ -34,7 +35,9 @@ from .common import configure_stdout_utf8
 
 def main() -> None:
     configure_stdout_utf8()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # KOL_LOG_LEVEL=DEBUG（或 serve --verbose）打开 SQL 与第三方请求/响应正文的详尽追踪；
+    # 默认 INFO 只保留请求生命周期、动作与作业结果。
+    configure_logging()
     parser = argparse.ArgumentParser(description="KOL evidence archive")
     subparsers = parser.add_subparsers(required=True)
     for module in (

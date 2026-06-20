@@ -24,6 +24,7 @@ from typing import Any, cast
 import httpx
 
 from kol_archive.enrich import load_enrich_settings
+from kol_archive.obs import http_client
 from kol_archive.service import Archive
 
 LOGGER = logging.getLogger(__name__)
@@ -88,7 +89,7 @@ def request_image_description(
     client: httpx.Client | None = None,
 ) -> str:
     owned_client = client is None
-    active_client = client or httpx.Client(timeout=60.0)
+    active_client = client or http_client(timeout=60.0)
     try:
         response = active_client.post(
             f"{settings.base_url}/chat/completions",
@@ -151,7 +152,7 @@ def run_image_enrichment(
         settings.model, settings.prompt_version, post_id=post_id, limit=limit
     )
     owned_client = client is None
-    active_client = client or httpx.Client(timeout=60.0)
+    active_client = client or http_client(timeout=60.0)
     row_ids: list[int] = []
     try:
         for image in targets:

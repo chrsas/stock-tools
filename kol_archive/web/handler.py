@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import re
 import secrets
 import sqlite3
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -19,6 +21,7 @@ from kol_archive.analysis import post_ticker_history
 from kol_archive.config import load_config
 from kol_archive.database import connect_database
 from kol_archive.maintenance import redact_text
+from kol_archive.obs import new_request_id, request_id_var, truncate_for_log
 from kol_archive.presentation import author_profile, build_evidence_card
 from kol_archive.recall import append_topic_brief, recall_query_from_values, retrieve
 from kol_archive.recall_brief import load_brief_settings, synthesize_brief
@@ -34,20 +37,97 @@ from .settings import WEB_DIST, ArchiveHttpServer
 
 LOGGER = logging.getLogger("kol_archive.web")
 MAX_FORM_BYTES = 64 * 1024
+# Most JSON responses embed the per-server CSRF token; scrub it before a verbose
+# response-body log line could persist it.
+_CSRF_FIELD_RE = re.compile(r'("csrf_token"\s*:\s*)"[^"]*"')
 
 
 class ArchiveRequestHandler(BaseHTTPRequestHandler):
     server: ArchiveHttpServer
 
+    # 前端以亚秒级轮询这些状态端点驱动实时面板。它们的生命周期日志只会刷屏，
+    # 降到 DEBUG，让 INFO 留给真正的请求与动作。
+    _POLLING_PATHS = (
+        "/api/operations/status",
+        "/api/collect/status",
+        "/api/enrich/status",
+    )
+
+    def handle_one_request(self) -> None:
+        # 每条请求一个关联 id，贯穿其请求/查询/第三方调用日志。keep-alive 下每次
+        # 调用都换新 id。计时不在这里起算：super() 会阻塞读取下一条请求行，把
+        # keep-alive 空闲等待算进耗时；改在 do_GET/do_POST 入口起算真正的处理时间。
+        token = request_id_var.set(new_request_id())
+        try:
+            super().handle_one_request()
+        finally:
+            request_id_var.reset(token)
+
+    def _is_polling(self) -> bool:
+        return urlparse(self.path).path in self._POLLING_PATHS
+
+    @staticmethod
+    def _safe_target(raw: str) -> str:
+        # A GET query is user-controlled (recall terms etc.) and may carry a
+        # credential. URL-decode first so redact_text sees `token=secret` rather than
+        # the percent-encoded `token%3Dsecret` it would miss, then truncate.
+        return truncate_for_log(redact_text(unquote(raw)))
+
+    def log_request(self, code: object = "-", size: object = "-") -> None:
+        started = getattr(self, "_request_started", None)
+        duration_ms = 0.0 if started is None else (time.monotonic() - started) * 1000
+        status = code.value if isinstance(code, HTTPStatus) else code
+        target = self._safe_target(self.path)
+        message = f"request {self.command} {target} responded {status} in {duration_ms:.1f}ms"
+        if self._is_polling():
+            LOGGER.debug(message)
+        else:
+            LOGGER.info(message)
+
     def log_message(self, format_string: str, *args: object) -> None:
-        if self.path == "/api/operations/status":
-            LOGGER.debug("web request " + format_string, *args)
+        # Reached only via log_error (bad requests, send_error); normal responses
+        # go through the log_request override above.
+        LOGGER.warning("web request " + format_string, *args)
+
+    def _log_inbound(self, method: str, path: str, params: str) -> None:
+        # ``params`` is already redacted by the caller (a GET query via _safe_target,
+        # a POST summary via _form_summary); here we only bound the line.
+        level = logging.DEBUG if self._is_polling() else logging.INFO
+        summary = truncate_for_log(params) if params else ""
+        LOGGER.log(level, "request %s %s%s", method, path, f" {summary}" if summary else "")
+
+    def _form_summary(self, form: dict[str, list[str]]) -> str:
+        # Short params for the INFO console line: drop the CSRF token, redact values
+        # so no credential slips in, and cap each field to keep the line readable.
+        # The full request body goes to the DEBUG trace via _log_request_body.
+        parts: list[str] = []
+        for key, values in form.items():
+            if key == "csrf_token":
+                continue
+            value = values[0] if values else ""
+            parts.append(f"{key}={redact_text(value)[:200]}")
+        return " ".join(parts)
+
+    def _log_request_body(self, form: dict[str, list[str]]) -> None:
+        # The full inbound request body, recorded to the DEBUG trace (mirrors the
+        # response-body and third-party-body lines). CSRF token dropped, values
+        # redacted, whole line truncated to the configured body limit.
+        if not LOGGER.isEnabledFor(logging.DEBUG):
             return
-        LOGGER.info("web request " + format_string, *args)
+        parts = [
+            f"{key}={redact_text(value)}"
+            for key, values in form.items()
+            if key != "csrf_token"
+            for value in values
+        ]
+        if parts:
+            LOGGER.debug("request body %s", truncate_for_log(" ".join(parts)))
 
     def do_GET(self) -> None:
+        self._request_started = time.monotonic()
         parsed = urlparse(self.path)
         path = parsed.path
+        self._log_inbound("GET", path, self._safe_target(parsed.query))
         try:
             if path == "/api/collect/status":
                 self._send_json(HTTPStatus.OK, self._collection_status_payload())
@@ -147,6 +227,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         self._send_text(HTTPStatus.NOT_FOUND, "页面不存在。")
 
     def do_POST(self) -> None:
+        self._request_started = time.monotonic()
         path = urlparse(self.path).path
         form = self._read_form()
         if form is None:
@@ -154,70 +235,90 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         if not self._valid_csrf(form):
             self._send_text(HTTPStatus.FORBIDDEN, "CSRF token 校验失败。")
             return
+        self._log_inbound("POST", path, self._form_summary(form))
+        self._log_request_body(form)
         try:
-            routes: list[tuple[str, Callable[[int, dict[str, list[str]]], None]]] = [
-                ("/pin", self._pin),
-                ("/unpin", self._unpin),
-                ("/attention", self._attention),
-                ("/rewrite", self._rewrite),
-            ]
-            for suffix, action in routes:
-                post_id = self._post_id(path, suffix=suffix)
-                if post_id is not None:
-                    action(post_id, form)
-                    return
-            exercise_id = self._exercise_id(path)
-            if exercise_id is not None:
-                self._verdict(exercise_id, form)
-                return
-            if path == "/decisions/add":
-                self._add_decision(form)
-                return
-            if path == "/accounts/add":
-                self._add_account(form)
-                return
-            if path == "/collect/run-once":
-                self._run_collection(form)
-                return
-            if path == "/automation/settings":
-                self._update_automation_settings(form)
-                return
-            if path == "/recall/expand":
-                self._expand_recall_query(form)
-                return
-            if path == "/recall/brief":
-                self._synthesize_recall_brief(form)
-                return
-            author_uid = self._author_action_uid(path, suffix="/enrich")
-            if author_uid is not None:
-                self._enrich_author(author_uid, form)
-                return
-            if path == "/watchlist/add":
-                self._add_watchlist_ticker(form)
-                return
-            if path == "/watchlist/remove":
-                self._remove_watchlist_ticker(form)
-                return
-            proposal_id = self._post_id(path, prefix="/claim-proposals/", suffix="/review")
-            if proposal_id is not None:
-                self._review_claim_proposal(proposal_id, form)
-                return
-            decision_id = self._post_id(path, prefix="/decisions/", suffix="/close")
-            if decision_id is not None:
-                self._close_decision(decision_id, form)
-                return
-            decision_id = self._post_id(path, prefix="/decisions/", suffix="/review")
-            if decision_id is not None:
-                self._review_decision(decision_id, form)
-                return
+            action = self._dispatch_post(path, form)
         except ValueError as error:
+            LOGGER.info("web action rejected path=%s reason=invalid", path)
             self._send_text(HTTPStatus.BAD_REQUEST, redact_text(str(error)))
             return
         except Exception as error:
-            LOGGER.error("web action failed type=%s", type(error).__name__)
+            LOGGER.error("web action failed path=%s type=%s", path, type(error).__name__)
             self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, "操作失败。")
             return
-        self._send_text(HTTPStatus.NOT_FOUND, "页面不存在。")
+        if action is None:
+            self._send_text(HTTPStatus.NOT_FOUND, "页面不存在。")
+            return
+        LOGGER.info(
+            "web action done action=%s duration_ms=%d",
+            action,
+            int((time.monotonic() - self._request_started) * 1000),
+        )
+
+    def _dispatch_post(self, path: str, form: dict[str, list[str]]) -> str | None:
+        """Route a POST to its handler, returning a short action label when matched.
+
+        Returns ``None`` if no route matched (404). The handler itself sends the
+        HTTP response; the label is only used for the action-boundary log line in
+        :meth:`do_POST`, so each write to the archive leaves a trace of what ran.
+        """
+        routes: list[tuple[str, Callable[[int, dict[str, list[str]]], None]]] = [
+            ("/pin", self._pin),
+            ("/unpin", self._unpin),
+            ("/attention", self._attention),
+            ("/rewrite", self._rewrite),
+        ]
+        for suffix, action in routes:
+            post_id = self._post_id(path, suffix=suffix)
+            if post_id is not None:
+                action(post_id, form)
+                return f"post{suffix} post_id={post_id}"
+        exercise_id = self._exercise_id(path)
+        if exercise_id is not None:
+            self._verdict(exercise_id, form)
+            return f"rewrite-verdict exercise_id={exercise_id}"
+        if path == "/decisions/add":
+            self._add_decision(form)
+            return "decision-add"
+        if path == "/accounts/add":
+            self._add_account(form)
+            return "account-add"
+        if path == "/collect/run-once":
+            self._run_collection(form)
+            return "collect-run-once"
+        if path == "/automation/settings":
+            self._update_automation_settings(form)
+            return "automation-settings"
+        if path == "/recall/expand":
+            self._expand_recall_query(form)
+            return "recall-expand"
+        if path == "/recall/brief":
+            self._synthesize_recall_brief(form)
+            return "recall-brief"
+        author_uid = self._author_action_uid(path, suffix="/enrich")
+        if author_uid is not None:
+            self._enrich_author(author_uid, form)
+            return "author-enrich"
+        if path == "/watchlist/add":
+            self._add_watchlist_ticker(form)
+            return "watchlist-add"
+        if path == "/watchlist/remove":
+            self._remove_watchlist_ticker(form)
+            return "watchlist-remove"
+        proposal_id = self._post_id(path, prefix="/claim-proposals/", suffix="/review")
+        if proposal_id is not None:
+            self._review_claim_proposal(proposal_id, form)
+            return f"claim-proposal-review proposal_id={proposal_id}"
+        decision_id = self._post_id(path, prefix="/decisions/", suffix="/close")
+        if decision_id is not None:
+            self._close_decision(decision_id, form)
+            return f"decision-close decision_id={decision_id}"
+        decision_id = self._post_id(path, prefix="/decisions/", suffix="/review")
+        if decision_id is not None:
+            self._review_decision(decision_id, form)
+            return f"decision-review decision_id={decision_id}"
+        return None
 
     def _with_connection(self, callback: Callable[[sqlite3.Connection], object]) -> None:
         connection = connect_database(self.server.db_path)
@@ -435,6 +536,15 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 model=settings.model,
                 prompt_version=settings.prompt_version,
                 created_at=datetime.now(tz=UTC).isoformat(),
+            )
+            LOGGER.info(
+                "recall brief synthesized brief_id=%d versions_cited=%d coverage_versions=%d "
+                "model=%s prompt_version=%s",
+                brief_id,
+                len(brief.cited_version_ids),
+                int(cast(int, coverage["version_count"])),
+                settings.model,
+                settings.prompt_version,
             )
             captured["payload"] = {
                 "ok": True,
@@ -678,4 +788,20 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache_control or "no-store")
         self.end_headers()
+        # Log before writing the body: send_response already logged the response line
+        # before the write, and logging first makes the trace deterministic instead of
+        # racing the client's read of the socket.
+        self._log_response_body(content_type, body)
         self.wfile.write(body)
+
+    def _log_response_body(self, content_type: str, body: bytes) -> None:
+        # The response content we hand back to the client — logged at DEBUG to mirror
+        # the third-party body lines, so a verbose trace shows what each request
+        # actually returned, not just its status. Binary assets are skipped.
+        if not LOGGER.isEnabledFor(logging.DEBUG):
+            return
+        if "json" not in content_type and not content_type.startswith("text/"):
+            return
+        text = redact_text(body.decode("utf-8", "replace"))
+        text = _CSRF_FIELD_RE.sub(r'\1"[REDACTED]"', text)
+        LOGGER.debug("response body %s", truncate_for_log(text))
