@@ -148,6 +148,17 @@ small { font-size: .8rem; }
 .panel, .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem 1.1rem; }
 .card { box-shadow: var(--shadow); margin: 14px 0; }
 .card header { display: flex; gap: .8rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.card.current { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent), var(--shadow); }
+
+/* 证据卡片：状态条左右分栏，原始数据流降为次级 */
+.post-status { display: flex; gap: 1rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.post-status .status-line { margin: 3px 0 0; font-size: 1.05rem; font-weight: 620; }
+.post-status .actions { margin: 0; }
+.raw-streams { margin-top: 26px; }
+.raw-streams .stream-label { display: flex; gap: .6rem; align-items: baseline; }
+.raw-streams details { border-top: 1px solid var(--line-soft); }
+.raw-streams summary { padding: .55rem 2px; cursor: pointer; font-family: var(--font-mono); font-size: .82rem; color: var(--ink-2); }
+.raw-streams summary:hover { color: var(--ink); }
 
 /* ---------------------------------------------------------------- author roster */
 .author-layout { display: grid; grid-template-columns: 272px 1fr; gap: 20px; align-items: start; }
