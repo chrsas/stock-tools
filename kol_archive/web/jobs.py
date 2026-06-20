@@ -17,6 +17,7 @@ from kol_archive.database import connect_database
 from kol_archive.enrich import enrich_targets, load_enrich_settings
 from kol_archive.maintenance import redact_text
 from kol_archive.models import EnrichmentTarget
+from kol_archive.obs import http_client
 from kol_archive.service import Archive
 
 from .settings import EnrichmentStatus
@@ -106,6 +107,11 @@ def _execute_collection(
     assert result is not None
     message = "采集完成。" if result.healthy else f"采集完成，但有告警：{result.reason}"
     _set_collection_status(server, running=False, phase=message, healthy=result.healthy)
+    LOGGER.info(
+        "collection finished healthy=%s reason=%s",
+        result.healthy,
+        result.reason or "-",
+    )
     # The DB is the enrichment queue; collection just wrote new current versions, so
     # wake the resident worker to drain them instead of enriching inline here.
     auto_enrich_started = _nudge_enrichment(server)
@@ -223,7 +229,7 @@ def _execute_author_enrichment(
                 failed=0,
                 details=[],
             )
-            with httpx.Client(timeout=30.0) as client:
+            with http_client(timeout=30.0) as client:
                 for index, (target, result, error) in enumerate(
                     enrich_targets(settings, targets, client=client), start=1
                 ):

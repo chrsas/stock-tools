@@ -31,6 +31,8 @@ from typing import Any, cast
 
 import httpx
 
+from kol_archive.obs import http_client
+
 # The four blocks are fixed in order and title: a brief always answers the same
 # four questions, so it stays comparable across topics and auditable against the
 # charter. Keys mirror the JSON contract the model is asked to return.
@@ -392,7 +394,7 @@ def synthesize_brief(
     }
     digest = json.dumps(_build_digest(retrieval), ensure_ascii=False, default=str)
     owned_client = client is None
-    active_client = client or httpx.Client(timeout=60.0)
+    active_client = client or http_client(timeout=60.0)
     try:
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},

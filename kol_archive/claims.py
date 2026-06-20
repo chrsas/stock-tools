@@ -14,6 +14,7 @@ import httpx
 
 from kol_archive.market import A_SHARE_TIMEZONE, OUTCOME_METHOD_VERSION, common_close_returns
 from kol_archive.models import ClaimProposalResult
+from kol_archive.obs import http_client
 from kol_archive.time import parse_utc_timestamp
 
 SYSTEM_PROMPT = """你在从一条 KOL 发言原文中抽取可供人工确认的可证伪市场命题。
@@ -185,7 +186,7 @@ def request_claim_proposals(
     client: httpx.Client | None = None,
 ) -> list[ClaimProposalResult]:
     owned_client = client is None
-    active_client = client or httpx.Client(timeout=30.0)
+    active_client = client or http_client(timeout=30.0)
     try:
         response = active_client.post(
             f"{settings.base_url}/chat/completions",

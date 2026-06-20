@@ -18,6 +18,7 @@ from typing import Any, cast
 import httpx
 
 from kol_archive.models import FrameworkExtractionResult
+from kol_archive.obs import http_client
 
 SYSTEM_PROMPT = """你在协助用户从一条 KOL 发言原文中提取作者明确表达的分析框架（可迁移的判断方法），
 用于建立可复用的框架库。只依据输入原文明确表达的内容，不得补造变量、条件、逻辑或结论。
@@ -126,7 +127,7 @@ def request_framework_extraction(
     client: httpx.Client | None = None,
 ) -> FrameworkExtractionResult | None:
     owned_client = client is None
-    active_client = client or httpx.Client(timeout=30.0)
+    active_client = client or http_client(timeout=30.0)
     try:
         response = active_client.post(
             f"{settings.base_url}/chat/completions",

@@ -22,6 +22,7 @@ from kol_archive.notifications import (
     load_notification_settings,
     send_notification,
 )
+from kol_archive.obs import configure_logging
 from kol_archive.presentation import (
     author_scorecards,
     build_evidence_card,
@@ -177,6 +178,8 @@ def _analyze_command(args: argparse.Namespace) -> None:
 
 
 def _serve_command(args: argparse.Namespace) -> None:
+    if args.verbose:
+        configure_logging(verbose=True)
     config = load_config(args.config_dir)
     serve_archive(
         resolve_db_path(args.path, config),
@@ -245,4 +248,9 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     serve_parser.add_argument("--config-dir", type=Path, default=Path("config"))
     serve_parser.add_argument("--host")
     serve_parser.add_argument("--port", type=int)
+    serve_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="log every SQL statement and third-party request/response body (DEBUG)",
+    )
     serve_parser.set_defaults(handler=_serve_command)

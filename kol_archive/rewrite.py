@@ -9,6 +9,8 @@ from typing import Any, cast
 
 import httpx
 
+from kol_archive.obs import http_client
+
 SYSTEM_PROMPT = """你在协助用户做可证伪命题改写训练。
 只处理输入原文明确表达的内容。不得补造标的、方向、时间范围、目标价或事实。
 输出 JSON 对象，且仅含 rewritten_claim 和 rationale 两个字符串字段。
@@ -81,7 +83,7 @@ def request_rewrite(
     client: httpx.Client | None = None,
 ) -> RewriteSuggestion:
     owned_client = client is None
-    active_client = client or httpx.Client(timeout=30.0)
+    active_client = client or http_client(timeout=30.0)
     try:
         response = active_client.post(
             f"{settings.base_url}/chat/completions",

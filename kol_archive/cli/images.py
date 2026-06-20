@@ -7,12 +7,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from kol_archive.collector import HEADERS
 from kol_archive.config import load_config, resolve_cookie
 from kol_archive.image_enrich import load_vision_settings, run_image_enrichment
 from kol_archive.images import ImageDownloader, ImageDownloadSettings
+from kol_archive.obs import http_client
 from kol_archive.ocr import run_ocr, select_engine
 
 from .common import connect_existing_archive, print_json, resolve_db_path
@@ -38,7 +37,7 @@ def _download_images_command(args: argparse.Namespace) -> None:
     connection, archive = connect_existing_archive(resolve_db_path(args.path, config))
     # Images are static CDN assets, fetched directly (not through the feed's WAF
     # path); a dead/blocked link is recorded as a failed attempt, not raised.
-    client = httpx.Client(headers=HEADERS, timeout=30.0, follow_redirects=True)
+    client = http_client(headers=HEADERS, timeout=30.0, follow_redirects=True)
     if cookie:
         client.headers["cookie"] = cookie
     try:

@@ -25,6 +25,8 @@ from typing import Any, cast
 
 import httpx
 
+from kol_archive.obs import http_client
+
 # Match recall.py: a bare question about "那几周" means Beijing calendar days, so
 # the "today" anchor we give the model — and any date it returns — are read in +08:00.
 LOCAL_TZ_OFFSET_HOURS = 8
@@ -244,7 +246,7 @@ def expand_query(
         raise ValueError("question must not be empty")
     anchor = today or beijing_today()
     owned_client = client is None
-    active_client = client or httpx.Client(timeout=30.0)
+    active_client = client or http_client(timeout=30.0)
     try:
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},

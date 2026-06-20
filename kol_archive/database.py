@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 
 from kol_archive.market import extract_market_tickers, has_explicit_market_relation
+from kol_archive.obs import install_db_tracing
 
 EVIDENCE_TABLES = (
     "fetch_runs",
@@ -496,6 +497,7 @@ def connect_database(path: str | Path) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
+    install_db_tracing(connection)
     return connection
 
 

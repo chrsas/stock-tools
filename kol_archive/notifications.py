@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from kol_archive.obs import http_client
+
 
 @dataclass(frozen=True)
 class NotificationSettings:
@@ -69,7 +71,7 @@ def send_notification(
     if payload.count < 0:
         raise ValueError("notification count must not be negative")
     owned_client = client is None
-    active_client = client or httpx.Client(timeout=settings.timeout_seconds)
+    active_client = client or http_client(timeout=settings.timeout_seconds)
     try:
         response = active_client.post(webhook_url, json=payload.as_json())
         response.raise_for_status()
