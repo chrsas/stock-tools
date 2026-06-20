@@ -14,6 +14,7 @@ from kol_archive.obs import (
     DEFAULT_BODY_LIMIT,
     DEFAULT_LOG_RETENTION_DAYS,
     add_rotating_file_log,
+    configure_logging,
     set_body_limit,
 )
 
@@ -92,11 +93,24 @@ def _config_int(section: dict[str, object], key: str, default: int) -> int:
         return default
 
 
+def _config_bool(section: dict[str, object], key: str, default: bool) -> bool:
+    value = section.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
 def serve_archive(db_path: Path, config_dir: Path, settings: WebSettings) -> None:
     # Persist the full trace to a daily-rotating file so a long-running server keeps
     # a durable, grep-able trail. The console stays an INFO summary.
     section = _logging_section(config_dir)
     set_body_limit(_config_int(section, "body_limit", DEFAULT_BODY_LIMIT))
+    # config 里 console_verbose=true（默认）让控制台也打 DEBUG（含 body），这样
+    # `serve` 不加 --verbose 也能直接看到请求/响应正文；命令行 --verbose 仍可单独打开。
+    if _config_bool(section, "console_verbose", False):
+        configure_logging(verbose=True)
     add_rotating_file_log(
         db_path.parent / "logs" / "kol.log",
         _config_int(section, "retention_days", DEFAULT_LOG_RETENTION_DAYS),

@@ -95,9 +95,12 @@ browser:
   edge_path: ""                        # 留空自动探测 msedge.exe；可手动指向 msedge.exe 或 chrome.exe
 
 # ── 日志（serve 全链路追踪）────────────────────────────────────────
-# 控制台只打 INFO 摘要；完整 DEBUG 追踪（SQL、请求/响应/三方 body）写到
-# data/logs/kol.log，每日午夜滚动、保留 retention_days 天。
+# 完整 DEBUG 追踪（SQL、请求/响应/三方 body）始终写到 data/logs/kol.log，
+# 每日午夜滚动、保留 retention_days 天。console_verbose 控制控制台是否也打这份
+# DEBUG 追踪：true 时 `python -m kol_archive serve` 直接在控制台看到 body，
+# false 时控制台只留 INFO 摘要（body 仍在文件里），命令行 --verbose 始终可临时打开。
 logging:
+  console_verbose: true   # 控制台是否打 DEBUG（含 body）；false 仅 INFO 摘要
   retention_days: 15   # 滚动日志保留天数
   body_limit: 2000     # 单条 body 日志最大字符数，超出截断；<=0 不截断
 
