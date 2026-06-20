@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import {
+  freshTimelineItems,
   friendlyRequestError,
   loadAutomationSettings,
   loadCollectionStatus,
   loadEnrichmentStatus,
   loadOperationsStatus,
   loadPage,
+  loadTimelinePage,
   mutate,
   type Row,
 } from "./api";
@@ -58,6 +60,19 @@ const OPERATIONS_ACTIVE_POLL_MS = 3000;
 const OPERATIONS_IDLE_POLL_MS = 30000;
 const OPERATIONS_HIDDEN_POLL_MS = 120000;
 
+// 时间线分页：首屏用 config 步长（默认 50），滚动到底自动加载后续每页，
+// 累计 TIMELINE_AUTO_PAGES 页后转手动「加载更多」，每页 TIMELINE_PAGE_SIZE 条。
+const TIMELINE_PAGE_SIZE = 20;
+const TIMELINE_AUTO_PAGES = 10;
+const timelineItems = ref<Row[]>([]);
+const timelineOffset = ref(0);
+const timelineHasMore = ref(false);
+const timelineLoading = ref(false);
+const timelineAutoLoads = ref(0);
+const timelineSentinel = ref<HTMLElement | null>(null);
+let timelineObserver: IntersectionObserver | undefined;
+const timelineManualMode = computed(() => timelineAutoLoads.value >= TIMELINE_AUTO_PAGES);
+
 function applyTheme() {
   document.documentElement.dataset.theme = theme.value === "system"
     ? matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
@@ -71,6 +86,85 @@ async function refresh() {
   try { page.value = await loadPage(); }
   catch (reason) { error.value = String(reason); }
   finally { busy.value = false; }
+  syncTimelineFromPage();
+}
+
+function syncTimelineFromPage() {
+  const view = page.value?.view;
+  if (view !== "raw" && view !== "filtered") {
+    teardownTimelineObserver();
+    return;
+  }
+  const items = Array.isArray(page.value?.items) ? (page.value!.items as Row[]) : [];
+  timelineItems.value = [...items];
+  // The first page may carry its own offset; keep counting from where it ended.
+  timelineOffset.value = Number(page.value?.offset || 0) + items.length;
+  timelineHasMore.value = Boolean(page.value?.has_more);
+  timelineAutoLoads.value = 0;
+  void nextTick(() => setupTimelineObserver());
+}
+
+async function loadMoreTimeline() {
+  const view = page.value?.view;
+  if ((view !== "raw" && view !== "filtered") || timelineLoading.value || !timelineHasMore.value) {
+    return;
+  }
+  timelineLoading.value = true;
+  try {
+    // Dedup against what is already rendered and top up so one "load" still lands
+    // roughly a full page even when the window overlaps; the offset advances by the
+    // rows actually fetched so the cursor stays aligned with the source list.
+    let added = 0;
+    for (
+      let attempt = 0;
+      attempt < 3 && timelineHasMore.value && added < TIMELINE_PAGE_SIZE;
+      attempt++
+    ) {
+      const next = await loadTimelinePage(view, timelineOffset.value, TIMELINE_PAGE_SIZE);
+      const fetched = Array.isArray(next.items) ? (next.items as Row[]) : [];
+      timelineOffset.value += fetched.length;
+      timelineHasMore.value = Boolean(next.has_more);
+      const fresh = freshTimelineItems(timelineItems.value, fetched);
+      timelineItems.value.push(...fresh);
+      added += fresh.length;
+      if (!fetched.length) break;
+    }
+  } catch (reason) {
+    error.value = friendlyRequestError(reason);
+  } finally {
+    timelineLoading.value = false;
+  }
+}
+
+async function autoLoadTimeline() {
+  if (timelineManualMode.value || timelineLoading.value || !timelineHasMore.value) return;
+  timelineAutoLoads.value += 1;
+  await loadMoreTimeline();
+  if (timelineManualMode.value || !timelineHasMore.value) {
+    teardownTimelineObserver();
+    return;
+  }
+  // The appended cards moved the sentinel; re-arm the observer so it fires again
+  // once the sentinel scrolls back into view (or immediately if still visible on a
+  // tall viewport), instead of stalling on a single intersection event.
+  void nextTick(() => setupTimelineObserver());
+}
+
+function setupTimelineObserver() {
+  teardownTimelineObserver();
+  const el = timelineSentinel.value;
+  if (!el || timelineManualMode.value || !timelineHasMore.value) return;
+  timelineObserver = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting)) void autoLoadTimeline();
+  });
+  timelineObserver.observe(el);
+}
+
+function teardownTimelineObserver() {
+  if (timelineObserver) {
+    timelineObserver.disconnect();
+    timelineObserver = undefined;
+  }
 }
 
 async function runCollection() {
@@ -422,6 +516,7 @@ onBeforeUnmount(() => {
   stopCollectStatusPolling();
   stopEnrichStatusPolling();
   stopOperationsStatusPolling();
+  teardownTimelineObserver();
   document.removeEventListener("visibilitychange", handleVisibilityChange);
 });
 </script>
@@ -635,8 +730,16 @@ onBeforeUnmount(() => {
             <a :class="{ on: page.view === 'filtered' }" href="/?view=filtered">标签命中</a>
             <a :class="{ on: page.view === 'raw' }" href="/?view=raw">原始全部</a>
           </div>
-          <TimelineCard v-for="item in page.items" :key="item.post_id" :item="item" :show-labels="page.view === 'filtered'" />
-          <p v-if="!page.items.length" class="empty">暂无记录。</p>
+          <TimelineCard v-for="item in timelineItems" :key="item.post_id" :item="item" :show-labels="page.view === 'filtered'" />
+          <p v-if="!timelineItems.length" class="empty">暂无记录。</p>
+          <div v-if="timelineItems.length" ref="timelineSentinel" class="timeline-sentinel"></div>
+          <div v-if="timelineHasMore && timelineManualMode" class="timeline-more">
+            <button class="secondary" :disabled="timelineLoading" @click="loadMoreTimeline">
+              {{ timelineLoading ? "加载中…" : "加载更多" }}
+            </button>
+          </div>
+          <p v-else-if="timelineLoading" class="muted timeline-more">加载中…</p>
+          <p v-else-if="timelineItems.length && !timelineHasMore" class="muted timeline-more">没有更多了。</p>
         </template>
 
         <template v-else-if="page?.view === 'decisions'">

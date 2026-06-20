@@ -12,6 +12,30 @@ export async function loadPage(): Promise<Row> {
   return response.json();
 }
 
+export function freshTimelineItems(rendered: Row[], fetched: Row[]): Row[] {
+  // Offset paging can re-list a post when the archive grows above the current
+  // window mid-scroll: a newer post shifts every rank down one, so the next
+  // window's first row is one already shown. Drop ids we have rendered (and any
+  // repeat inside this batch) so nothing appears twice.
+  const seen = new Set(rendered.map((item) => item.post_id));
+  return fetched.filter((item) => {
+    if (seen.has(item.post_id)) return false;
+    seen.add(item.post_id);
+    return true;
+  });
+}
+
+export async function loadTimelinePage(
+  view: string,
+  offset: number,
+  limit: number,
+): Promise<Row> {
+  const params = new URLSearchParams({ view, offset: String(offset), limit: String(limit) });
+  const response = await fetch(`/api/home?${params}`);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
 export async function loadCollectionStatus(): Promise<Row> {
   const response = await fetch("/api/collect/status");
   if (!response.ok) throw new Error(await response.text());

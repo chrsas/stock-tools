@@ -9,9 +9,13 @@ from kol_archive.models import WatchMode
 from .common import _post_projection
 
 
-def list_timeline(connection: sqlite3.Connection, *, limit: int = 50) -> list[dict[str, object]]:
+def list_timeline(
+    connection: sqlite3.Connection, *, limit: int = 50, offset: int = 0
+) -> list[dict[str, object]]:
     if limit < 1:
         raise ValueError("timeline limit must be positive")
+    if offset < 0:
+        raise ValueError("timeline offset must not be negative")
     rows = connection.execute(
         """
         SELECT
@@ -53,15 +57,15 @@ def list_timeline(connection: sqlite3.Connection, *, limit: int = 50) -> list[di
             COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at) DESC,
             COALESCE(p.last_present_at, p.first_seen_at) DESC,
             p.id DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (limit,),
+        (limit, offset),
     ).fetchall()
     return [_post_projection(row) for row in rows]
 
 
 def list_filtered_timeline(
-    connection: sqlite3.Connection, prompt_version: str, *, limit: int = 50
+    connection: sqlite3.Connection, prompt_version: str, *, limit: int = 50, offset: int = 0
 ) -> list[dict[str, object]]:
     """The label-gate stream: posts whose current version was enriched (for
     ``prompt_version``) and hit at least one label, newest first.
@@ -72,6 +76,8 @@ def list_filtered_timeline(
     """
     if limit < 1:
         raise ValueError("timeline limit must be positive")
+    if offset < 0:
+        raise ValueError("timeline offset must not be negative")
     if not prompt_version.strip():
         raise ValueError("prompt_version must not be empty")
     rows = connection.execute(
@@ -127,9 +133,9 @@ def list_filtered_timeline(
             COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at) DESC,
             COALESCE(p.last_present_at, p.first_seen_at) DESC,
             p.id DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (prompt_version.strip(), limit),
+        (prompt_version.strip(), limit, offset),
     ).fetchall()
     return [_post_projection(row) for row in rows]
 

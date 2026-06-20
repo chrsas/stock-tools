@@ -24,6 +24,29 @@ from kol_archive.recall import build_recall_page
 from kol_archive.watchlist import list_watchlist
 
 
+def _query_int(
+    values: dict[str, list[str]],
+    key: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Read a single integer query param, falling back to ``default`` when absent
+    or malformed, then clamp into ``[minimum, maximum]``. Keeps a hand-typed
+    ``?offset=abc`` from raising rather than serving a sane page."""
+    raw = (values.get(key) or [""])[0]
+    try:
+        result = int(raw)
+    except ValueError:
+        result = default
+    if minimum is not None and result < minimum:
+        result = minimum
+    if maximum is not None and result > maximum:
+        result = maximum
+    return result
+
+
 def _queue_counts(connection: sqlite3.Connection, prompt_version: str) -> dict[str, int]:
     def scalar(query: str, *params: object) -> int:
         return int(connection.execute(query, params).fetchone()[0])
@@ -72,14 +95,29 @@ def _home_payload(
     values = parse_qs(query)
     view = (values.get("view") or ["authors"])[0]
     tier3_only = (values.get("tier") or [""])[0] == "3"
-    if view == "raw":
-        return {"view": "raw", "items": list_timeline(connection, limit=limit)}
-    if view == "filtered":
-        return {
-            "view": "filtered",
-            "items": list_filtered_timeline(connection, prompt_version, limit=limit),
-            "prompt_version": prompt_version,
+    if view == "raw" or view == "filtered":
+        # Cursor-less offset paging: the first load uses the configured page size,
+        # later loads pass their own (smaller) limit. Fetch one extra row so the
+        # client knows whether to keep loading without a separate count query.
+        offset = _query_int(values, "offset", 0, minimum=0)
+        page_limit = _query_int(values, "limit", limit, minimum=1, maximum=200)
+        if view == "raw":
+            rows = list_timeline(connection, limit=page_limit + 1, offset=offset)
+        else:
+            rows = list_filtered_timeline(
+                connection, prompt_version, limit=page_limit + 1, offset=offset
+            )
+        has_more = len(rows) > page_limit
+        payload: dict[str, object] = {
+            "view": view,
+            "items": rows[:page_limit],
+            "offset": offset,
+            "limit": page_limit,
+            "has_more": has_more,
         }
+        if view == "filtered":
+            payload["prompt_version"] = prompt_version
+        return payload
     if view == "pinned":
         return {
             "view": "pinned",

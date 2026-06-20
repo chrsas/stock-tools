@@ -655,6 +655,23 @@ def test_filtered_timeline_isolated_by_prompt_version(archive: Archive) -> None:
     assert list_filtered_timeline(archive.connection, "enrich-v2") == []
 
 
+def test_timeline_offset_paginates_without_overlap(archive: Archive) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post(f"p{i}", text=f"T{i}") for i in range(5)])
+    full = [item["post_id"] for item in list_timeline(archive.connection)]
+    assert len(full) == 5
+
+    pages = [
+        [item["post_id"] for item in list_timeline(archive.connection, limit=2, offset=off)]
+        for off in (0, 2, 4)
+    ]
+    # Consecutive offset windows tile the full stream with no gaps or repeats.
+    assert pages[0] + pages[1] + pages[2] == full
+    assert len(pages[0]) == 2 and len(pages[2]) == 1
+    assert list_timeline(archive.connection, limit=2, offset=5) == []
+    with pytest.raises(ValueError):
+        list_timeline(archive.connection, offset=-1)
+
+
 def test_evidence_card_exposes_enrichments(archive: Archive) -> None:
     archive.record_feed_run(make_feed_run(), [make_post()])
     [target] = archive.enrichment_targets("enrich-v1")

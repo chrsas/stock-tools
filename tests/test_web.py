@@ -781,6 +781,48 @@ def test_operations_status_combines_task_and_automation_state(
     assert not any("/api/operations/status" in record.getMessage() for record in caplog.records)
 
 
+def test_raw_timeline_paginates_with_offset_and_has_more(web_server: ArchiveHttpServer) -> None:
+    connection = connect_database(web_server.db_path)
+    try:
+        Archive(connection).record_feed_run(
+            _make_feed_run(),
+            [
+                NormalizedPost(
+                    platform_post_id="post-2",
+                    author_id=1,
+                    observed_at=BASE_TIME,
+                    content_fidelity=ContentFidelity.FULL,
+                    content_text="原始正文 B",
+                    content_hash="hash-b",
+                    posted_at_claimed=datetime.now(tz=UTC).isoformat(),
+                    url="https://xueqiu.com/100/post-2",
+                    raw_payload={"stockCorrelation": ["SH000001"]},
+                )
+            ],
+        )
+    finally:
+        connection.close()
+
+    first = _get_json(web_server, "/api/home?view=raw&limit=1&offset=0")
+    assert first["view"] == "raw"
+    assert first["offset"] == 0
+    assert first["limit"] == 1
+    assert first["has_more"] is True
+    first_items = cast(list[dict[str, object]], first["items"])
+    assert len(first_items) == 1
+
+    second = _get_json(web_server, "/api/home?view=raw&limit=1&offset=1")
+    assert second["has_more"] is False
+    second_items = cast(list[dict[str, object]], second["items"])
+    assert len(second_items) == 1
+    # The two windows tile the stream without overlap.
+    assert {first_items[0]["post_id"], second_items[0]["post_id"]} == {1, 2}
+
+    third = _get_json(web_server, "/api/home?view=raw&limit=1&offset=2")
+    assert third["items"] == []
+    assert third["has_more"] is False
+
+
 def test_static_asset_requests_are_demoted_to_debug(
     web_server: ArchiveHttpServer, caplog: pytest.LogCaptureFixture
 ) -> None:

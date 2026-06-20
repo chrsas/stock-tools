@@ -238,6 +238,9 @@ summary:hover { color: var(--accent); }
 .stream-modes a { display: inline-flex; align-items: center; padding: 7px 13px; border-radius: 99px;
   border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); font-size: .87rem; font-weight: 550; }
 .stream-modes a.on { border-color: var(--accent); color: var(--accent); }
+.timeline-sentinel { height: 1px; }
+.timeline-more { display: flex; justify-content: center; margin: 18px 0 4px; }
+.timeline-more.muted { font-size: .85rem; }
 .queue-layout { display: grid; grid-template-columns: 1fr 264px; gap: 20px; align-items: start; }
 .queue { display: grid; gap: 13px; }
 .legend { position: sticky; top: 80px; display: grid; gap: 14px; }
