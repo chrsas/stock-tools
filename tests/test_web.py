@@ -781,6 +781,21 @@ def test_operations_status_combines_task_and_automation_state(
     assert not any("/api/operations/status" in record.getMessage() for record in caplog.records)
 
 
+def test_static_asset_requests_are_demoted_to_debug(
+    web_server: ArchiveHttpServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The browser re-fetches favicon and bundled assets constantly; their
+    # lifecycle lines stay out of the INFO console but remain in the DEBUG trace.
+    with caplog.at_level(logging.INFO, logger="kol_archive.web"):
+        assert _request_bytes(web_server, "/favicon.png")[0] == 200
+    assert not any("/favicon.png" in record.getMessage() for record in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="kol_archive.web"):
+        assert _request_bytes(web_server, "/favicon.png")[0] == 200
+    assert any("/favicon.png" in record.getMessage() for record in caplog.records)
+
+
 def test_automation_settings_web_flow(web_server: ArchiveHttpServer) -> None:
     initial = _get_json(web_server, "/api/automation/settings")
     assert initial["collection_enabled"] is False

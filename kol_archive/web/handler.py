@@ -52,6 +52,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         "/api/collect/status",
         "/api/enrich/status",
     )
+    # 静态资源同理：浏览器会反复拉 favicon、图标与打包产物，INFO 里全是噪声。
+    # 与 do_GET 里 _send_asset 命中的那组路径保持一致。
+    _STATIC_ASSET_PATHS = ("/favicon.png", "/app-icon.png")
 
     def handle_one_request(self) -> None:
         # 每条请求一个关联 id，贯穿其请求/查询/第三方调用日志。keep-alive 下每次
@@ -63,8 +66,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         finally:
             request_id_var.reset(token)
 
-    def _is_polling(self) -> bool:
-        return urlparse(self.path).path in self._POLLING_PATHS
+    def _is_quiet(self) -> bool:
+        # 高频轮询端点与静态资源都降到 DEBUG：INFO 摘要留给真正的请求与动作，
+        # 完整 DEBUG 文件追踪里仍可见。
+        path = urlparse(self.path).path
+        if path in self._POLLING_PATHS or path in self._STATIC_ASSET_PATHS:
+            return True
+        return path.startswith("/assets/")
 
     @staticmethod
     def _safe_target(raw: str) -> str:
@@ -79,7 +87,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         status = code.value if isinstance(code, HTTPStatus) else code
         target = self._safe_target(self.path)
         message = f"request {self.command} {target} responded {status} in {duration_ms:.1f}ms"
-        if self._is_polling():
+        if self._is_quiet():
             LOGGER.debug(message)
         else:
             LOGGER.info(message)
@@ -92,7 +100,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
     def _log_inbound(self, method: str, path: str, params: str) -> None:
         # ``params`` is already redacted by the caller (a GET query via _safe_target,
         # a POST summary via _form_summary); here we only bound the line.
-        level = logging.DEBUG if self._is_polling() else logging.INFO
+        level = logging.DEBUG if self._is_quiet() else logging.INFO
         summary = truncate_for_log(params) if params else ""
         LOGGER.log(level, "request %s %s%s", method, path, f" {summary}" if summary else "")
 
