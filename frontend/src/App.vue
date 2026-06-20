@@ -438,8 +438,7 @@ onBeforeUnmount(() => {
         <li><a class="nav-item" :class="{ on: navActive('operations') }" href="/?view=operations"><svg viewBox="0 0 24 24" class="ico"><path d="M4 6h16M4 12h16M4 18h16" /><circle cx="8" cy="6" r="2" /><circle cx="16" cy="12" r="2" /><circle cx="10" cy="18" r="2" /></svg>采集与富化</a></li>
         <li><a class="nav-item" :class="{ on: navActive('queue') }" href="/?view=queue"><svg viewBox="0 0 24 24" class="ico"><path d="M3 12h5l2 3h4l2-3h5" /><path d="M5 5h14v14H5z" /></svg>待处理队列</a></li>
         <li><a class="nav-item" :class="{ on: navActive('pinned') }" href="/?view=pinned"><svg viewBox="0 0 24 24" class="ico"><path d="M12 17v5" /><path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6z" /></svg>已钉住</a></li>
-        <li><a class="nav-item" :class="{ on: navActive('raw') }" href="/?view=raw"><svg viewBox="0 0 24 24" class="ico"><path d="M4 7h16" /><path d="M4 12h16" /><path d="M4 17h10" /></svg>原始时间线</a></li>
-        <li><a class="nav-item" :class="{ on: navActive('filtered') }" href="/?view=filtered"><svg viewBox="0 0 24 24" class="ico"><path d="M4 5h16l-6 7v6l-4 2v-8z" /></svg>标签过滤流</a></li>
+        <li><a class="nav-item" :class="{ on: navActive('raw') || navActive('filtered') }" href="/?view=filtered"><svg viewBox="0 0 24 24" class="ico"><path d="M4 7h16" /><path d="M4 12h16" /><path d="M4 17h10" /></svg>时间线</a></li>
         <li><a class="nav-item" :class="{ on: navActive('claims') }" href="/?view=claims"><svg viewBox="0 0 24 24" class="ico"><path d="M5 4h14v16H5z" /><path d="M8 9h8M8 13h5" /></svg>命题确认</a></li>
         <li><a class="nav-item" :class="{ on: navActive('decisions') }" href="/?view=decisions"><svg viewBox="0 0 24 24" class="ico"><path d="M5 4h14v16H5z" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>我的决策</a></li>
         <li><a class="nav-item" :class="{ on: navActive('watchlist') }" href="/?view=watchlist"><svg viewBox="0 0 24 24" class="ico"><path d="M12 3v18M3 12h18" /><circle cx="12" cy="12" r="8" /></svg>关注列表</a></li>
@@ -631,7 +630,11 @@ onBeforeUnmount(() => {
         </template>
 
         <template v-else-if="page?.view === 'raw' || page?.view === 'filtered'">
-          <div class="page-title"><div><h1>{{ page.view === "raw" ? "原始时间线" : "标签过滤流" }}</h1><p v-if="page.prompt_version" class="sub">prompt 版本 {{ page.prompt_version }}</p></div></div>
+          <div class="page-title"><div><h1>时间线</h1><p v-if="page.prompt_version" class="sub">prompt 版本 {{ page.prompt_version }}</p></div></div>
+          <div class="stream-modes">
+            <a :class="{ on: page.view === 'filtered' }" href="/?view=filtered">标签命中</a>
+            <a :class="{ on: page.view === 'raw' }" href="/?view=raw">原始全部</a>
+          </div>
           <TimelineCard v-for="item in page.items" :key="item.post_id" :item="item" :show-labels="page.view === 'filtered'" />
           <p v-if="!page.items.length" class="empty">暂无记录。</p>
         </template>
