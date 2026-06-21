@@ -293,7 +293,6 @@ async function restoreEnrichStatus() {
   try {
     const status = await loadEnrichmentStatus();
     applyEnrichmentStatus(status, true);
-    if (status.running) startEnrichStatusPolling();
   } catch {
     // A status lookup failure must not block the rest of the page on mount.
   }
@@ -303,7 +302,6 @@ async function restoreCollectStatus() {
   try {
     const status = await loadCollectionStatus();
     applyCollectionStatus(status);
-    if (status.running) startCollectStatusPolling();
   } catch {
     // A status lookup failure must not block the rest of the page on mount.
   }

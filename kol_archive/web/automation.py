@@ -198,7 +198,8 @@ def _enrichment_worker_loop(server: ArchiveHttpServer) -> None:
     drain that bailed because the shared lock was busy.
     """
     while not server.automation_stop.is_set():
-        server.enrich_wake.wait(timeout=ENRICHMENT_POLL_INTERVAL_SECONDS)
+        woke = server.enrich_wake.wait(timeout=ENRICHMENT_POLL_INTERVAL_SECONDS)
+        trigger = "wake" if woke else "poll"
         server.enrich_wake.clear()
         if server.automation_stop.is_set():
             break
@@ -208,9 +209,16 @@ def _enrichment_worker_loop(server: ArchiveHttpServer) -> None:
             continue
         try:
             with trace_scope():
-                jobs._drain_pending_enrichments(server)
+                LOGGER.info("resident enrichment drain started trigger=%s", trigger)
+                pending_author_count, result = jobs._drain_pending_enrichments(server)
+                LOGGER.info(
+                    "resident enrichment drain finished trigger=%s result=%s pending_authors=%d",
+                    trigger,
+                    result,
+                    pending_author_count,
+                )
         except Exception:
-            LOGGER.warning("resident enrichment worker iteration failed")
+            LOGGER.warning("resident enrichment drain failed trigger=%s", trigger)
 
 
 def _automation_loop(server: ArchiveHttpServer) -> None:

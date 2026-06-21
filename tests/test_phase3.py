@@ -14,6 +14,7 @@ from typing import cast
 import httpx
 import pytest
 
+from kol_archive import obs
 from kol_archive.cli import claims as kol_main
 from kol_archive.database import connect_database, initialize_database
 from kol_archive.enrich import (
@@ -424,6 +425,30 @@ def test_enrich_targets_runs_llm_calls_in_parallel() -> None:
     assert len(results) == len(targets)
     assert all(result is not None and error is None for _, result, error in results)
     assert {target.version_id for target, _, _ in results} == {t.version_id for t in targets}
+
+
+def test_enrich_targets_preserves_request_id_in_worker_threads() -> None:
+    targets = [_make_target(n) for n in range(3)]
+    seen_request_ids: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        del request
+        seen_request_ids.append(obs.request_id_var.get())
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(_valid_payload())}}]},
+        )
+
+    token = obs.request_id_var.set("trace-test-id")
+    try:
+        settings = dataclasses.replace(_settings(), concurrency=3)
+        with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+            results = list(enrich_targets(settings, targets, client=client))
+    finally:
+        obs.request_id_var.reset(token)
+
+    assert len(results) == len(targets)
+    assert seen_request_ids == ["trace-test-id"] * len(targets)
 
 
 def test_enrich_targets_surfaces_per_target_errors_without_aborting() -> None:

@@ -338,7 +338,7 @@ def _nudge_enrichment(server: ArchiveHttpServer) -> bool:
     return True
 
 
-def _drain_pending_enrichments(server: ArchiveHttpServer) -> None:
+def _drain_pending_enrichments(server: ArchiveHttpServer) -> tuple[int, str]:
     """Enrich every current version still missing a label for the prompt version.
 
     The DB is the queue: this selects the pending set and drains it author by
@@ -363,6 +363,9 @@ def _drain_pending_enrichments(server: ArchiveHttpServer) -> None:
         ).fetchall()
     finally:
         connection.close()
+    pending_author_count = len(rows)
+    if pending_author_count == 0:
+        return 0, "empty"
     for row in rows:
         author_uid = str(row["platform_uid"])
         try:
@@ -374,9 +377,10 @@ def _drain_pending_enrichments(server: ArchiveHttpServer) -> None:
             # CONFLICT means the shared collect/enrich lock is busy; every remaining
             # author would hit the same wall, so stop and let the next wake retry.
             if failure_response[0] == HTTPStatus.CONFLICT:
-                return
+                return pending_author_count, "lock_busy"
             LOGGER.warning(
                 "resident enrichment failed author_uid=%s status=%s",
                 author_uid,
                 failure_response[0],
             )
+    return pending_author_count, "completed"

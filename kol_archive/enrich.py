@@ -13,6 +13,7 @@ import json
 import os
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -290,7 +291,7 @@ def enrich_targets(
             max_workers=settings.concurrency, thread_name_prefix="enrich"
         ) as executor:
             futures = [
-                executor.submit(_settle_target, settings, target, active_client)
+                executor.submit(copy_context().run, _settle_target, settings, target, active_client)
                 for target in targets
             ]
             for future in as_completed(futures):

@@ -36,6 +36,7 @@ from kol_archive.web import (
     WebSettings,
     _automation_loop,
     _drain_pending_enrichments,
+    _enrichment_worker_loop,
     _execute_author_enrichment,
     _load_automation_settings,
     _prime_startup_collection_schedule,
@@ -925,10 +926,63 @@ def test_drain_pending_enrichments_runs_without_local_http_post(
 
     monkeypatch.setattr("kol_archive.web.jobs._execute_author_enrichment", fake_execute)
 
-    _drain_pending_enrichments(web_server)
+    result = _drain_pending_enrichments(web_server)
     # The resident worker drains the full pending queue, so no per-collection time
     # bound is passed: observed_since is None.
     assert calls == [("100", None)]
+    assert result == (1, "completed")
+
+
+def test_drain_pending_enrichments_reports_empty_queue(web_server: ArchiveHttpServer) -> None:
+    connection = connect_database(web_server.db_path)
+    try:
+        archive = Archive(connection)
+        [target] = archive.enrichment_targets("enrich-v1")
+        archive.add_enrichment(
+            target,
+            EnrichmentResult(
+                post_type="观点",
+                label_first_hand_info=False,
+                label_transferable_framework=False,
+                label_reasoned_non_consensus=False,
+                rationale="测试富化",
+                evidence_snippet="",
+                stance_summary="",
+            ),
+            "test-model",
+            "enrich-v1",
+            BASE_TIME,
+        )
+    finally:
+        connection.close()
+
+    assert _drain_pending_enrichments(web_server) == (0, "empty")
+
+
+def test_enrichment_worker_logs_drain_boundary(
+    web_server: ArchiveHttpServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def fake_drain(server: ArchiveHttpServer) -> tuple[int, str]:
+        assert server is web_server
+        web_server.automation_stop.set()
+        return 0, "empty"
+
+    monkeypatch.setattr("kol_archive.web.jobs._drain_pending_enrichments", fake_drain)
+    web_server.automation_active = True
+    web_server.enrich_wake.set()
+
+    with caplog.at_level(logging.INFO, logger="kol_archive.web"):
+        thread = threading.Thread(target=_enrichment_worker_loop, args=(web_server,), daemon=True)
+        thread.start()
+        thread.join(timeout=3)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "resident enrichment drain started trigger=wake" in messages
+    assert (
+        "resident enrichment drain finished trigger=wake result=empty pending_authors=0" in messages
+    )
 
 
 def test_execute_author_enrichment_reports_conflict_when_long_task_runs(
