@@ -11,7 +11,7 @@ import {
   mutate,
   type Row,
 } from "./api";
-import { authorName, fmtTime, orderedVersions, percent, postTitle, xueqiuUrl } from "./format";
+import { authorName, fmtRelative, fmtTime, orderedVersions, percent, postTitle, xueqiuUrl } from "./format";
 import AuthorBadge from "./components/AuthorBadge.vue";
 import PostLinks from "./components/PostLinks.vue";
 import QueueCard from "./components/QueueCard.vue";
@@ -27,6 +27,8 @@ const collectNotice = ref("");
 const collectPhase = ref("");
 const collectElapsed = ref(0);
 const collectLogs = ref<Row[]>([]);
+const lastCollectionAt = ref<string | null>(null);
+const nowTick = ref(Date.now());
 const enriching = ref(false);
 const enrichPhase = ref("");
 const enrichProcessed = ref(0);
@@ -52,6 +54,7 @@ let pollingEnrichStatus = false;
 let operationsStatusTimer: number | undefined;
 let operationsPollingActive = false;
 let pollingOperationsStatus = false;
+let nowTickTimer: number | undefined;
 let activeEnrichAuthorUid = "";
 let enrichRunObserved = false;
 let enrichRequestPending = false;
@@ -200,6 +203,10 @@ function applyCollectionStatus(status: Row) {
   collectElapsed.value = Number(status.elapsed_seconds || 0);
   collectLogs.value = Array.isArray(status.logs) ? status.logs : [];
   collecting.value = Boolean(status.running);
+  // “上次采集”优先用后端给的 last_finished_at：本进程跑过就是内存里的完成时间，
+  // 没跑过则后端已从 SQLite 回落到最近一次 live fetch_run，重启后也不会显示“无”。
+  const lastFinished = status.last_finished_at ?? status.finished_at;
+  if (lastFinished) lastCollectionAt.value = String(lastFinished);
 }
 
 function startCollectStatusPolling() {
@@ -397,6 +404,21 @@ function startOperationsStatusPolling() {
   void pollOperationsStatus();
 }
 
+// 采集计划面板的“X 后 / X 前”精确到秒，需要一个每秒自增的 now 驱动重算。
+// 只在采集与富化页开这个秒级时钟，其它页不必空转。
+function startNowTicker() {
+  if (nowTickTimer !== undefined) return;
+  nowTick.value = Date.now();
+  nowTickTimer = window.setInterval(() => { nowTick.value = Date.now(); }, 1000);
+}
+
+function stopNowTicker() {
+  if (nowTickTimer !== undefined) {
+    window.clearInterval(nowTickTimer);
+    nowTickTimer = undefined;
+  }
+}
+
 function clearOperationsStatusTimer() {
   if (operationsStatusTimer !== undefined) {
     window.clearTimeout(operationsStatusTimer);
@@ -498,13 +520,17 @@ onMounted(async () => {
   await restoreAutomationSettings();
   await restoreCollectStatus();
   await restoreEnrichStatus();
-  if (page.value?.view === "operations") startOperationsStatusPolling();
+  if (page.value?.view === "operations") {
+    startOperationsStatusPolling();
+    startNowTicker();
+  }
   document.addEventListener("visibilitychange", handleVisibilityChange);
 });
 onBeforeUnmount(() => {
   stopCollectStatusPolling();
   stopEnrichStatusPolling();
   stopOperationsStatusPolling();
+  stopNowTicker();
   teardownTimelineObserver();
   document.removeEventListener("visibilitychange", handleVisibilityChange);
 });
@@ -561,10 +587,11 @@ onBeforeUnmount(() => {
               <h2>采集计划</h2>
               <p class="muted">
                 <template v-if="automationSettings.collection_enabled">
-                  下次自动采集 {{ fmtTime(automationSettings.next_collection_at) }}
+                  下次自动采集 {{ fmtRelative(automationSettings.next_collection_at, nowTick) }}
                 </template>
                 <template v-else>自动采集已关闭</template>
               </p>
+              <p class="muted">上次采集 {{ fmtRelative(lastCollectionAt, nowTick) }}</p>
             </div>
             <label class="toggle-row">
               <input v-model="automationSettings.collection_enabled" type="checkbox" :disabled="busy" @change="saveAutomationSettings">

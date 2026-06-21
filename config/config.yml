@@ -43,8 +43,8 @@ monitoring:
   recent_feed_absent_ttl_days: 7
   positive_observation_interval_days: 7  # 稳定旧帖至少间隔 N 天才进入完整观察
   positive_observation_max_count: 5       # 稳定旧帖最多完整观察 N 次
-  author_poll_interval_minutes: 180       # 有变化博主的下次轻探间隔
-  quiet_author_poll_interval_minutes: 720 # 首页无变化博主的下次轻探间隔
+  author_poll_interval_minutes: 15        # 统一 15 分钟一轮，不再按有无新帖区分
+  quiet_author_poll_interval_minutes: 15  # 取消安静退避，与上面一致
   blocked_author_cooldown_minutes: 180    # 采集受阻后的冷却间隔
   llm_candidate_ttl_days: 14          # 阶段 3
   min_samples: 30                     # 阶段 3
@@ -67,7 +67,7 @@ images:
 storage:
   db_path: data/kol.sqlite3
   backup_dir: data/backups
-  backup_after_run: true               # 每轮采集完成后生成经恢复验证的快照
+  backup_after_run: false              # 关闭每轮备份；改用独立低频调度 python -m kol_archive storage backup（整库拷贝加全库校验，开销随库增长，不该每个 tick 跑）
   backup_retention_count: 30           # 仅保留最近 N 份快照
 
 # ── 中性变更摘要（阶段 6）────────────────────────────────────────

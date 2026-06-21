@@ -31,7 +31,11 @@ from kol_archive.service import Archive
 from kol_archive.watchlist import add_watchlist_ticker, remove_watchlist_ticker
 
 from . import jobs
-from .automation import _save_automation_settings, _schedule_next_collection
+from .automation import (
+    _save_automation_settings,
+    _schedule_next_collection,
+    latest_live_collection_finished_at,
+)
 from .payload import _home_payload
 from .settings import WEB_DIST, ArchiveHttpServer
 
@@ -468,7 +472,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                     else datetime.fromisoformat(status.finished_at)
                 )
                 elapsed_seconds = max(0, int((ended_at - started_at).total_seconds()))
-            return {
+            payload = {
                 "running": status.running,
                 "phase": status.phase,
                 "started_at": status.started_at,
@@ -478,6 +482,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 "elapsed_seconds": elapsed_seconds,
                 "logs": list(status.logs),
             }
+        # “上次采集”要在进程重启后仍然有值：内存里没有本进程的完成时间时，
+        # 回落到 SQLite 里最近一次 live fetch_run 的完成时间。DB 读取放在锁外。
+        last_finished_at = payload["finished_at"]
+        if last_finished_at is None:
+            last_finished_at = latest_live_collection_finished_at(self.server.db_path)
+        payload["last_finished_at"] = last_finished_at
+        return payload
 
     def _automation_settings_payload(self) -> dict[str, object]:
         with self.server.automation_settings_lock:

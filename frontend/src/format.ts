@@ -29,6 +29,31 @@ export function fmtTime(value: unknown): string {
   return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
 }
 
+// 相对时间，精确到秒：未来渲染成“X 后”、过去渲染成“X 前”。第二个参数显式传入
+// 当前毫秒数，既方便测试，也让调用方用一个每秒自增的 now 触发 Vue 重新计算、让秒数真正走动。
+export function fmtRelative(value: unknown, nowMs: number = Date.now()): string {
+  if (!value) return "无";
+  const then = new Date(String(value)).valueOf();
+  if (Number.isNaN(then)) return String(value);
+  const diffMs = then - nowMs;
+  const future = diffMs >= 0;
+  let total = Math.floor(Math.abs(diffMs) / 1000);
+  if (total < 1) return future ? "即将" : "刚刚";
+  const days = Math.floor(total / 86400);
+  total -= days * 86400;
+  const hours = Math.floor(total / 3600);
+  total -= hours * 3600;
+  const minutes = Math.floor(total / 60);
+  const seconds = total - minutes * 60;
+  const parts: string[] = [];
+  if (days) parts.push(`${days} 天`);
+  if (hours) parts.push(`${hours} 小时`);
+  if (minutes) parts.push(`${minutes} 分`);
+  // 天级跨度再标到秒太吵；其余一律带上秒，保证“精确到秒”。
+  if (!days) parts.push(`${seconds} 秒`);
+  return `${parts.join(" ")}${future ? "后" : "前"}`;
+}
+
 export function percent(value: unknown): string {
   return value == null ? "无" : `${Number(value) >= 0 ? "+" : ""}${(Number(value) * 100).toFixed(2)}%`;
 }

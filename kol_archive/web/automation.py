@@ -85,6 +85,26 @@ def _configured_account_uids(config: dict[str, Any]) -> set[str]:
     }
 
 
+def latest_live_collection_finished_at(db_path: Path) -> str | None:
+    """The most recent completed live fetch_run, read from SQLite so a freshly
+    restarted process can still show “上次采集” before it runs its own round.
+    Returns the stored ISO timestamp untouched, or None when no live run exists."""
+    if not db_path.is_file():
+        return None
+    connection = connect_database(db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT MAX(finished_at) AS finished_at
+            FROM fetch_runs
+            WHERE ingest_mode = 'live' AND finished_at IS NOT NULL
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    return None if row is None else row["finished_at"]
+
+
 def _startup_collection_due_at(
     db_path: Path,
     interval_minutes: int,
