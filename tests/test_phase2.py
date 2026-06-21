@@ -92,22 +92,47 @@ def post_id(archive: Archive, platform_post_id: str = "post-1") -> int:
 
 def test_timeline_exposes_observation_times_and_deletion_signal_levels(archive: Archive) -> None:
     archive.record_feed_run(make_feed_run(), [make_post()])
-    for hour in (1, 2, 3):
-        archive.record_feed_run(make_feed_run(f"2026-06-01T0{hour}:00:00+00:00"), [])
 
     timeline = list_timeline(archive.connection)
 
     assert timeline[0]["current_version_first_observed_at"] == BASE_TIME
     assert timeline[0]["current_version_last_observed_at"] == BASE_TIME
-    assert timeline[0]["last_feed_absence_detected_at"] == "2026-06-01T03:00:00+00:00"
-    assert cast(dict[str, str], timeline[0]["status"])["deletion_signal_level"] == "weak"
+    # Feed-side absence inference was retired, so the feed never records an absence
+    # timestamp; a present post carries no deletion signal until a direct recheck does.
+    assert timeline[0]["last_feed_absence_detected_at"] is None
+    assert cast(dict[str, str], timeline[0]["status"])["deletion_signal_level"] == "none"
 
+    # A direct recheck that cannot reach the post is a weak signal (source unavailable).
     archive.record_probe_run(
         ProbeRun(
             post_id=post_id(archive),
             started_at="2026-06-01T04:00:00+00:00",
             finished_at="2026-06-01T04:00:00+00:00",
             observed_at="2026-06-01T04:00:00+00:00",
+            status=RunStatus.OK,
+            http_status=404,
+            login_state=LoginState.VALID,
+            rate_limited=False,
+            result=ProbeResult.NOT_FOUND,
+            content_fidelity=ContentFidelity.NA,
+            ingest_mode=IngestMode.LIVE,
+            adapter_version="xueqiu-2",
+        )
+    )
+    assert (
+        cast(dict[str, str], list_timeline(archive.connection)[0]["status"])[
+            "deletion_signal_level"
+        ]
+        == "weak"
+    )
+
+    # An explicit removal is a strong signal.
+    archive.record_probe_run(
+        ProbeRun(
+            post_id=post_id(archive),
+            started_at="2026-06-01T05:00:00+00:00",
+            finished_at="2026-06-01T05:00:00+00:00",
+            observed_at="2026-06-01T05:00:00+00:00",
             status=RunStatus.OK,
             http_status=200,
             login_state=LoginState.VALID,

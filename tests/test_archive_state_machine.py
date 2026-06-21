@@ -309,7 +309,13 @@ def test_unchanged_positive_observation_stops_after_max_count(archive: Archive) 
     assert scalar(archive, "SELECT COUNT(*) FROM post_versions") == 1
 
 
-def test_seen_post_after_absence_records_recovery_even_within_week(archive: Archive) -> None:
+def test_empty_feed_run_does_not_count_as_absence_and_reobservation_stays_throttled(
+    archive: Archive,
+) -> None:
+    # Seeing a post, then a poll that does not include it, then seeing it again within the
+    # weekly interval: the empty poll is no longer an absence signal (feed-side inference
+    # was retired), so the post stays present and the re-sighting is throttled to one
+    # observation rather than being treated as a recovery.
     archive.record_feed_run(make_feed_run(), [make_post()])
     archive.record_feed_run(make_feed_run(finished_at="2026-06-02T00:00:00+00:00"), [])
 
@@ -318,8 +324,10 @@ def test_seen_post_after_absence_records_recovery_even_within_week(archive: Arch
         [make_post(observed_at="2026-06-03T00:00:00+00:00")],
     )
 
+    assert scalar(archive, "SELECT feed_state FROM posts") == FeedState.PRESENT
     assert scalar(archive, "SELECT absent_healthy_streak FROM posts") == 0
-    assert scalar(archive, "SELECT COUNT(*) FROM post_observations WHERE present = 1") == 2
+    assert scalar(archive, "SELECT COUNT(*) FROM post_observations WHERE present = 0") == 0
+    assert scalar(archive, "SELECT COUNT(*) FROM post_observations WHERE present = 1") == 1
 
 
 def test_preview_observation_does_not_create_version_or_content_event(archive: Archive) -> None:
@@ -338,38 +346,22 @@ def test_preview_observation_does_not_create_version_or_content_event(archive: A
     assert observation["version_id"] is None
 
 
-def test_three_healthy_absences_confirm_and_enqueue_once(archive: Archive) -> None:
+def test_feed_no_longer_infers_absence_however_many_polls_miss_the_post(
+    archive: Archive,
+) -> None:
+    # An incremental feed poll covers only new content, so a known post being missing is
+    # not evidence of deletion. However many healthy polls do not include it, the post
+    # stays present, no present=false observation is written, and nothing is enqueued —
+    # deletion confirmation is the direct-recheck lifecycle's job (Track B) now.
     archive.record_feed_run(make_feed_run(), [make_post()])
 
-    for hour in (1, 2):
+    for hour in (1, 2, 3, 4):
         archive.record_feed_run(make_feed_run(finished_at=f"2026-06-01T0{hour}:00:00+00:00"), [])
         assert scalar(archive, "SELECT feed_state FROM posts") == FeedState.PRESENT
-    archive.record_feed_run(make_feed_run(finished_at="2026-06-01T03:00:00+00:00"), [])
-    archive.record_feed_run(make_feed_run(finished_at="2026-06-01T04:00:00+00:00"), [])
 
-    assert scalar(archive, "SELECT feed_state FROM posts") == FeedState.ABSENT_CONFIRMED
-    assert scalar(archive, "SELECT absent_healthy_streak FROM posts") == 4
-    assert scalar(archive, "SELECT COUNT(*) FROM recheck_queue WHERE state = 'pending'") == 1
-
-
-def test_absence_inference_compares_equivalent_timezone_offsets(archive: Archive) -> None:
-    archive.record_feed_run(
-        make_feed_run(),
-        [make_post(posted_at_claimed="2026-05-20T08:00:00+08:00")],
-    )
-    boundary_run = replace(
-        make_feed_run(),
-        covered_from="2026-05-20T00:00:00Z",
-        covered_to="2026-05-20T00:00:00Z",
-    )
-
-    for hour in (1, 2, 3):
-        archive.record_feed_run(
-            replace(boundary_run, finished_at=f"2026-06-01T0{hour}:00:00+00:00"),
-            [],
-        )
-
-    assert scalar(archive, "SELECT feed_state FROM posts") == FeedState.ABSENT_CONFIRMED
+    assert scalar(archive, "SELECT absent_healthy_streak FROM posts") == 0
+    assert scalar(archive, "SELECT COUNT(*) FROM post_observations WHERE present = 0") == 0
+    assert scalar(archive, "SELECT COUNT(*) FROM recheck_queue WHERE state = 'pending'") == 0
 
 
 def test_partial_run_keeps_positive_archive_and_blocks_all_negative_inference(
@@ -637,23 +629,127 @@ def test_version_sightings_combines_feed_and_direct_observations(archive: Archiv
     ]
 
 
-def test_out_of_scope_unpinned_post_becomes_inactive_but_pinned_post_stays_pinned(
+def test_recheck_lifecycle_retires_recent_window_post_on_gone_but_keeps_pinned(
     archive: Archive,
 ) -> None:
-    old = "2026-04-01T00:00:00+00:00"
-    archive.record_feed_run(
-        make_feed_run(),
-        [make_post("unpinned", posted_at_claimed=old), make_post("pinned", posted_at_claimed=old)],
-    )
-    pinned_id = int(str(scalar(archive, "SELECT id FROM posts WHERE platform_post_id = 'pinned'")))
-    archive.pin_post(pinned_id, "2026-06-01T01:00:00+00:00")
+    archive.record_feed_run(make_feed_run(), [make_post("gone"), make_post("kept")])
+    gone_id = int(str(scalar(archive, "SELECT id FROM posts WHERE platform_post_id = 'gone'")))
+    kept_id = int(str(scalar(archive, "SELECT id FROM posts WHERE platform_post_id = 'kept'")))
+    archive.pin_post(kept_id, "2026-06-01T01:00:00+00:00")
 
-    archive.record_feed_run(make_feed_run(finished_at="2026-06-01T02:00:00+00:00"), [])
+    archive.record_probe_run(make_probe_run(gone_id, ProbeResult.EXPLICITLY_REMOVED))
+    archive.record_probe_run(make_probe_run(kept_id, ProbeResult.EXPLICITLY_REMOVED))
 
     rows = archive.connection.execute(
-        "SELECT platform_post_id, feed_state, watch_mode FROM posts ORDER BY platform_post_id"
+        "SELECT platform_post_id, feed_state, watch_mode, source_state "
+        "FROM posts ORDER BY platform_post_id"
     ).fetchall()
-    assert [(row["platform_post_id"], row["feed_state"], row["watch_mode"]) for row in rows] == [
-        ("pinned", FeedState.OUT_OF_SCOPE, WatchMode.PINNED),
-        ("unpinned", FeedState.OUT_OF_SCOPE, WatchMode.INACTIVE),
+    assert [
+        (row["platform_post_id"], row["feed_state"], row["watch_mode"], row["source_state"])
+        for row in rows
+    ] == [
+        # A confirmed-gone recent_window post is retired: archived, monitoring stopped.
+        ("gone", FeedState.OUT_OF_SCOPE, WatchMode.INACTIVE, SourceState.GONE_CONFIRMED),
+        # A pinned post is a manual override and is never auto-retired.
+        ("kept", FeedState.PRESENT, WatchMode.PINNED, SourceState.GONE_CONFIRMED),
     ]
+
+
+def test_recheck_lifecycle_retires_recent_window_post_after_max_rechecks(
+    archive: Archive,
+) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post()])
+    post_id = int(str(scalar(archive, "SELECT id FROM posts")))
+
+    # Five healthy rechecks is the configured budget (positive_observation_max_count).
+    for day in ("02", "09", "16", "23"):
+        archive.record_probe_run(
+            make_probe_run(
+                post_id, ProbeResult.NOT_FOUND, observed_at=f"2026-06-{day}T00:00:00+00:00"
+            )
+        )
+        assert scalar(archive, "SELECT watch_mode FROM posts") == WatchMode.RECENT_WINDOW
+
+    archive.record_probe_run(
+        make_probe_run(post_id, ProbeResult.NOT_FOUND, observed_at="2026-06-30T00:00:00+00:00")
+    )
+
+    row = archive.connection.execute(
+        "SELECT feed_state, watch_mode FROM posts WHERE id = ?", (post_id,)
+    ).fetchone()
+    assert tuple(row) == (FeedState.OUT_OF_SCOPE, WatchMode.INACTIVE)
+
+
+def test_lifecycle_first_recheck_is_due_one_day_after_the_post(archive: Archive) -> None:
+    archive.record_feed_run(
+        make_feed_run(), [make_post(posted_at_claimed="2026-05-20T00:00:00+00:00")]
+    )
+    post_id = int(str(scalar(archive, "SELECT id FROM posts")))
+
+    # Default first_recheck_after_days=1: nothing is due before 2026-05-21.
+    assert archive.probe_targets("2026-05-20T12:00:00+00:00") == []
+    targets = archive.probe_targets("2026-05-21T00:00:00+00:00")
+    assert [target.post_id for target in targets] == [post_id]
+
+
+def test_lifecycle_subsequent_recheck_waits_one_interval_after_last_probe(
+    archive: Archive,
+) -> None:
+    archive.record_feed_run(
+        make_feed_run(), [make_post(posted_at_claimed="2026-05-20T00:00:00+00:00")]
+    )
+    post_id = int(str(scalar(archive, "SELECT id FROM posts")))
+    archive.record_probe_run(
+        make_probe_run(post_id, ProbeResult.NOT_FOUND, observed_at="2026-05-21T00:00:00+00:00")
+    )
+
+    # After the first probe the clock restarts at the 7-day interval from that probe.
+    assert archive.probe_targets("2026-05-24T00:00:00+00:00") == []
+    targets = archive.probe_targets("2026-05-28T00:00:00+00:00")
+    assert [target.post_id for target in targets] == [post_id]
+
+
+def test_lifecycle_due_posts_need_as_of_unlike_pinned_targets(archive: Archive) -> None:
+    archive.record_feed_run(
+        make_feed_run(), [make_post(posted_at_claimed="2026-05-20T00:00:00+00:00")]
+    )
+    post_id = int(str(scalar(archive, "SELECT id FROM posts")))
+
+    # No pin and no queue row: the post is only reachable through the lifecycle, which
+    # requires an as_of clock. The always-on pinned/queued targets do not.
+    assert archive.probe_targets() == []
+    assert [target.post_id for target in archive.probe_targets("2026-06-01T00:00:00+00:00")] == [
+        post_id
+    ]
+
+
+def test_probe_targets_limit_drains_most_overdue_lifecycle_posts_first(archive: Archive) -> None:
+    archive.record_feed_run(
+        make_feed_run(),
+        [
+            make_post("old", text="old", posted_at_claimed="2026-05-10T00:00:00+00:00"),
+            make_post("new", text="new", posted_at_claimed="2026-05-13T00:00:00+00:00"),
+            make_post("mid", text="mid", posted_at_claimed="2026-05-11T00:00:00+00:00"),
+        ],
+    )
+
+    # All three are lifecycle-due, but a budget of 2 takes the two oldest-posted first;
+    # the newest waits for a later run.
+    targets = archive.probe_targets("2026-06-01T00:00:00+00:00", limit=2)
+    assert [target.platform_post_id for target in targets] == ["old", "mid"]
+
+
+def test_probe_targets_limit_keeps_pinned_ahead_of_lifecycle_backlog(archive: Archive) -> None:
+    archive.record_feed_run(
+        make_feed_run(),
+        [
+            make_post("life", text="life", posted_at_claimed="2026-05-10T00:00:00+00:00"),
+            make_post("pin", text="pin", posted_at_claimed="2026-05-09T00:00:00+00:00"),
+        ],
+    )
+    pin_id = int(str(scalar(archive, "SELECT id FROM posts WHERE platform_post_id = 'pin'")))
+    archive.pin_post(pin_id, "2026-06-01T01:00:00+00:00")
+
+    # The single slot goes to the pinned post even though the lifecycle post is also due.
+    targets = archive.probe_targets("2026-06-01T02:00:00+00:00", limit=1)
+    assert [target.platform_post_id for target in targets] == ["pin"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterable
 from datetime import timedelta
 from typing import Any
@@ -21,22 +22,21 @@ from kol_archive.models import (
     LoginState,
     NormalizedPost,
     PendingPositive,
-    PendingProjection,
     ProbeResult,
     ProbeRun,
     ProbeTarget,
     QueueReason,
     QueueState,
+    RunStatus,
     SourceState,
     WatchMode,
 )
-from kol_archive.time import parse_utc_timestamp, timestamp_in_closed_range
+from kol_archive.time import parse_utc_timestamp
 
 from .base import (
     LOGGER,
     ArchiveBase,
     _json,
-    _plus_days,
     _required_lastrowid,
     is_healthy_feed_run,
     is_healthy_probe_run,
@@ -45,13 +45,25 @@ from .base import (
 
 class IngestMixin(ArchiveBase):
     def last_live_covered_to(self, author_id: int) -> str | None:
-        """Newest feed-observed post time from prior live runs, for continuity checks."""
+        """Newest contiguously-covered post time, used as the next poll's overlap anchor.
+
+        Only *healthy* live runs count: a run that reached its overlap point or the
+        timeline end (status ok, login valid, paginated complete, not rate limited).
+        A ``coverage_gap`` partial run grabbed only the newest few pages without
+        reconnecting, so its ``covered_to`` is not a contiguous frontier — advancing the
+        anchor to it would strand the posts between the gap and the prior frontier,
+        which an incremental poll could then never page back far enough to recover.
+        Excluding partial runs keeps the anchor at the last confirmed frontier, so the
+        next poll re-pages back to it and backfills the hole the gap run left.
+        """
         row = self.connection.execute(
             """
             SELECT MAX(covered_to) AS covered_to FROM fetch_runs
             WHERE author_id = ? AND ingest_mode = ? AND covered_to IS NOT NULL
+                AND status = ? AND login_state = ? AND pagination_complete = 1
+                AND rate_limited = 0
             """,
-            (author_id, IngestMode.LIVE),
+            (author_id, IngestMode.LIVE, RunStatus.OK, LoginState.VALID),
         ).fetchone()
         return None if row is None or row["covered_to"] is None else str(row["covered_to"])
 
@@ -150,7 +162,30 @@ class IngestMixin(ArchiveBase):
         ).fetchone()
         return row is None
 
-    def probe_targets(self) -> list[ProbeTarget]:
+    def probe_targets(
+        self, as_of: str | None = None, *, limit: int | None = None
+    ) -> list[ProbeTarget]:
+        """Posts due for a direct recheck this run, in priority order.
+
+        Three sources, de-duplicated by post id:
+
+        * pinned posts — rechecked every run (manual override, never auto-retired);
+        * posts with a pending ``recheck_queue`` row (e.g. an LLM candidate);
+        * posts inside their direct-recheck lifecycle whose next recheck is due.
+
+        The lifecycle is derived from append-only evidence, so it needs no queue
+        row: a ``recent_window`` post is due its first recheck ``first_recheck_after_days``
+        after its claimed time, then every ``positive_observation_interval_days`` after
+        the last healthy probe, until ``positive_observation_max_count`` healthy probes
+        have run. ``gone_confirmed`` posts are already terminal and excluded.
+        ``as_of`` must be supplied to include lifecycle-due posts; without it only the
+        always-on pinned and queued targets are returned.
+
+        Pinned and queued targets come first so a ``limit`` never starves them; the
+        lifecycle backlog follows, most-overdue first, so capping a run still drains the
+        oldest-waiting posts and rotates fairly across runs. ``limit`` caps the returned
+        count (the per-run probe budget); ``None`` returns every due target.
+        """
         rows = self.connection.execute(
             """
             SELECT DISTINCT p.id, p.author_id, p.platform_post_id
@@ -161,14 +196,74 @@ class IngestMixin(ArchiveBase):
             """,
             (QueueState.PENDING, WatchMode.PINNED),
         ).fetchall()
-        return [
-            ProbeTarget(
-                post_id=int(row["id"]),
-                author_id=int(row["author_id"]),
-                platform_post_id=str(row["platform_post_id"]),
+        ordered: list[ProbeTarget] = []
+        seen: set[int] = set()
+        for row in rows:
+            post_id = int(row["id"])
+            seen.add(post_id)
+            ordered.append(
+                ProbeTarget(
+                    post_id=post_id,
+                    author_id=int(row["author_id"]),
+                    platform_post_id=str(row["platform_post_id"]),
+                )
             )
-            for row in rows
-        ]
+        if as_of is not None:
+            for row in self._lifecycle_due_rows(as_of):
+                post_id = int(row["id"])
+                if post_id in seen:
+                    continue
+                seen.add(post_id)
+                ordered.append(
+                    ProbeTarget(
+                        post_id=post_id,
+                        author_id=int(row["author_id"]),
+                        platform_post_id=str(row["platform_post_id"]),
+                    )
+                )
+        return ordered if limit is None else ordered[:limit]
+
+    def _lifecycle_due_rows(self, as_of: str) -> list[sqlite3.Row]:
+        # Order by last activity ascending: never-probed posts sort by their claimed
+        # time (oldest first), already-probed posts by their last probe, so the longest
+        # waiting posts lead and a capped run drains the backlog without starvation.
+        rows = self.connection.execute(
+            """
+            SELECT p.id, p.author_id, p.platform_post_id,
+                   p.posted_at_claimed, p.first_seen_at,
+                   COUNT(pr.id) AS healthy_probes, MAX(pr.observed_at) AS last_probe_at
+            FROM posts p
+            LEFT JOIN probe_runs pr
+                ON pr.post_id = p.id
+                AND pr.status = ? AND pr.login_state = ? AND pr.rate_limited = 0
+            WHERE p.watch_mode = ? AND p.source_state != ?
+            GROUP BY p.id
+            HAVING healthy_probes < ?
+            ORDER BY COALESCE(MAX(pr.observed_at), p.posted_at_claimed, p.first_seen_at), p.id
+            """,
+            (
+                RunStatus.OK,
+                LoginState.VALID,
+                WatchMode.RECENT_WINDOW,
+                SourceState.GONE_CONFIRMED,
+                self.settings.positive_observation_max_count,
+            ),
+        ).fetchall()
+        now = parse_utc_timestamp(as_of)
+        due: list[sqlite3.Row] = []
+        for row in rows:
+            if int(row["healthy_probes"]) == 0:
+                anchor = row["posted_at_claimed"] or row["first_seen_at"]
+                due_at = parse_utc_timestamp(str(anchor)) + timedelta(
+                    days=self.settings.first_recheck_after_days
+                )
+            else:
+                due_at = parse_utc_timestamp(str(row["last_probe_at"])) + timedelta(
+                    days=self.settings.positive_observation_interval_days
+                )
+            if now >= due_at:
+                due.append(row)
+        return due
 
     def should_observe_feed_post(
         self, platform: str, author_id: int, platform_post_id: str, observed_at: str
@@ -238,29 +333,17 @@ class IngestMixin(ArchiveBase):
             for positive in archived_positives:
                 self._insert_positive_events(fetch_run_id, positive)
 
-            projections: list[PendingProjection] = []
-            # Backfill is historical archival only: it never drives absence/out_of_scope
-            # inference (charter rule 9 separates backfill from live monitoring). An empty
-            # timeline (a brand-new or fully-cleared account) is a healthy round but covers
-            # no time range, so there is nothing to infer absence over — skip inference
-            # rather than treating the missing coverage as an error.
-            if (
-                effective_run.ingest_mode is IngestMode.LIVE
-                and is_healthy_feed_run(effective_run)
-                and effective_run.covered_from is not None
-                and effective_run.covered_to is not None
-            ):
-                projections = self._prepare_negative_inferences(
-                    fetch_run_id, effective_run, seen_post_ids
-                )
-
+            # A live poll is incremental (it stops at the first already-known post),
+            # so its covered range no longer spans the monitoring window and cannot
+            # support feed-side absence inference. Deletion and edit detection moved
+            # to per-post direct rechecks (Track B): a post not seen this poll is not
+            # an absence signal, it is simply older than this poll's overlap point.
+            # ``seen_post_ids`` is still computed above for the run log's coverage line.
             if crash_after_evidence:
                 raise RuntimeError("injected crash after feed evidence")
 
             for positive in archived_positives:
                 self._apply_positive_projection(positive)
-            for projection in projections:
-                self._apply_negative_projection(projection)
         LOGGER.info(
             "feed_run archived run_id=%s author_id=%s status=%s healthy=%s "
             "pages_fetched=%s covered_from=%s covered_to=%s rate_limited=%s "
@@ -348,6 +431,9 @@ class IngestMixin(ArchiveBase):
                     next_source_state,
                     version_id,
                     observed_post if content_changed else None,
+                )
+                self._retire_post_if_lifecycle_complete(
+                    run.post_id, row, next_source_state, run.observed_at, probe_run_id
                 )
         LOGGER.info(
             "probe_run archived run_id=%s post_id=%s status=%s healthy=%s "
@@ -587,106 +673,6 @@ class IngestMixin(ArchiveBase):
                 evidence_fetch_run_id=fetch_run_id,
             )
 
-    def _prepare_negative_inferences(
-        self,
-        fetch_run_id: int,
-        run: FeedRun,
-        seen_post_ids: set[int],
-    ) -> list[PendingProjection]:
-        if run.covered_from is None or run.covered_to is None:
-            raise ValueError("healthy feed run requires covered_from and covered_to")
-        candidates = self.connection.execute(
-            """
-            SELECT id, posted_at_claimed, feed_state, absent_healthy_streak, watch_mode
-            FROM posts WHERE author_id = ? AND platform = ? AND watch_mode != ?
-            """,
-            (run.author_id, run.platform, WatchMode.INACTIVE),
-        ).fetchall()
-        projections: list[PendingProjection] = []
-        for row in candidates:
-            post_id = int(row["id"])
-            posted_at = row["posted_at_claimed"]
-            if post_id in seen_post_ids or posted_at is None:
-                continue
-            prior_state = FeedState(str(row["feed_state"]))
-            prior_watch = WatchMode(str(row["watch_mode"]))
-            if timestamp_in_closed_range(str(posted_at), run.covered_from, run.covered_to):
-                streak = int(row["absent_healthy_streak"]) + 1
-                next_state = (
-                    FeedState.ABSENT_CONFIRMED
-                    if streak >= self.settings.absent_threshold_n
-                    else prior_state
-                )
-                self.connection.execute(
-                    """
-                    INSERT INTO post_observations(
-                        fetch_run_id, post_id, observed_at, present, content_hash,
-                        content_fidelity, version_id
-                    ) VALUES (?, ?, ?, 0, NULL, ?, NULL)
-                    """,
-                    (fetch_run_id, post_id, run.finished_at, ContentFidelity.NA),
-                )
-                events: list[tuple[EventDimension, str, str]] = []
-                if next_state is not prior_state:
-                    events.append((EventDimension.FEED_STATE, prior_state, next_state))
-                    self._insert_event(
-                        post_id,
-                        EventDimension.FEED_STATE,
-                        prior_state,
-                        next_state,
-                        run.finished_at,
-                        evidence_fetch_run_id=fetch_run_id,
-                    )
-                if next_state is FeedState.ABSENT_CONFIRMED:
-                    self._enqueue_recheck(
-                        post_id,
-                        QueueReason.RECENT_FEED_ABSENT,
-                        run.finished_at,
-                        _plus_days(run.finished_at, self.settings.recent_feed_absent_ttl_days),
-                    )
-                projections.append(
-                    PendingProjection(
-                        post_id=post_id,
-                        feed_state=next_state,
-                        absent_healthy_streak=streak,
-                        events=events,
-                    )
-                )
-            elif parse_utc_timestamp(str(posted_at)) < parse_utc_timestamp(run.covered_from):
-                events = []
-                if prior_state is not FeedState.OUT_OF_SCOPE:
-                    events.append((EventDimension.FEED_STATE, prior_state, FeedState.OUT_OF_SCOPE))
-                    self._insert_event(
-                        post_id,
-                        EventDimension.FEED_STATE,
-                        prior_state,
-                        FeedState.OUT_OF_SCOPE,
-                        run.finished_at,
-                        evidence_fetch_run_id=fetch_run_id,
-                    )
-                next_watch = prior_watch
-                if prior_watch is not WatchMode.PINNED:
-                    next_watch = WatchMode.INACTIVE
-                    events.append((EventDimension.WATCH_MODE, prior_watch, next_watch))
-                    self._insert_event(
-                        post_id,
-                        EventDimension.WATCH_MODE,
-                        prior_watch,
-                        next_watch,
-                        run.finished_at,
-                        evidence_fetch_run_id=fetch_run_id,
-                    )
-                projections.append(
-                    PendingProjection(
-                        post_id=post_id,
-                        feed_state=FeedState.OUT_OF_SCOPE,
-                        absent_healthy_streak=int(row["absent_healthy_streak"]),
-                        watch_mode=next_watch,
-                        events=events,
-                    )
-                )
-        return projections
-
     def _apply_positive_projection(self, positive: PendingPositive) -> None:
         post = positive.post
         if post.content_fidelity is ContentFidelity.FULL:
@@ -725,33 +711,6 @@ class IngestMixin(ArchiveBase):
                     post.url,
                     _json(post.raw_meta),
                     positive.post_id,
-                ),
-            )
-
-    def _apply_negative_projection(self, projection: PendingProjection) -> None:
-        if projection.watch_mode is None:
-            self.connection.execute(
-                """
-                UPDATE posts SET feed_state = ?, absent_healthy_streak = ?
-                WHERE id = ?
-                """,
-                (
-                    projection.feed_state,
-                    projection.absent_healthy_streak,
-                    projection.post_id,
-                ),
-            )
-        else:
-            self.connection.execute(
-                """
-                UPDATE posts SET feed_state = ?, absent_healthy_streak = ?, watch_mode = ?
-                WHERE id = ?
-                """,
-                (
-                    projection.feed_state,
-                    projection.absent_healthy_streak,
-                    projection.watch_mode,
-                    projection.post_id,
                 ),
             )
 
@@ -870,6 +829,69 @@ class IngestMixin(ArchiveBase):
                 "UPDATE posts SET source_state = ?, source_checked_at = ? WHERE id = ?",
                 (source_state, run.observed_at, run.post_id),
             )
+
+    def _retire_post_if_lifecycle_complete(
+        self,
+        post_id: int,
+        prior_row: sqlite3.Row,
+        next_source_state: SourceState,
+        observed_at: str,
+        probe_run_id: int,
+    ) -> None:
+        """End a post's monitoring once its direct-recheck lifecycle is done.
+
+        A ``recent_window`` post leaves active monitoring when its source is confirmed
+        gone or it has had ``positive_observation_max_count`` healthy rechecks. It then
+        moves to ``watch_mode=inactive`` and ``feed_state=out_of_scope`` — archived,
+        monitoring stopped (charter rule 8). Pinned posts are a manual override and
+        never auto-retire. ``prior_row`` holds the pre-projection ``watch_mode`` /
+        ``feed_state`` (the probe projection only touched ``source_state``).
+        """
+        prior_watch = WatchMode(str(prior_row["watch_mode"]))
+        if prior_watch is not WatchMode.RECENT_WINDOW:
+            return
+        healthy_probes = int(
+            self.connection.execute(
+                """
+                SELECT COUNT(*) FROM probe_runs
+                WHERE post_id = ? AND status = ? AND login_state = ? AND rate_limited = 0
+                """,
+                (post_id, RunStatus.OK, LoginState.VALID),
+            ).fetchone()[0]
+        )
+        lifecycle_done = (
+            next_source_state is SourceState.GONE_CONFIRMED
+            or healthy_probes >= self.settings.positive_observation_max_count
+        )
+        if not lifecycle_done:
+            return
+        self._insert_event(
+            post_id,
+            EventDimension.WATCH_MODE,
+            prior_watch,
+            WatchMode.INACTIVE,
+            observed_at,
+            evidence_probe_run_id=probe_run_id,
+        )
+        prior_feed = FeedState(str(prior_row["feed_state"]))
+        if prior_feed is FeedState.OUT_OF_SCOPE:
+            self.connection.execute(
+                "UPDATE posts SET watch_mode = ? WHERE id = ?",
+                (WatchMode.INACTIVE, post_id),
+            )
+            return
+        self._insert_event(
+            post_id,
+            EventDimension.FEED_STATE,
+            prior_feed,
+            FeedState.OUT_OF_SCOPE,
+            observed_at,
+            evidence_probe_run_id=probe_run_id,
+        )
+        self.connection.execute(
+            "UPDATE posts SET watch_mode = ?, feed_state = ? WHERE id = ?",
+            (WatchMode.INACTIVE, FeedState.OUT_OF_SCOPE, post_id),
+        )
 
     def _next_source_state(self, current: SourceState, result: ProbeResult) -> SourceState:
         if result is ProbeResult.REACHABLE:

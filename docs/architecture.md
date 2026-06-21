@@ -33,10 +33,11 @@ watch_mode:    recent_window | pinned | inactive
 UI 由三者组合成人读状态：
 
 1. `present` 表示在场。
-2. `absent_confirmed + source unknown` 表示 feed 内连续缺席未经直链确认，属于弱信号。
-3. `gone_confirmed` 表示来源页明确显示已移除，不归因主体。
-4. `unavailable` 表示直链当前不可访问。
-5. `out_of_scope + inactive` 表示已归档且停止监控。
+2. `gone_confirmed` 表示来源页明确显示已移除，不归因主体，属强信号。
+3. `unavailable` 表示直链复查当前不可访问，无法确认移除，属弱信号。
+4. `out_of_scope + inactive` 表示已归档且停止监控（复查生命周期结束或确认移除）。
+
+`absent_confirmed` 为历史枚举值，feed 侧负面推断退役后不再新增；删帖弱/强信号统一来自 Track B 直链复查的 `unavailable` / `gone_confirmed`。
 
 ## 表结构草案
 
@@ -139,15 +140,19 @@ prices
 
 ## Track A：feed 轮询
 
-每次轮询写一条 `fetch_run`，记录 `status` 与覆盖范围。
+每次轮询写一条 `fetch_run`，记录 `status` 与覆盖范围。轮询是增量的：翻页只翻到与上一轮已采集内容重合（覆盖回 `previous_covered_to`）即停，例行 15 分钟轮询通常只取 1 页。`monitoring.window_days` 仅在某博主第一次实时轮询、还没有可重合的锚点时作为初始种子深度。
 
-1. 正面存档按调度和预算规则执行。run-once 只采集已到期博主；第 1 页首页指纹未变时，每天最多完整观察首页一次，其余轮次记录轻探测 run 并停止翻页。稳定旧帖仅在 `positive_observation_interval_days` 后进入完整观察，达到 `positive_observation_max_count` 后跳过完整观察。新帖、内容或图片变化、解析降级、状态恢复会写 `present=true` 的 `post_observations`。成功解析或轻解析出的帖子仍参与 seen set，用于负面推断覆盖判断。
-2. 负面推断只在完整健康 run 执行。对覆盖范围内本轮未见到的帖子，写 `present=false` observation，累计 `absent_healthy_streak`，达阈值 N 后置 `absent_confirmed` 并入 `recheck_queue`。对早于 `covered_from` 的帖子置 `out_of_scope`，未钉住则置 `inactive`。
-3. partial 或 failed run 只做正面存档，不做任何负面推断。账号采集健康度由近 K 条 `fetch_runs` 推导。
+1. 正面存档按调度和预算规则执行。run-once 只采集已到期博主；第 1 页首页指纹未变时，每天最多完整观察首页一次，其余轮次记录轻探测 run 并停止翻页。稳定旧帖仅在 `positive_observation_interval_days` 后进入完整观察，达到 `positive_observation_max_count` 后跳过完整观察。新帖、内容或图片变化、解析降级、状态恢复会写 `present=true` 的 `post_observations`。
+2. feed 不做负面推断。增量轮询的覆盖范围只是「自上次以来的新内容」，不再横跨监控窗口，因此本轮未见到某帖不构成缺席信号。删帖与编辑的发现改由 Track B 的按帖直链复查承担。`absent_confirmed`、`absent_healthy_streak`、feed 侧 `out_of_scope` 不再由 feed 产生（枚举值保留以兼容历史行）。`recent_feed_absent` 不再入队。
+3. partial 或 failed run 与 healthy run 在 feed 侧行为一致，都只做正面存档。账号采集健康度仍由近 K 条 `fetch_runs` 推导。reconnect 失败（覆盖未回到 `previous_covered_to`）时该 run 降级为 partial，记 `coverage_gap`。增量锚点 `last_live_covered_to` 只取健康 live run（ok、valid、paginated complete、未限流）的 `MAX(covered_to)`：`coverage_gap` 的 partial run 只抓到较新几页、未与既有覆盖连续，其 `covered_to` 不得推进锚点，否则下一轮会从这个新锚点起翻、把中间漏掉的帖子永久落下；保留上一个已确认锚点后，下一轮会重新翻回它、补回缺口。
 
-## Track B：直链复查
+## Track B：直链复查（含按帖复查生命周期）
 
-对象是 `watch_mode=pinned` 帖和 `recheck_queue` 中 `state=pending` 帖。`recent_feed_absent` 由 TTL 定义近期，到期转 `expired`。
+对象有三类，按 post id 去重：`watch_mode=pinned` 帖（每轮复查，人工置顶不自动退场）、`recheck_queue` 中 `state=pending` 帖（如 LLM 候选，`recent_feed_absent` 历史 TTL 仍到期转 `expired`）、以及处在复查生命周期内、到期应复查的 `recent_window` 帖。
+
+复查生命周期由追加型证据派生，无需队列行：一条 `recent_window` 帖在其声称时间后 `first_recheck_after_days`（默认 1 天）首检，之后每 `positive_observation_interval_days`（默认 7 天，从上次健康复查算起）复查一次，累计 `positive_observation_max_count`（默认 5 次）健康复查后退场。某帖一旦 `gone_confirmed`，或满次，置 `watch_mode=inactive` 且 `feed_state=out_of_scope`（已归档、停止监控，宪章第 8 条）；置顶帖是人工覆盖，永不自动退场。「今天 12 点发帖，次日 12 点首检，第 8 天第二次复查」即由此而来。
+
+每轮直链复查有预算上限 `polling.max_probes_per_run`（默认 40）：每次复查是一次较慢的浏览器往返，启用生命周期后大量历史帖可能同时到期（尤其首轮），预算把单轮时长收住，让积压跨轮排空。`probe_targets` 按优先级出队——置顶帖与队列帖在前（预算不会饿死它们），生命周期积压在后并按最久未复查优先（`COALESCE(上次健康复查, 声称时间, 首见时间)` 升序），因此截断仍优先处理等待最久的帖、跨轮公平轮转。
 
 健康门：只有 `probe_run.status=ok`、`login_state=valid`、`rate_limited=false` 时，才推进 `source_state`、更新 `source_checked_at`、捕获版本。退化复查只留 `probe_run` 痕迹并提示账号异常，不改帖子状态。
 

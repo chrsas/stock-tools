@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
@@ -180,8 +180,17 @@ class ProbeRun:
 
 @dataclass(frozen=True)
 class ArchiveSettings:
+    # ``absent_threshold_n`` and ``recent_feed_absent_ttl_days`` are legacy: feed-side
+    # absence inference was retired in favour of per-post direct rechecks, so these no
+    # longer drive behaviour. They are kept (still validated) so historical config and
+    # ``recent_feed_absent`` queue rows stay readable.
     absent_threshold_n: int = 3
     recent_feed_absent_ttl_days: int = 7
+    # The per-post recheck lifecycle: the first direct recheck fires
+    # ``first_recheck_after_days`` after a post's claimed time, then every
+    # ``positive_observation_interval_days`` up to ``positive_observation_max_count``
+    # healthy rechecks, after which the post stops being monitored.
+    first_recheck_after_days: int = 1
     positive_observation_interval_days: int = 7
     positive_observation_max_count: int = 5
 
@@ -190,6 +199,8 @@ class ArchiveSettings:
             raise ValueError("absent_threshold_n must be at least 3")
         if self.recent_feed_absent_ttl_days < 1:
             raise ValueError("recent_feed_absent_ttl_days must be positive")
+        if self.first_recheck_after_days < 0:
+            raise ValueError("first_recheck_after_days must not be negative")
         if self.positive_observation_interval_days < 1:
             raise ValueError("positive_observation_interval_days must be positive")
         if self.positive_observation_max_count < 1:
@@ -205,15 +216,6 @@ class PendingPositive:
     version_id: int | None
     content_changed: bool
     record_observation: bool
-
-
-@dataclass(frozen=True)
-class PendingProjection:
-    post_id: int
-    feed_state: FeedState
-    absent_healthy_streak: int
-    watch_mode: WatchMode | None = None
-    events: list[tuple[EventDimension, str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

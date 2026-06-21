@@ -164,6 +164,37 @@ def test_normal_multi_page_feed_completion(archive: Archive) -> None:
     assert requested_pages == ["1", "2"]
 
 
+def test_live_poll_stops_at_overlap_with_previous_coverage(archive: Archive) -> None:
+    requested_pages: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requested_pages.append(request.url.params["page"])
+        payload = load_fixture("xueqiu_timeline_page.json")
+        payload["maxPage"] = 999  # the timeline never reaches its own end
+        return httpx.Response(200, json=payload)
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        collector = XueqiuCollector(
+            archive,
+            client,
+            CollectorSettings(0, 0),
+            sleep=lambda _: None,
+            clock=lambda: NOW,
+        )
+        # The prior live run already reached 2026-06-01, newer than any post on page 1, so
+        # page 1 reconnects with known content and the incremental poll stops immediately
+        # instead of deep-paging the endless timeline.
+        run_id = collector.poll_feed(1, "100", "2026-05-01T00:00:00+00:00", previous_covered_to=NOW)
+
+    assert requested_pages == ["1"]
+    row = archive.connection.execute(
+        "SELECT status, pages_fetched, pagination_complete FROM fetch_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    assert row is not None
+    assert tuple(row) == (RunStatus.OK, 1, 1)
+
+
 def test_feed_max_pages_cap_archives_seen_posts_as_partial(archive: Archive) -> None:
     missing_id = seed_post(archive)
     requested_pages: list[str] = []
@@ -547,3 +578,29 @@ def test_due_probe_stops_after_rate_limit(archive: Archive) -> None:
     ).fetchone()
     assert row is not None
     assert tuple(row) == (RunStatus.PARTIAL, 1)
+
+
+def test_due_probe_honors_max_probes_per_run(archive: Archive) -> None:
+    for platform_post_id in ("901", "902", "903"):
+        archive.pin_post(seed_post(archive, platform_post_id), "2026-06-01T01:00:00+00:00")
+    calls = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json=load_fixture("xueqiu_error_not_found.json"))
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        collector = XueqiuCollector(
+            archive,
+            client,
+            CollectorSettings(0, 0, max_probes_per_run=2),
+            sleep=lambda _: None,
+            clock=lambda: NOW,
+        )
+        run_ids = collector.probe_due_posts()
+
+    # Three posts are due, but the per-run budget caps the run at two probes; the rest
+    # drain on later runs.
+    assert len(run_ids) == 2
+    assert calls == 2
