@@ -2,87 +2,24 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import sqlite3
 
 from kol_archive.models import WatchMode
 
 from .common import _post_projection
 
-
-def list_timeline(
-    connection: sqlite3.Connection, *, limit: int = 50, offset: int = 0
-) -> list[dict[str, object]]:
-    if limit < 1:
-        raise ValueError("timeline limit must be positive")
-    if offset < 0:
-        raise ValueError("timeline offset must not be negative")
-    rows = connection.execute(
-        """
-        SELECT
-            p.id AS post_id,
-            p.platform,
-            p.platform_post_id,
-            a.platform_uid AS author_platform_uid,
-            COALESCE(
-                json_extract(v.raw_payload, '$.user.screen_name'), a.notes
-            ) AS author_display_name,
-            json_extract(v.raw_payload, '$.user.profile_image_url') AS author_avatar_url,
-            json_extract(v.raw_payload, '$.user.description') AS author_description,
-            p.url,
-            p.posted_at_claimed,
-            p.first_seen_at,
-            p.last_present_at,
-            p.source_checked_at,
-            p.feed_state,
-            p.source_state,
-            p.watch_mode,
-            p.absent_healthy_streak,
-            p.current_version_id,
-            v.content_text AS current_text,
-            v.first_observed_at AS current_version_first_observed_at,
-            (
-                SELECT MAX(s.observed_at)
-                FROM version_sightings s
-                WHERE s.version_id = p.current_version_id
-            ) AS current_version_last_observed_at,
-            (
-                SELECT MAX(o.observed_at)
-                FROM post_observations o
-                WHERE o.post_id = p.id AND o.present = 0
-            ) AS last_feed_absence_detected_at
-        FROM posts p
-        JOIN authors a ON a.id = p.author_id
-        LEFT JOIN post_versions v ON v.id = p.current_version_id
-        ORDER BY
-            COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at) DESC,
-            COALESCE(p.last_present_at, p.first_seen_at) DESC,
+_TIMELINE_SORT_TIME = "COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at)"
+_TIMELINE_SORT_TIEBREAK = "COALESCE(p.last_present_at, p.first_seen_at)"
+_TIMELINE_ORDER_BY = f"""
+            {_TIMELINE_SORT_TIME} DESC,
+            {_TIMELINE_SORT_TIEBREAK} DESC,
             p.id DESC
-        LIMIT ? OFFSET ?
-        """,
-        (limit, offset),
-    ).fetchall()
-    return [_post_projection(row) for row in rows]
+"""
 
-
-def list_filtered_timeline(
-    connection: sqlite3.Connection, prompt_version: str, *, limit: int = 50, offset: int = 0
-) -> list[dict[str, object]]:
-    """The label-gate stream: posts whose current version was enriched (for
-    ``prompt_version``) and hit at least one label, newest first.
-
-    This is a filtered *view* of the raw timeline, not a replacement — the raw
-    stream stays one call away via :func:`list_timeline`. Posts without an
-    enrichment for this prompt version are simply absent here, never hidden.
-    """
-    if limit < 1:
-        raise ValueError("timeline limit must be positive")
-    if offset < 0:
-        raise ValueError("timeline offset must not be negative")
-    if not prompt_version.strip():
-        raise ValueError("prompt_version must not be empty")
-    rows = connection.execute(
-        """
-        SELECT
+_TIMELINE_CARD_COLUMNS = f"""
             p.id AS post_id,
             p.platform,
             p.platform_post_id,
@@ -120,24 +57,158 @@ def list_filtered_timeline(
                 SELECT MAX(o.observed_at)
                 FROM post_observations o
                 WHERE o.post_id = p.id AND o.present = 0
-            ) AS last_feed_absence_detected_at
-        FROM posts p
-        JOIN authors a ON a.id = p.author_id
+            ) AS last_feed_absence_detected_at,
+            {_TIMELINE_SORT_TIME} AS timeline_sort_time,
+            {_TIMELINE_SORT_TIEBREAK} AS timeline_sort_tiebreak
+"""
+
+
+def _encode_timeline_cursor(row: sqlite3.Row) -> str:
+    payload = {
+        "sort_time": row["timeline_sort_time"],
+        "sort_tiebreak": row["timeline_sort_tiebreak"],
+        "post_id": int(row["post_id"]),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_timeline_cursor(cursor: str | None) -> tuple[str, str, int] | None:
+    if cursor is None:
+        return None
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        sort_time = str(payload["sort_time"])
+        sort_tiebreak = str(payload["sort_tiebreak"])
+        post_id = int(payload["post_id"])
+    except (
+        binascii.Error,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        UnicodeEncodeError,
+        ValueError,
+    ) as error:
+        raise ValueError("invalid timeline cursor") from error
+    if not sort_time or not sort_tiebreak or post_id < 1:
+        raise ValueError("invalid timeline cursor")
+    return sort_time, sort_tiebreak, post_id
+
+
+def _project_timeline_rows(rows: list[sqlite3.Row]) -> list[dict[str, object]]:
+    projected: list[dict[str, object]] = []
+    for row in rows:
+        item = _post_projection(row)
+        item["_cursor"] = _encode_timeline_cursor(row)
+        projected.append(item)
+    return projected
+
+
+def _timeline_posts(
+    connection: sqlite3.Connection,
+    *,
+    prompt_version: str | None,
+    limit: int,
+    offset: int,
+    cursor: str | None,
+) -> list[dict[str, object]]:
+    if limit < 1:
+        raise ValueError("timeline limit must be positive")
+    if offset < 0:
+        raise ValueError("timeline offset must not be negative")
+    cursor_key = _decode_timeline_cursor(cursor)
+    params: list[object] = []
+    if prompt_version is None:
+        enrichment_join = """
+        LEFT JOIN post_versions v ON v.id = p.current_version_id
+        LEFT JOIN enrichments e ON 0
+        """
+        filters: list[str] = []
+    else:
+        stripped_prompt = prompt_version.strip()
+        if not stripped_prompt:
+            raise ValueError("prompt_version must not be empty")
+        enrichment_join = """
         JOIN post_versions v ON v.id = p.current_version_id
         JOIN enrichments e
             ON e.version_id = p.current_version_id AND e.prompt_version = ?
-        WHERE e.label_first_hand_info = 1
-           OR e.label_transferable_framework = 1
-           OR e.label_reasoned_non_consensus = 1
-        ORDER BY
-            COALESCE(p.posted_at_claimed, p.last_present_at, p.first_seen_at) DESC,
-            COALESCE(p.last_present_at, p.first_seen_at) DESC,
-            p.id DESC
-        LIMIT ? OFFSET ?
+        """
+        params.append(stripped_prompt)
+        filters = [
+            """(
+              e.label_first_hand_info = 1
+              OR e.label_transferable_framework = 1
+              OR e.label_reasoned_non_consensus = 1
+            )"""
+        ]
+    if cursor_key is not None:
+        sort_time, sort_tiebreak, post_id = cursor_key
+        filters.append(
+            f"""(
+              {_TIMELINE_SORT_TIME} < ?
+              OR ({_TIMELINE_SORT_TIME} = ? AND {_TIMELINE_SORT_TIEBREAK} < ?)
+              OR ({_TIMELINE_SORT_TIME} = ? AND {_TIMELINE_SORT_TIEBREAK} = ? AND p.id < ?)
+            )"""
+        )
+        params.extend([sort_time, sort_time, sort_tiebreak, sort_time, sort_tiebreak, post_id])
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params.append(limit)
+    paging = "LIMIT ?"
+    if cursor_key is None:
+        paging += " OFFSET ?"
+        params.append(offset)
+
+    rows = connection.execute(
+        f"""
+        SELECT{_TIMELINE_CARD_COLUMNS}
+        FROM posts p
+        JOIN authors a ON a.id = p.author_id
+        {enrichment_join}
+        {where}
+        ORDER BY{_TIMELINE_ORDER_BY}
+        {paging}
         """,
-        (prompt_version.strip(), limit, offset),
+        params,
     ).fetchall()
-    return [_post_projection(row) for row in rows]
+    return _project_timeline_rows(rows)
+
+
+def list_timeline(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    cursor: str | None = None,
+) -> list[dict[str, object]]:
+    return _timeline_posts(
+        connection, prompt_version=None, limit=limit, offset=offset, cursor=cursor
+    )
+
+
+def list_filtered_timeline(
+    connection: sqlite3.Connection,
+    prompt_version: str,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    cursor: str | None = None,
+) -> list[dict[str, object]]:
+    """The label-gate stream: posts whose current version was enriched (for
+    ``prompt_version``) and hit at least one label, newest first.
+
+    This is a filtered *view* of the raw timeline, not a replacement — the raw
+    stream stays one call away via :func:`list_timeline`. Posts without an
+    enrichment for this prompt version are simply absent here, never hidden.
+    """
+    return _timeline_posts(
+        connection,
+        prompt_version=prompt_version,
+        limit=limit,
+        offset=offset,
+        cursor=cursor,
+    )
 
 
 # Shared card columns for the attention queue and the pinned list. Both render

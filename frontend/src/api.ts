@@ -1,5 +1,11 @@
 export type Row = Record<string, any>;
 
+async function fetchJson(endpoint: string): Promise<Row> {
+  const response = await fetch(endpoint);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
 export async function loadPage(): Promise<Row> {
   const path = window.location.pathname;
   const endpoint = path.startsWith("/authors/")
@@ -7,57 +13,33 @@ export async function loadPage(): Promise<Row> {
     : path.startsWith("/posts/")
       ? `/api${path}`
       : `/api/home${window.location.search}`;
-  const response = await fetch(endpoint);
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
-}
-
-export function freshTimelineItems(rendered: Row[], fetched: Row[]): Row[] {
-  // Offset paging can re-list a post when the archive grows above the current
-  // window mid-scroll: a newer post shifts every rank down one, so the next
-  // window's first row is one already shown. Drop ids we have rendered (and any
-  // repeat inside this batch) so nothing appears twice.
-  const seen = new Set(rendered.map((item) => item.post_id));
-  return fetched.filter((item) => {
-    if (seen.has(item.post_id)) return false;
-    seen.add(item.post_id);
-    return true;
-  });
+  return fetchJson(endpoint);
 }
 
 export async function loadTimelinePage(
   view: string,
-  offset: number,
+  cursor: string | null,
   limit: number,
 ): Promise<Row> {
-  const params = new URLSearchParams({ view, offset: String(offset), limit: String(limit) });
-  const response = await fetch(`/api/home?${params}`);
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
+  const params = new URLSearchParams({ view, limit: String(limit) });
+  if (cursor) params.set("cursor", cursor);
+  return fetchJson(`/api/home?${params}`);
 }
 
 export async function loadCollectionStatus(): Promise<Row> {
-  const response = await fetch("/api/collect/status");
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
+  return fetchJson("/api/collect/status");
 }
 
 export async function loadEnrichmentStatus(): Promise<Row> {
-  const response = await fetch("/api/enrich/status");
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
+  return fetchJson("/api/enrich/status");
 }
 
 export async function loadAutomationSettings(): Promise<Row> {
-  const response = await fetch("/api/automation/settings");
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
+  return fetchJson("/api/automation/settings");
 }
 
 export async function loadOperationsStatus(): Promise<Row> {
-  const response = await fetch("/api/operations/status");
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
+  return fetchJson("/api/operations/status");
 }
 
 export function friendlyRequestError(reason: unknown): string {

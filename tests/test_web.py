@@ -810,11 +810,17 @@ def test_raw_timeline_paginates_with_offset_and_has_more(web_server: ArchiveHttp
     assert first["has_more"] is True
     first_items = cast(list[dict[str, object]], first["items"])
     assert len(first_items) == 1
+    assert "_cursor" not in first_items[0]
+    next_cursor = first["next_cursor"]
+    assert isinstance(next_cursor, str)
 
     second = _get_json(web_server, "/api/home?view=raw&limit=1&offset=1")
     assert second["has_more"] is False
     second_items = cast(list[dict[str, object]], second["items"])
     assert len(second_items) == 1
+    cursor_second = _get_json(web_server, f"/api/home?view=raw&limit=1&cursor={next_cursor}")
+    cursor_second_items = cast(list[dict[str, object]], cursor_second["items"])
+    assert cursor_second_items == second_items
     # The two windows tile the stream without overlap.
     assert {first_items[0]["post_id"], second_items[0]["post_id"]} == {1, 2}
 
@@ -836,6 +842,12 @@ def test_static_asset_requests_are_demoted_to_debug(
     with caplog.at_level(logging.DEBUG, logger="kol_archive.web"):
         assert _request_bytes(web_server, "/favicon.png")[0] == 200
     assert any("/favicon.png" in record.getMessage() for record in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="kol_archive.web"):
+        assert _request_bytes(web_server, "/assets/missing.js")[0] == 404
+    assert any("/assets/missing.js" in record.getMessage() for record in caplog.records)
+    assert any("responded 404" in record.getMessage() for record in caplog.records)
 
 
 def test_automation_settings_web_flow(web_server: ArchiveHttpServer) -> None:

@@ -120,6 +120,20 @@ def _backfill_section(config: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _optional_positive_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str | bytes | bytearray):
+        parsed = int(value)
+    else:
+        parsed = int(str(value))
+    if parsed < 1:
+        raise ValueError("value must be positive")
+    return parsed
+
+
 def _build_collector(archive: Archive, client: Any, polling: dict[str, Any]) -> XueqiuCollector:
     return XueqiuCollector(
         archive,
@@ -128,6 +142,9 @@ def _build_collector(archive: Archive, client: Any, polling: dict[str, Any]) -> 
             request_min_interval_seconds=float(polling.get("request_min_interval_seconds") or 2.5),
             request_jitter_seconds=float(polling.get("request_jitter_seconds") or 1.5),
             max_feed_pages=int(polling.get("max_feed_pages", 20)),
+            max_feed_requests_per_run=_optional_positive_int(
+                polling.get("max_feed_requests_per_run")
+            ),
         ),
     )
 
@@ -234,6 +251,10 @@ def _report_progress(progress: Callable[[str], None] | None, message: str) -> No
         progress(message)
 
 
+def _due_after(now: datetime, minutes: int) -> str:
+    return (now + timedelta(minutes=minutes)).isoformat()
+
+
 def _run_once_with_config(
     config: dict[str, Any],
     *,
@@ -251,6 +272,12 @@ def _run_once_with_config(
         ArchiveSettings(
             absent_threshold_n=int(monitoring.get("absent_threshold_n") or 3),
             recent_feed_absent_ttl_days=int(monitoring.get("recent_feed_absent_ttl_days") or 7),
+            positive_observation_interval_days=int(
+                monitoring.get("positive_observation_interval_days") or 7
+            ),
+            positive_observation_max_count=int(
+                monitoring.get("positive_observation_max_count") or 5
+            ),
         ),
     )
     backfill = _backfill_section(config)
@@ -276,22 +303,59 @@ def _run_once_with_config(
             raise ValueError("at least one account must be configured")
         want_backfill = backfill_on_add and on_add_pages > 0
         feed_blocked = False
+        active_interval_minutes = int(monitoring.get("author_poll_interval_minutes") or 180)
+        quiet_interval_minutes = int(monitoring.get("quiet_author_poll_interval_minutes") or 720)
+        blocked_cooldown_minutes = int(monitoring.get("blocked_author_cooldown_minutes") or 180)
+        max_authors_per_run = _optional_positive_int(monitoring.get("max_authors_per_run"))
+        processed_authors = 0
         for account_index, account in enumerate(accounts, start=1):
             uid = str(account.get("uid") or "").strip()
             if not uid:
                 continue
-            _report_progress(progress, f"正在采集博主 {account_index}/{len(accounts)} 的近期发言")
             note = str(account.get("note") or "") or None
             author_id = archive.ensure_author("xueqiu", uid, now.isoformat(), note)
+            if not archive.author_feed_due(author_id, now.isoformat()):
+                LOGGER.info("author feed skipped uid=%s reason=not_due", uid)
+                continue
+            if max_authors_per_run is not None and processed_authors >= max_authors_per_run:
+                LOGGER.info("author feed loop paused reason=max_authors_per_run")
+                break
+            if collector.feed_request_budget_exhausted():
+                LOGGER.info("author feed loop paused reason=request_budget_exhausted")
+                feed_blocked = True
+                break
+            processed_authors += 1
+            _report_progress(progress, f"正在采集博主 {account_index}/{len(accounts)} 的近期发言")
             previous_covered_to = archive.last_live_covered_to(author_id)
             live_run_id = collector.poll_feed(
-                author_id, uid, window_started_at, previous_covered_to=previous_covered_to
+                author_id,
+                uid,
+                window_started_at,
+                previous_covered_to=previous_covered_to,
+                known_head=archive.author_feed_head(author_id),
+                observe_unchanged_head=archive.author_head_observation_due(
+                    author_id, now.isoformat()
+                ),
             )
+            if archive.feed_run_blocked(live_run_id):
+                archive.schedule_author_feed_poll(
+                    author_id, now.isoformat(), _due_after(now, blocked_cooldown_minutes)
+                )
+            elif archive.feed_run_head_unchanged(live_run_id):
+                archive.schedule_author_feed_poll(
+                    author_id, now.isoformat(), _due_after(now, quiet_interval_minutes)
+                )
+            else:
+                archive.schedule_author_feed_poll(
+                    author_id, now.isoformat(), _due_after(now, active_interval_minutes)
+                )
             # If the live poll hit rate limiting / login expiry / transport errors, the
             # session as a whole has hit a wall — every later request shares the same
             # cookies and endpoint host, so stop the account loop (and, below, skip the
             # shared probe pass) instead of marching on to the next account.
-            if archive.feed_run_blocked(live_run_id):
+            if archive.feed_run_blocked(live_run_id) or archive.feed_run_request_budget_exhausted(
+                live_run_id
+            ):
                 feed_blocked = True
                 break
             # Pull a few pages of history beyond the live window so the archive has a
@@ -306,6 +370,8 @@ def _run_once_with_config(
             # out-of-range page. Skip and leave the baseline pending for a later clean run.
             if (
                 want_backfill
+                and not archive.feed_run_head_unchanged(live_run_id)
+                and not archive.feed_run_request_budget_exhausted(live_run_id)
                 and archive.baseline_backfill_pending(author_id)
                 and archive.feed_run_parse_clean(live_run_id)
             ):
@@ -321,7 +387,9 @@ def _run_once_with_config(
                 )
                 # The backfill hits the same endpoint; if it tripped the wall, treat the
                 # session as blocked too — stop the loop and skip the probe pass.
-                if archive.feed_run_blocked(backfill_run_id):
+                if archive.feed_run_blocked(
+                    backfill_run_id
+                ) or archive.feed_run_request_budget_exhausted(backfill_run_id):
                     feed_blocked = True
                     break
         # Direct-link probes hit the same host and session as the feed; if any feed poll
@@ -420,6 +488,12 @@ def run_backfill(
         ArchiveSettings(
             absent_threshold_n=int(monitoring.get("absent_threshold_n") or 3),
             recent_feed_absent_ttl_days=int(monitoring.get("recent_feed_absent_ttl_days") or 7),
+            positive_observation_interval_days=int(
+                monitoring.get("positive_observation_interval_days") or 7
+            ),
+            positive_observation_max_count=int(
+                monitoring.get("positive_observation_max_count") or 5
+            ),
         ),
     )
     client = None

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import {
-  freshTimelineItems,
   friendlyRequestError,
   loadAutomationSettings,
   loadCollectionStatus,
@@ -65,7 +64,7 @@ const OPERATIONS_HIDDEN_POLL_MS = 120000;
 const TIMELINE_PAGE_SIZE = 20;
 const TIMELINE_AUTO_PAGES = 10;
 const timelineItems = ref<Row[]>([]);
-const timelineOffset = ref(0);
+const timelineCursor = ref<string | null>(null);
 const timelineHasMore = ref(false);
 const timelineLoading = ref(false);
 const timelineAutoLoads = ref(0);
@@ -97,9 +96,11 @@ function syncTimelineFromPage() {
   }
   const items = Array.isArray(page.value?.items) ? (page.value!.items as Row[]) : [];
   timelineItems.value = [...items];
-  // The first page may carry its own offset; keep counting from where it ended.
-  timelineOffset.value = Number(page.value?.offset || 0) + items.length;
-  timelineHasMore.value = Boolean(page.value?.has_more);
+  const nextCursor = typeof page.value?.next_cursor === "string" && page.value.next_cursor
+    ? page.value.next_cursor
+    : null;
+  timelineCursor.value = nextCursor;
+  timelineHasMore.value = Boolean(page.value?.has_more) && nextCursor !== null;
   timelineAutoLoads.value = 0;
   void nextTick(() => setupTimelineObserver());
 }
@@ -111,24 +112,14 @@ async function loadMoreTimeline() {
   }
   timelineLoading.value = true;
   try {
-    // Dedup against what is already rendered and top up so one "load" still lands
-    // roughly a full page even when the window overlaps; the offset advances by the
-    // rows actually fetched so the cursor stays aligned with the source list.
-    let added = 0;
-    for (
-      let attempt = 0;
-      attempt < 3 && timelineHasMore.value && added < TIMELINE_PAGE_SIZE;
-      attempt++
-    ) {
-      const next = await loadTimelinePage(view, timelineOffset.value, TIMELINE_PAGE_SIZE);
-      const fetched = Array.isArray(next.items) ? (next.items as Row[]) : [];
-      timelineOffset.value += fetched.length;
-      timelineHasMore.value = Boolean(next.has_more);
-      const fresh = freshTimelineItems(timelineItems.value, fetched);
-      timelineItems.value.push(...fresh);
-      added += fresh.length;
-      if (!fetched.length) break;
-    }
+    const next = await loadTimelinePage(view, timelineCursor.value, TIMELINE_PAGE_SIZE);
+    const fetched = Array.isArray(next.items) ? (next.items as Row[]) : [];
+    const nextCursor = typeof next.next_cursor === "string" && next.next_cursor
+      ? next.next_cursor
+      : null;
+    timelineItems.value.push(...fetched);
+    timelineCursor.value = nextCursor;
+    timelineHasMore.value = Boolean(next.has_more) && nextCursor !== null;
   } catch (reason) {
     error.value = friendlyRequestError(reason);
   } finally {

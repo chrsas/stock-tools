@@ -672,6 +672,20 @@ def test_timeline_offset_paginates_without_overlap(archive: Archive) -> None:
         list_timeline(archive.connection, offset=-1)
 
 
+def test_timeline_cursor_paginates_from_full_sort_tuple(archive: Archive) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post(f"p{i}", text=f"T{i}") for i in range(5)])
+    full = [item["post_id"] for item in list_timeline(archive.connection)]
+
+    first = list_timeline(archive.connection, limit=2)
+    second = list_timeline(archive.connection, limit=2, cursor=str(first[-1]["_cursor"]))
+    third = list_timeline(archive.connection, limit=2, cursor=str(second[-1]["_cursor"]))
+
+    assert [item["post_id"] for item in first + second + third] == full
+    assert len({item["_cursor"] for item in first + second + third}) == len(full)
+    with pytest.raises(ValueError, match="invalid timeline cursor"):
+        list_timeline(archive.connection, cursor="not-a-cursor")
+
+
 def test_evidence_card_exposes_enrichments(archive: Archive) -> None:
     archive.record_feed_run(make_feed_run(), [make_post()])
     [target] = archive.enrichment_targets("enrich-v1")
@@ -795,11 +809,11 @@ def test_attention_queue_floats_recently_reobserved_version(archive: Archive) ->
     before = [item["post_id"] for item in list_attention_queue(archive.connection, "enrich-v1")]
     assert before == [pb, pa]
 
-    # Re-observe A in a later healthy live run (B is absent this round but its streak
-    # stays below the threshold, so it remains present and in the queue).
+    # Re-observe A after the weekly positive-observation throttle. B is absent
+    # this round, but its streak stays below the threshold and it remains queued.
     archive.record_feed_run(
-        make_feed_run("2026-06-05T00:00:00+00:00"),
-        [make_post("A", text="A", observed_at="2026-06-05T00:00:00+00:00")],
+        make_feed_run("2026-06-08T00:00:00+00:00"),
+        [make_post("A", text="A", observed_at="2026-06-08T00:00:00+00:00")],
     )
     after = [item["post_id"] for item in list_attention_queue(archive.connection, "enrich-v1")]
     assert after == [pa, pb]  # A's newer observation floats it above B

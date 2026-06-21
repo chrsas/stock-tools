@@ -96,22 +96,36 @@ def _home_payload(
     view = (values.get("view") or ["authors"])[0]
     tier3_only = (values.get("tier") or [""])[0] == "3"
     if view == "raw" or view == "filtered":
-        # Cursor-less offset paging: the first load uses the configured page size,
-        # later loads pass their own (smaller) limit. Fetch one extra row so the
-        # client knows whether to keep loading without a separate count query.
+        # The scrolling UI uses an opaque keyset cursor over the full sort tuple.
+        # Offset is still accepted for old URLs and direct callers.
         offset = _query_int(values, "offset", 0, minimum=0)
+        cursor = (values.get("cursor") or [""])[0] or None
         page_limit = _query_int(values, "limit", limit, minimum=1, maximum=200)
         if view == "raw":
-            rows = list_timeline(connection, limit=page_limit + 1, offset=offset)
+            rows = list_timeline(connection, limit=page_limit + 1, offset=offset, cursor=cursor)
         else:
             rows = list_filtered_timeline(
-                connection, prompt_version, limit=page_limit + 1, offset=offset
+                connection,
+                prompt_version,
+                limit=page_limit + 1,
+                offset=offset,
+                cursor=cursor,
             )
         has_more = len(rows) > page_limit
+        items = rows[:page_limit]
+        next_cursor = None
+        if has_more and items:
+            raw_cursor = items[-1].get("_cursor")
+            if isinstance(raw_cursor, str) and raw_cursor:
+                next_cursor = raw_cursor
+        for item in items:
+            item.pop("_cursor", None)
         payload: dict[str, object] = {
             "view": view,
-            "items": rows[:page_limit],
+            "items": items,
             "offset": offset,
+            "cursor": cursor,
+            "next_cursor": next_cursor,
             "limit": page_limit,
             "has_more": has_more,
         }

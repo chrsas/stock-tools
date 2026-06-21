@@ -358,6 +358,7 @@ def write_run_once_config(
     *,
     on_add_pages: int = 5,
     max_feed_pages: int | None = None,
+    max_feed_requests_per_run: int | None = None,
 ) -> None:
     lines = [
         "storage:",
@@ -369,8 +370,13 @@ def write_run_once_config(
         "  on_add_enabled: true",
         f"  on_add_pages: {on_add_pages}",
     ]
+    polling_lines: list[str] = []
     if max_feed_pages is not None:
-        lines += ["polling:", f"  max_feed_pages: {max_feed_pages}"]
+        polling_lines.append(f"  max_feed_pages: {max_feed_pages}")
+    if max_feed_requests_per_run is not None:
+        polling_lines.append(f"  max_feed_requests_per_run: {max_feed_requests_per_run}")
+    if polling_lines:
+        lines += ["polling:", *polling_lines]
     (config_dir / "config.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -420,6 +426,63 @@ def make_run_once_client(monkeypatch: pytest.MonkeyPatch, handle: Handler) -> li
     client = httpx.Client(transport=httpx.MockTransport(logged))
     monkeypatch.setattr(kol_main, "_build_collector_client", lambda config: client)
     return calls
+
+
+def test_run_once_skips_authors_until_next_due(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kol_archive.cli import collect as kol_main
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    db_path = tmp_path / "kol.sqlite3"
+    write_run_once_config(config_dir, db_path, ["100", "200"], on_add_pages=0)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if not request.url.path.endswith("user_timeline.json"):
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"page": 1, "maxPage": 1, "total": 0, "statuses": []})
+
+    calls = make_run_once_client(monkeypatch, handle)
+    kol_main.run_once(config_dir)
+    assert calls == ["feed uid=100 page=1", "feed uid=200 page=1"]
+
+    calls.clear()
+    kol_main.run_once(config_dir)
+    assert calls == []
+
+
+def test_run_once_feed_request_budget_stops_before_next_author(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kol_archive.cli import collect as kol_main
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    db_path = tmp_path / "kol.sqlite3"
+    write_run_once_config(
+        config_dir,
+        db_path,
+        ["100", "200"],
+        on_add_pages=0,
+        max_feed_requests_per_run=1,
+    )
+    seed_pinned_probe_target(db_path, ["100", "200"])
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if not request.url.path.endswith("user_timeline.json"):
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"page": 1, "maxPage": 1, "total": 0, "statuses": []})
+
+    calls = make_run_once_client(monkeypatch, handle)
+    kol_main.run_once(config_dir)
+
+    assert calls == ["feed uid=100 page=1"]
+    connection = connect_database(db_path)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM probe_runs").fetchone()[0] == 0
+    finally:
+        connection.close()
 
 
 def test_run_once_live_429_stops_account_loop_and_probes(
@@ -713,7 +776,15 @@ def test_initialize_database_backfills_new_fetch_runs_columns(tmp_path: Path) ->
     try:
         initialize_database(connection)
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(fetch_runs)")}
+        author_columns = {row["name"] for row in connection.execute("PRAGMA table_info(authors)")}
         assert {"parse_failure_count", "reached_timeline_end"} <= columns
+        assert {
+            "last_feed_polled_at",
+            "next_feed_due_at",
+            "last_timeline_head_id",
+            "last_timeline_head_posted_at",
+            "last_timeline_head_observed_at",
+        } <= author_columns
         # The migrated table accepts a full insert, and the new signal works end to end.
         archive = Archive(connection)
         archive.add_author("xueqiu", "100", NOW)

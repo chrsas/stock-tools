@@ -69,6 +69,9 @@ BACKFILL_PAGES_NOTE = "backfill_pages_reached"
 # page that parsed with some un-parseable entries (counted in parse_failure_count).
 # Shared so the collector (writer) and the service (reader) agree on the note text.
 TIMELINE_PARSE_FAILED_NOTE = "timeline_parse_failed"
+TIMELINE_HEAD_UNCHANGED_NOTE = "timeline_head_unchanged"
+TIMELINE_HEAD_DAILY_OBSERVED_NOTE = "timeline_head_daily_observed"
+REQUEST_BUDGET_EXHAUSTED_NOTE = "request_budget_exhausted"
 
 
 class EventDimension(StrEnum):
@@ -179,12 +182,18 @@ class ProbeRun:
 class ArchiveSettings:
     absent_threshold_n: int = 3
     recent_feed_absent_ttl_days: int = 7
+    positive_observation_interval_days: int = 7
+    positive_observation_max_count: int = 5
 
     def __post_init__(self) -> None:
         if self.absent_threshold_n < 3:
             raise ValueError("absent_threshold_n must be at least 3")
         if self.recent_feed_absent_ttl_days < 1:
             raise ValueError("recent_feed_absent_ttl_days must be positive")
+        if self.positive_observation_interval_days < 1:
+            raise ValueError("positive_observation_interval_days must be positive")
+        if self.positive_observation_max_count < 1:
+            raise ValueError("positive_observation_max_count must be positive")
 
 
 @dataclass(frozen=True)
@@ -195,6 +204,7 @@ class PendingPositive:
     prior_version_id: int | None
     version_id: int | None
     content_changed: bool
+    record_observation: bool
 
 
 @dataclass(frozen=True)

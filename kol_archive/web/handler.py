@@ -66,13 +66,26 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         finally:
             request_id_var.reset(token)
 
-    def _is_quiet(self) -> bool:
-        # 高频轮询端点与静态资源都降到 DEBUG：INFO 摘要留给真正的请求与动作，
-        # 完整 DEBUG 文件追踪里仍可见。
+    def _is_quiet(self, status: object | None = None) -> bool:
+        # 高频轮询端点始终降到 DEBUG。静态资源只有成功或缓存命中才降级，
+        # 404 等失败响应保留在 INFO 控制台，方便发现空白页面的资源问题。
         path = urlparse(self.path).path
-        if path in self._POLLING_PATHS or path in self._STATIC_ASSET_PATHS:
+        if path in self._POLLING_PATHS:
             return True
-        return path.startswith("/assets/")
+        if path in self._STATIC_ASSET_PATHS or path.startswith("/assets/"):
+            if status is None:
+                return True
+            if isinstance(status, HTTPStatus):
+                code = int(status.value)
+            elif isinstance(status, int | str | bytes | bytearray):
+                try:
+                    code = int(status)
+                except ValueError:
+                    return False
+            else:
+                return False
+            return 200 <= code < 300 or code == HTTPStatus.NOT_MODIFIED.value
+        return False
 
     @staticmethod
     def _safe_target(raw: str) -> str:
@@ -87,7 +100,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         status = code.value if isinstance(code, HTTPStatus) else code
         target = self._safe_target(self.path)
         message = f"request {self.command} {target} responded {status} in {duration_ms:.1f}ms"
-        if self._is_quiet():
+        if self._is_quiet(status):
             LOGGER.debug(message)
         else:
             LOGGER.info(message)

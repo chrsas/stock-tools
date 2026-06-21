@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -69,6 +70,9 @@ class FeedPage:
     total: int
     covered_from: str | None
     covered_to: str | None
+    seen_platform_post_ids: list[str] = field(default_factory=list)
+    head_platform_post_id: str | None = None
+    head_posted_at: str | None = None
 
     def covers_window(self, window_started_at: str) -> bool:
         return self.page >= self.max_page or (
@@ -175,16 +179,34 @@ def parse_feed_page(
     author_id: int,
     observed_at: str,
     ingest_mode: IngestMode = IngestMode.LIVE,
+    should_observe: Callable[[str], bool] | None = None,
 ) -> FeedPage:
     raw_statuses = payload.get("statuses")
     if not isinstance(raw_statuses, list):
         raise ValueError("timeline statuses must be a list")
     posts: list[NormalizedPost] = []
+    seen_platform_post_ids: list[str] = []
     parse_failure_count = 0
     covered_times: list[str] = []
+    head_platform_post_id: str | None = None
+    head_posted_at: str | None = None
     for raw_status in raw_statuses:
         if not isinstance(raw_status, dict):
             parse_failure_count += 1
+            continue
+        try:
+            platform_post_id = str(_int_field(raw_status, "id"))
+            posted_at_claimed = epoch_ms_to_utc(raw_status.get("created_at"))
+        except ValueError:
+            parse_failure_count += 1
+            continue
+        if head_platform_post_id is None:
+            head_platform_post_id = platform_post_id
+            head_posted_at = posted_at_claimed
+        seen_platform_post_ids.append(platform_post_id)
+        if raw_status.get("mark") != 1:
+            covered_times.append(posted_at_claimed)
+        if should_observe is not None and not should_observe(platform_post_id):
             continue
         post, failed = normalize_status(
             raw_status,
@@ -196,8 +218,6 @@ def parse_feed_page(
         if post is None:
             continue
         posts.append(post)
-        if raw_status.get("mark") != 1 and post.posted_at_claimed is not None:
-            covered_times.append(post.posted_at_claimed)
     return FeedPage(
         posts=posts,
         parse_failure_count=parse_failure_count,
@@ -206,6 +226,9 @@ def parse_feed_page(
         total=_int_field(payload, "total"),
         covered_from=min(covered_times, default=None),
         covered_to=max(covered_times, default=None),
+        seen_platform_post_ids=seen_platform_post_ids,
+        head_platform_post_id=head_platform_post_id,
+        head_posted_at=head_posted_at,
     )
 
 

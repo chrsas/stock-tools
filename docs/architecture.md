@@ -141,7 +141,7 @@ prices
 
 每次轮询写一条 `fetch_run`，记录 `status` 与覆盖范围。
 
-1. 正面存档始终执行。对本轮成功解析出的在场帖子，写 `present=true` 的 `post_observations`，按内容版本规则处理，更新 `last_present_at`、`feed_state=present`、`absent_healthy_streak=0`、`current_version_id/hash`。新帖先插入 posts 空壳。
+1. 正面存档按调度和预算规则执行。run-once 只采集已到期博主；第 1 页首页指纹未变时，每天最多完整观察首页一次，其余轮次记录轻探测 run 并停止翻页。稳定旧帖仅在 `positive_observation_interval_days` 后进入完整观察，达到 `positive_observation_max_count` 后跳过完整观察。新帖、内容或图片变化、解析降级、状态恢复会写 `present=true` 的 `post_observations`。成功解析或轻解析出的帖子仍参与 seen set，用于负面推断覆盖判断。
 2. 负面推断只在完整健康 run 执行。对覆盖范围内本轮未见到的帖子，写 `present=false` observation，累计 `absent_healthy_streak`，达阈值 N 后置 `absent_confirmed` 并入 `recheck_queue`。对早于 `covered_from` 的帖子置 `out_of_scope`，未钉住则置 `inactive`。
 3. partial 或 failed run 只做正面存档，不做任何负面推断。账号采集健康度由近 K 条 `fetch_runs` 推导。
 
@@ -178,7 +178,7 @@ version_sightings(version_id, observed_at, channel, run_id)
 1. feed：`SELECT version_id, observed_at, 'feed', fetch_run_id FROM post_observations WHERE version_id IS NOT NULL`
 2. 直链：`SELECT observed_version_id, observed_at, 'direct', id FROM probe_runs WHERE observed_version_id IS NOT NULL`
 
-某版本末次观察时间为 `MAX(observed_at) FROM version_sightings WHERE version_id=?`。
+某版本末次观察时间为 `MAX(observed_at) FROM version_sightings WHERE version_id=?`。被节流跳过的重复 feed sighting 不进入该视图。
 
 ## 钉住与队列
 

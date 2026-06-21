@@ -272,6 +272,56 @@ def test_a_b_a_creates_three_versions_with_distinct_first_observations(archive: 
     ]
 
 
+def test_unchanged_positive_observation_is_throttled_weekly(archive: Archive) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post()])
+    archive.record_feed_run(
+        make_feed_run(finished_at="2026-06-06T00:00:00+00:00"),
+        [make_post(observed_at="2026-06-06T00:00:00+00:00")],
+    )
+
+    assert scalar(archive, "SELECT COUNT(*) FROM fetch_runs") == 2
+    assert scalar(archive, "SELECT COUNT(*) FROM post_observations WHERE present = 1") == 1
+
+    archive.record_feed_run(
+        make_feed_run(finished_at="2026-06-08T00:00:00+00:00"),
+        [make_post(observed_at="2026-06-08T00:00:00+00:00")],
+    )
+
+    assert scalar(archive, "SELECT COUNT(*) FROM post_observations WHERE present = 1") == 2
+    assert (
+        scalar(archive, "SELECT MAX(observed_at) FROM version_sightings")
+        == "2026-06-08T00:00:00+00:00"
+    )
+
+
+def test_unchanged_positive_observation_stops_after_max_count(archive: Archive) -> None:
+    for day in ("01", "08", "15", "22", "29"):
+        archive.record_feed_run(
+            make_feed_run(finished_at=f"2026-06-{day}T00:00:00+00:00"),
+            [make_post(observed_at=f"2026-06-{day}T00:00:00+00:00")],
+        )
+    archive.record_feed_run(
+        make_feed_run(finished_at="2026-07-06T00:00:00+00:00"),
+        [make_post(observed_at="2026-07-06T00:00:00+00:00")],
+    )
+
+    assert scalar(archive, "SELECT COUNT(*) FROM post_observations WHERE present = 1") == 5
+    assert scalar(archive, "SELECT COUNT(*) FROM post_versions") == 1
+
+
+def test_seen_post_after_absence_records_recovery_even_within_week(archive: Archive) -> None:
+    archive.record_feed_run(make_feed_run(), [make_post()])
+    archive.record_feed_run(make_feed_run(finished_at="2026-06-02T00:00:00+00:00"), [])
+
+    archive.record_feed_run(
+        make_feed_run(finished_at="2026-06-03T00:00:00+00:00"),
+        [make_post(observed_at="2026-06-03T00:00:00+00:00")],
+    )
+
+    assert scalar(archive, "SELECT absent_healthy_streak FROM posts") == 0
+    assert scalar(archive, "SELECT COUNT(*) FROM post_observations WHERE present = 1") == 2
+
+
 def test_preview_observation_does_not_create_version_or_content_event(archive: Archive) -> None:
     archive.record_feed_run(
         make_feed_run(),

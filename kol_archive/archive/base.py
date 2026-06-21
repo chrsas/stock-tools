@@ -106,6 +106,73 @@ class ArchiveBase:
             return int(row["id"])
         return self.add_author(platform, platform_uid, live_monitoring_started_at, notes)
 
+    def author_feed_due(self, author_id: int, now: str) -> bool:
+        row = self.connection.execute(
+            "SELECT next_feed_due_at FROM authors WHERE id = ?", (author_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown author id: {author_id}")
+        due_at = row["next_feed_due_at"]
+        return due_at is None or parse_utc_timestamp(str(due_at)) <= parse_utc_timestamp(now)
+
+    def author_feed_head(self, author_id: int) -> tuple[str | None, str | None]:
+        row = self.connection.execute(
+            """
+            SELECT last_timeline_head_id, last_timeline_head_posted_at
+            FROM authors WHERE id = ?
+            """,
+            (author_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown author id: {author_id}")
+        return (
+            None if row["last_timeline_head_id"] is None else str(row["last_timeline_head_id"]),
+            None
+            if row["last_timeline_head_posted_at"] is None
+            else str(row["last_timeline_head_posted_at"]),
+        )
+
+    def author_head_observation_due(self, author_id: int, now: str) -> bool:
+        row = self.connection.execute(
+            "SELECT last_timeline_head_observed_at FROM authors WHERE id = ?", (author_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown author id: {author_id}")
+        last_observed_at = row["last_timeline_head_observed_at"]
+        if last_observed_at is None:
+            return True
+        return parse_utc_timestamp(str(last_observed_at)).date() < parse_utc_timestamp(now).date()
+
+    def mark_author_head_observed(self, author_id: int, observed_at: str) -> None:
+        with self._transaction():
+            self.connection.execute(
+                "UPDATE authors SET last_timeline_head_observed_at = ? WHERE id = ?",
+                (observed_at, author_id),
+            )
+
+    def record_author_feed_head(
+        self, author_id: int, platform_post_id: str | None, posted_at: str | None
+    ) -> None:
+        with self._transaction():
+            self.connection.execute(
+                """
+                UPDATE authors
+                SET last_timeline_head_id = ?, last_timeline_head_posted_at = ?
+                WHERE id = ?
+                """,
+                (platform_post_id, posted_at, author_id),
+            )
+
+    def schedule_author_feed_poll(self, author_id: int, polled_at: str, next_due_at: str) -> None:
+        with self._transaction():
+            self.connection.execute(
+                """
+                UPDATE authors SET last_feed_polled_at = ?, next_feed_due_at = ?
+                WHERE id = ?
+                """,
+                (polled_at, next_due_at, author_id),
+            )
+
     def get_author_id(self, platform: str, platform_uid: str) -> int | None:
         row = self.connection.execute(
             "SELECT id FROM authors WHERE platform = ? AND platform_uid = ?",

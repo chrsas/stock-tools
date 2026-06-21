@@ -26,7 +26,8 @@ polling:
   direct_recheck_interval_minutes: 360
   request_min_interval_seconds: 2.5   # ≥2–3s/请求
   request_jitter_seconds: 1.5
-  max_feed_pages: 20                  # 单轮翻页硬上限，命中后按 partial 留痕
+  max_feed_pages: 20                  # 单账号翻页硬上限，命中后按 partial 留痕
+  max_feed_requests_per_run: 60        # 单轮 feed 请求预算，耗尽后暂停账号循环和直链复查
   bootstrap_per_run: true             # 每轮仅 1 次首页引导铸 cookie
 
 # ── 历史回填（与实时监控分离，宪章第9条；回填版本不进事件研究）──────────
@@ -40,6 +41,11 @@ monitoring:
   window_days: 30                     # recent_window 默认窗口
   absent_threshold_n: 3               # 缺席阈值 N，规范下限 ≥3
   recent_feed_absent_ttl_days: 7
+  positive_observation_interval_days: 7  # 稳定旧帖至少间隔 N 天才进入完整观察
+  positive_observation_max_count: 5       # 稳定旧帖最多完整观察 N 次
+  author_poll_interval_minutes: 180       # 有变化博主的下次轻探间隔
+  quiet_author_poll_interval_minutes: 720 # 首页无变化博主的下次轻探间隔
+  blocked_author_cooldown_minutes: 180    # 采集受阻后的冷却间隔
   llm_candidate_ttl_days: 14          # 阶段 3
   min_samples: 30                     # 阶段 3
 

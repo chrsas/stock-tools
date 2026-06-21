@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS authors (
     platform_uid TEXT NOT NULL,
     live_monitoring_started_at TEXT NOT NULL,
     notes TEXT,
+    last_feed_polled_at TEXT,
+    next_feed_due_at TEXT,
+    last_timeline_head_id TEXT,
+    last_timeline_head_posted_at TEXT,
+    last_timeline_head_observed_at TEXT,
     UNIQUE(platform, platform_uid)
 );
 
@@ -655,6 +660,18 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         "fetch_runs",
         "reached_timeline_end",
         "reached_timeline_end INTEGER NOT NULL DEFAULT 0 CHECK(reached_timeline_end IN (0, 1))",
+    )
+    _ensure_column(connection, "authors", "last_feed_polled_at", "last_feed_polled_at TEXT")
+    _ensure_column(connection, "authors", "next_feed_due_at", "next_feed_due_at TEXT")
+    _ensure_column(connection, "authors", "last_timeline_head_id", "last_timeline_head_id TEXT")
+    _ensure_column(
+        connection, "authors", "last_timeline_head_posted_at", "last_timeline_head_posted_at TEXT"
+    )
+    _ensure_column(
+        connection,
+        "authors",
+        "last_timeline_head_observed_at",
+        "last_timeline_head_observed_at TEXT",
     )
     # Image-manifest tracking, added after the schema shipped. Existing rows keep
     # NULL: version-change detection treats a NULL prior manifest as "not

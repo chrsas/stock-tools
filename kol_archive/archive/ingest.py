@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from datetime import timedelta
+from typing import Any
+
 from kol_archive.market import extract_market_tickers
 from kol_archive.models import (
     BACKFILL_PAGES_NOTE,
+    REQUEST_BUDGET_EXHAUSTED_NOTE,
+    TIMELINE_HEAD_DAILY_OBSERVED_NOTE,
+    TIMELINE_HEAD_UNCHANGED_NOTE,
     TIMELINE_PARSE_FAILED_NOTE,
     ContentFidelity,
     EventDimension,
@@ -74,6 +81,23 @@ class IngestMixin(ArchiveBase):
         if row is None:
             raise ValueError(f"unknown fetch run id: {fetch_run_id}")
         return int(row["parse_failure_count"]) == 0 and row["notes"] != TIMELINE_PARSE_FAILED_NOTE
+
+    def feed_run_note(self, fetch_run_id: int) -> str | None:
+        row = self.connection.execute(
+            "SELECT notes FROM fetch_runs WHERE id = ?", (fetch_run_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown fetch run id: {fetch_run_id}")
+        return None if row["notes"] is None else str(row["notes"])
+
+    def feed_run_head_unchanged(self, fetch_run_id: int) -> bool:
+        return self.feed_run_note(fetch_run_id) in {
+            TIMELINE_HEAD_DAILY_OBSERVED_NOTE,
+            TIMELINE_HEAD_UNCHANGED_NOTE,
+        }
+
+    def feed_run_request_budget_exhausted(self, fetch_run_id: int) -> bool:
+        return self.feed_run_note(fetch_run_id) == REQUEST_BUDGET_EXHAUSTED_NOTE
 
     def feed_run_blocked(self, fetch_run_id: int) -> bool:
         """True if a feed run hit rate limiting, login expiry, or transport errors.
@@ -146,11 +170,51 @@ class IngestMixin(ArchiveBase):
             for row in rows
         ]
 
+    def should_observe_feed_post(
+        self, platform: str, author_id: int, platform_post_id: str, observed_at: str
+    ) -> bool:
+        row = self.connection.execute(
+            """
+            SELECT id, feed_state, absent_healthy_streak
+            FROM posts
+            WHERE platform = ? AND author_id = ? AND platform_post_id = ?
+            """,
+            (platform, author_id, platform_post_id),
+        ).fetchone()
+        if row is None:
+            return True
+        if (
+            int(row["absent_healthy_streak"]) > 0
+            or FeedState(str(row["feed_state"])) is not FeedState.PRESENT
+        ):
+            return True
+        post_id = int(row["id"])
+        count_row = self.connection.execute(
+            "SELECT COUNT(*) FROM post_observations WHERE post_id = ? AND present = 1",
+            (post_id,),
+        ).fetchone()
+        if int(count_row[0]) >= self.settings.positive_observation_max_count:
+            return False
+        last_row = self.connection.execute(
+            """
+            SELECT MAX(observed_at) AS observed_at
+            FROM post_observations
+            WHERE post_id = ? AND present = 1
+            """,
+            (post_id,),
+        ).fetchone()
+        if last_row is None or last_row["observed_at"] is None:
+            return True
+        return parse_utc_timestamp(observed_at) - parse_utc_timestamp(
+            str(last_row["observed_at"])
+        ) >= timedelta(days=self.settings.positive_observation_interval_days)
+
     def record_feed_run(
         self,
         run: FeedRun,
         posts: list[NormalizedPost],
         *,
+        seen_platform_post_ids: Iterable[str] | None = None,
         crash_after_evidence: bool = False,
     ) -> int:
         self._validate_feed_posts(run, posts)
@@ -160,14 +224,18 @@ class IngestMixin(ArchiveBase):
             post_ids = {
                 post.platform_post_id: self._ensure_post(run.platform, post) for post in posts
             }
+            seen_post_ids = self._known_post_ids(
+                run.platform, run.author_id, seen_platform_post_ids or ()
+            ) | set(post_ids.values())
 
             positives = [
                 self._prepare_positive_observation(post, post_ids[post.platform_post_id])
                 for post in posts
             ]
-            for positive in positives:
+            archived_positives = [positive for positive in positives if positive.record_observation]
+            for positive in archived_positives:
                 self._insert_positive_observation(fetch_run_id, positive)
-            for positive in positives:
+            for positive in archived_positives:
                 self._insert_positive_events(fetch_run_id, positive)
 
             projections: list[PendingProjection] = []
@@ -183,20 +251,20 @@ class IngestMixin(ArchiveBase):
                 and effective_run.covered_to is not None
             ):
                 projections = self._prepare_negative_inferences(
-                    fetch_run_id, effective_run, set(post_ids.values())
+                    fetch_run_id, effective_run, seen_post_ids
                 )
 
             if crash_after_evidence:
                 raise RuntimeError("injected crash after feed evidence")
 
-            for positive in positives:
+            for positive in archived_positives:
                 self._apply_positive_projection(positive)
             for projection in projections:
                 self._apply_negative_projection(projection)
         LOGGER.info(
             "feed_run archived run_id=%s author_id=%s status=%s healthy=%s "
             "pages_fetched=%s covered_from=%s covered_to=%s rate_limited=%s "
-            "http_error_count=%s observed_posts=%s",
+            "http_error_count=%s seen_posts=%s archived_present_observations=%s",
             fetch_run_id,
             effective_run.author_id,
             effective_run.status,
@@ -206,7 +274,8 @@ class IngestMixin(ArchiveBase):
             effective_run.covered_to,
             effective_run.rate_limited,
             effective_run.http_error_count,
-            len(posts),
+            len(seen_post_ids),
+            len(archived_positives),
         )
         return fetch_run_id
 
@@ -324,6 +393,22 @@ class IngestMixin(ArchiveBase):
                 raise ValueError("feed run contains duplicate platform_post_id")
             post_ids.add(post.platform_post_id)
 
+    def _known_post_ids(
+        self, platform: str, author_id: int, platform_post_ids: Iterable[str]
+    ) -> set[int]:
+        ids = sorted({str(value) for value in platform_post_ids if str(value)})
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.connection.execute(
+            f"""
+            SELECT id FROM posts
+            WHERE platform = ? AND author_id = ? AND platform_post_id IN ({placeholders})
+            """,
+            (platform, author_id, *ids),
+        ).fetchall()
+        return {int(row["id"]) for row in rows}
+
     def _insert_fetch_run(self, run: FeedRun) -> int:
         cursor = self.connection.execute(
             """
@@ -401,13 +486,65 @@ class IngestMixin(ArchiveBase):
                 row["current_image_manifest_hash"],
                 post,
             )
+        prior_feed_state = FeedState(str(row["feed_state"]))
+        record_observation = self._should_record_positive_observation(
+            post,
+            post_id,
+            row,
+            content_changed=changed,
+            prior_feed_state=prior_feed_state,
+        )
         return PendingPositive(
             post=post,
             post_id=post_id,
-            prior_feed_state=FeedState(str(row["feed_state"])),
+            prior_feed_state=prior_feed_state,
             prior_version_id=prior_version_id,
             version_id=version_id,
             content_changed=changed,
+            record_observation=record_observation,
+        )
+
+    def _should_record_positive_observation(
+        self,
+        post: NormalizedPost,
+        post_id: int,
+        row: Any,
+        *,
+        content_changed: bool,
+        prior_feed_state: FeedState,
+    ) -> bool:
+        if (
+            post.content_fidelity is ContentFidelity.NA
+            or content_changed
+            or int(row["absent_healthy_streak"]) > 0
+            or prior_feed_state is not FeedState.PRESENT
+        ):
+            return True
+        observation_count = int(
+            self.connection.execute(
+                """
+                SELECT COUNT(*) FROM post_observations
+                WHERE post_id = ? AND present = 1
+                """,
+                (post_id,),
+            ).fetchone()[0]
+        )
+        if observation_count >= self.settings.positive_observation_max_count:
+            return False
+        observed_at = parse_utc_timestamp(post.observed_at)
+        last_row = self.connection.execute(
+            """
+            SELECT MAX(observed_at) AS observed_at
+            FROM post_observations
+            WHERE post_id = ? AND present = 1
+            """,
+            (post_id,),
+        ).fetchone()
+        if last_row is None or last_row["observed_at"] is None:
+            return True
+        last_observed_at = parse_utc_timestamp(str(last_row["observed_at"]))
+        return observed_at - last_observed_at >= timedelta(
+            days=self.settings.positive_observation_interval_days
         )
 
     def _insert_positive_observation(self, fetch_run_id: int, positive: PendingPositive) -> None:

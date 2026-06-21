@@ -22,6 +22,9 @@ from kol_archive.adapters.xueqiu import (
 )
 from kol_archive.models import (
     BACKFILL_PAGES_NOTE,
+    REQUEST_BUDGET_EXHAUSTED_NOTE,
+    TIMELINE_HEAD_DAILY_OBSERVED_NOTE,
+    TIMELINE_HEAD_UNCHANGED_NOTE,
     TIMELINE_PARSE_FAILED_NOTE,
     FeedRun,
     IngestMode,
@@ -52,6 +55,7 @@ class CollectorSettings:
     request_min_interval_seconds: float = 2.5
     request_jitter_seconds: float = 1.5
     max_feed_pages: int = 20
+    max_feed_requests_per_run: int | None = None
 
     def __post_init__(self) -> None:
         if self.request_min_interval_seconds < 0:
@@ -60,6 +64,8 @@ class CollectorSettings:
             raise ValueError("request_jitter_seconds must not be negative")
         if self.max_feed_pages < 1:
             raise ValueError("max_feed_pages must be positive")
+        if self.max_feed_requests_per_run is not None and self.max_feed_requests_per_run < 1:
+            raise ValueError("max_feed_requests_per_run must be positive")
 
 
 @dataclass(frozen=True)
@@ -80,6 +86,11 @@ class _FeedFetch:
     notes: str | None
     reached_timeline_end: bool = False
     posts: list[NormalizedPost] = field(default_factory=list)
+    seen_platform_post_ids: list[str] = field(default_factory=list)
+    head_platform_post_id: str | None = None
+    head_posted_at: str | None = None
+    head_unchanged: bool = False
+    head_observed: bool = False
 
 
 def utc_now() -> str:
@@ -127,6 +138,7 @@ class XueqiuCollector:
         self.settings = settings or CollectorSettings()
         self.sleep = sleep
         self.clock = clock
+        self._feed_requests_made = 0
 
     def poll_feed(
         self,
@@ -135,6 +147,8 @@ class XueqiuCollector:
         window_started_at: str,
         *,
         previous_covered_to: str | None = None,
+        known_head: tuple[str | None, str | None] = (None, None),
+        observe_unchanged_head: bool = False,
     ) -> int:
         """Live feed poll: page back until the recent window is covered.
 
@@ -151,6 +165,8 @@ class XueqiuCollector:
             page_budget=self.settings.max_feed_pages,
             target_reached=lambda page: page.covers_window(window_started_at),
             cap_note="max_feed_pages_reached",
+            known_head=known_head,
+            observe_unchanged_head=observe_unchanged_head,
         )
         status = fetch.status
         pagination_complete = fetch.pagination_complete
@@ -229,6 +245,8 @@ class XueqiuCollector:
         target_reached: Callable[[FeedPage], bool],
         cap_note: str,
         start_page: int = 1,
+        known_head: tuple[str | None, str | None] = (None, None),
+        observe_unchanged_head: bool = False,
     ) -> _FeedFetch:
         started_at = self.clock()
         observed_at = started_at
@@ -243,8 +261,18 @@ class XueqiuCollector:
         page_number = start_page
         pagination_complete = False
         reached_timeline_end = False
+        seen_platform_post_ids: set[str] = set()
+        head_platform_post_id: str | None = None
+        head_posted_at: str | None = None
+        head_unchanged = False
+        head_observed = False
         while True:
+            if self.feed_request_budget_exhausted():
+                status = RunStatus.PARTIAL
+                notes = REQUEST_BUDGET_EXHAUSTED_NOTE
+                break
             try:
+                self._feed_requests_made += 1
                 response = self.client.get(
                     f"{BASE_URL}/v4/statuses/user_timeline.json",
                     params={"user_id": platform_uid, "page": page_number},
@@ -277,17 +305,71 @@ class XueqiuCollector:
                 notes = response_failure_note(response.status_code, payload_issue)
                 break
             try:
+                if (
+                    ingest_mode is IngestMode.LIVE
+                    and page_number == 1
+                    and start_page == 1
+                    and known_head[0] is not None
+                ):
+                    preview = parse_feed_page(
+                        payload,
+                        author_id=author_id,
+                        observed_at=observed_at,
+                        ingest_mode=ingest_mode,
+                        should_observe=lambda _post_id: False,
+                    )
+                    head_platform_post_id = preview.head_platform_post_id
+                    head_posted_at = preview.head_posted_at
+                    if self._head_matches_known(preview, known_head):
+                        if not observe_unchanged_head:
+                            parsed_pages.append(preview)
+                            seen_platform_post_ids.update(preview.seen_platform_post_ids)
+                            parse_failure_count += preview.parse_failure_count
+                            status = RunStatus.OK
+                            pagination_complete = False
+                            reached_timeline_end = preview.page >= preview.max_page
+                            notes = TIMELINE_HEAD_UNCHANGED_NOTE
+                            head_unchanged = True
+                            break
+                        parsed = parse_feed_page(
+                            payload,
+                            author_id=author_id,
+                            observed_at=observed_at,
+                            ingest_mode=ingest_mode,
+                            should_observe=lambda post_id: self.archive.should_observe_feed_post(
+                                "xueqiu", author_id, post_id, observed_at
+                            ),
+                        )
+                        parsed_pages.append(parsed)
+                        seen_platform_post_ids.update(parsed.seen_platform_post_ids)
+                        posts_by_id.update((post.platform_post_id, post) for post in parsed.posts)
+                        parse_failure_count += parsed.parse_failure_count
+                        status = RunStatus.OK
+                        pagination_complete = False
+                        reached_timeline_end = parsed.page >= parsed.max_page
+                        notes = TIMELINE_HEAD_DAILY_OBSERVED_NOTE
+                        head_unchanged = True
+                        head_observed = True
+                        break
                 parsed = parse_feed_page(
                     payload,
                     author_id=author_id,
                     observed_at=observed_at,
                     ingest_mode=ingest_mode,
+                    should_observe=lambda post_id: self.archive.should_observe_feed_post(
+                        "xueqiu", author_id, post_id, observed_at
+                    ),
                 )
             except ValueError:
                 status = RunStatus.PARTIAL
                 notes = TIMELINE_PARSE_FAILED_NOTE
                 break
             parsed_pages.append(parsed)
+            if ingest_mode is IngestMode.LIVE and page_number == 1 and start_page == 1:
+                head_observed = True
+            seen_platform_post_ids.update(parsed.seen_platform_post_ids)
+            head_platform_post_id = head_platform_post_id or parsed.head_platform_post_id
+            head_posted_at = head_posted_at or parsed.head_posted_at
             posts_by_id.update((post.platform_post_id, post) for post in parsed.posts)
             parse_failure_count += parsed.parse_failure_count
             if target_reached(parsed):
@@ -328,7 +410,23 @@ class XueqiuCollector:
             covered_to=covered_to,
             notes=notes,
             posts=list(posts_by_id.values()),
+            seen_platform_post_ids=sorted(seen_platform_post_ids),
+            head_platform_post_id=head_platform_post_id,
+            head_posted_at=head_posted_at,
+            head_unchanged=head_unchanged,
+            head_observed=head_observed,
         )
+
+    def feed_request_budget_exhausted(self) -> bool:
+        budget = self.settings.max_feed_requests_per_run
+        return budget is not None and self._feed_requests_made >= budget
+
+    @staticmethod
+    def _head_matches_known(page: FeedPage, known_head: tuple[str | None, str | None]) -> bool:
+        known_id, known_posted_at = known_head
+        if known_id is None or page.head_platform_post_id != known_id:
+            return False
+        return known_posted_at is None or page.head_posted_at == known_posted_at
 
     def _record_feed_run(
         self,
@@ -339,7 +437,7 @@ class XueqiuCollector:
         pagination_complete: bool,
         notes: str | None,
     ) -> int:
-        return self.archive.record_feed_run(
+        run_id = self.archive.record_feed_run(
             FeedRun(
                 author_id=author_id,
                 platform="xueqiu",
@@ -360,7 +458,15 @@ class XueqiuCollector:
                 notes=notes,
             ),
             fetch.posts,
+            seen_platform_post_ids=fetch.seen_platform_post_ids,
         )
+        if ingest_mode is IngestMode.LIVE and fetch.head_platform_post_id is not None:
+            self.archive.record_author_feed_head(
+                author_id, fetch.head_platform_post_id, fetch.head_posted_at
+            )
+            if fetch.head_observed:
+                self.archive.mark_author_head_observed(author_id, fetch.finished_at)
+        return run_id
 
     def probe_due_posts(self) -> list[int]:
         run_ids: list[int] = []

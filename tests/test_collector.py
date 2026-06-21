@@ -315,6 +315,181 @@ def test_feed_records_json_non_object_200_response(archive: Archive) -> None:
     )
 
 
+def _single_status_payload(*, post_id: int = 999, text: str = "changed") -> dict[str, Any]:
+    return {
+        "page": 1,
+        "maxPage": 1,
+        "total": 1,
+        "statuses": [
+            {
+                "id": post_id,
+                "user_id": 100,
+                "created_at": 1762473181000,
+                "truncated": False,
+                "mark": 0,
+                "is_column": False,
+                "text": text,
+            }
+        ],
+    }
+
+
+def test_live_poll_unchanged_head_stops_after_light_probe(archive: Archive) -> None:
+    archive.record_author_feed_head(1, "111", "2025-11-06T23:53:01+00:00")
+    requested_pages: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requested_pages.append(request.url.params["page"])
+        payload = load_fixture("xueqiu_timeline_page.json")
+        payload["maxPage"] = 999
+        return httpx.Response(200, json=payload)
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        collector = XueqiuCollector(
+            archive,
+            client,
+            CollectorSettings(0, 0),
+            sleep=lambda _: None,
+            clock=lambda: NOW,
+        )
+        run_id = collector.poll_feed(
+            1,
+            "100",
+            "2026-05-01T00:00:00+00:00",
+            known_head=archive.author_feed_head(1),
+        )
+
+    assert requested_pages == ["1"]
+    row = archive.connection.execute(
+        "SELECT status, pagination_complete, notes FROM fetch_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    assert tuple(row) == (RunStatus.OK, 0, "timeline_head_unchanged")
+    assert archive.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 0
+    assert archive.connection.execute("SELECT COUNT(*) FROM post_observations").fetchone()[0] == 0
+
+
+def test_live_poll_observes_unchanged_head_once_per_day(archive: Archive) -> None:
+    archive.record_author_feed_head(1, "111", "2025-11-06T23:53:01+00:00")
+    requested_pages: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requested_pages.append(request.url.params["page"])
+        payload = load_fixture("xueqiu_timeline_page.json")
+        payload["maxPage"] = 999
+        return httpx.Response(200, json=payload)
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        collector = XueqiuCollector(
+            archive,
+            client,
+            CollectorSettings(0, 0),
+            sleep=lambda _: None,
+            clock=lambda: NOW,
+        )
+        run_id = collector.poll_feed(
+            1,
+            "100",
+            "2026-05-01T00:00:00+00:00",
+            known_head=archive.author_feed_head(1),
+            observe_unchanged_head=True,
+        )
+
+    assert requested_pages == ["1"]
+    row = archive.connection.execute(
+        "SELECT status, pagination_complete, notes FROM fetch_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    assert tuple(row) == (RunStatus.OK, 0, "timeline_head_daily_observed")
+    assert archive.connection.execute("SELECT COUNT(*) FROM post_observations").fetchone()[0] == 3
+    assert (
+        archive.connection.execute(
+            "SELECT last_timeline_head_observed_at FROM authors WHERE id = 1"
+        ).fetchone()[0]
+        == NOW
+    )
+
+
+def test_live_poll_skips_stable_post_after_observation_budget(archive: Archive) -> None:
+    days = ("01", "08", "15", "22", "29")
+    for day in days:
+        archive.record_feed_run(
+            FeedRun(
+                author_id=1,
+                platform="xueqiu",
+                started_at=f"2026-06-{day}T00:00:00+00:00",
+                finished_at=f"2026-06-{day}T00:00:00+00:00",
+                status=RunStatus.OK,
+                login_state=LoginState.VALID,
+                pages_fetched=1,
+                pagination_complete=True,
+                covered_from="2026-05-01T00:00:00+00:00",
+                covered_to=f"2026-06-{day}T00:00:00+00:00",
+                rate_limited=False,
+                http_error_count=0,
+                ingest_mode=IngestMode.LIVE,
+                adapter_version="xueqiu-1",
+            ),
+            [
+                NormalizedPost(
+                    platform_post_id="999",
+                    author_id=1,
+                    observed_at=f"2026-06-{day}T00:00:00+00:00",
+                    content_fidelity=ContentFidelity.FULL,
+                    content_text="seed",
+                    content_hash="hash-seed",
+                    posted_at_claimed="2026-05-20T00:00:00+00:00",
+                )
+            ],
+        )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_single_status_payload(text="changed text"))
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        collector = XueqiuCollector(
+            archive,
+            client,
+            CollectorSettings(0, 0),
+            sleep=lambda _: None,
+            clock=lambda: "2026-07-10T00:00:00+00:00",
+        )
+        collector.poll_feed(1, "100", "2026-05-01T00:00:00+00:00")
+
+    assert (
+        archive.connection.execute(
+            "SELECT COUNT(*) FROM post_observations WHERE present = 1"
+        ).fetchone()[0]
+        == 5
+    )
+    assert archive.connection.execute("SELECT COUNT(*) FROM post_versions").fetchone()[0] == 1
+
+
+def test_feed_request_budget_pauses_before_next_page(archive: Archive) -> None:
+    requested_pages: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requested_pages.append(request.url.params["page"])
+        payload = load_fixture("xueqiu_timeline_page.json")
+        payload["maxPage"] = 999
+        return httpx.Response(200, json=payload)
+
+    with make_client(httpx.MockTransport(handle)) as client:
+        collector = XueqiuCollector(
+            archive,
+            client,
+            CollectorSettings(0, 0, max_feed_requests_per_run=1),
+            sleep=lambda _: None,
+            clock=lambda: NOW,
+        )
+        run_id = collector.poll_feed(1, "100", "2026-05-01T00:00:00+00:00")
+
+    assert requested_pages == ["1"]
+    row = archive.connection.execute(
+        "SELECT status, pages_fetched, pagination_complete, notes FROM fetch_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    assert tuple(row) == (RunStatus.PARTIAL, 1, 0, "request_budget_exhausted")
+
+
 def test_due_probe_maps_not_found_to_unavailable(archive: Archive) -> None:
     post_id = seed_post(archive)
     archive.pin_post(post_id, "2026-06-01T01:00:00+00:00")
