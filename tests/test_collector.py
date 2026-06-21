@@ -335,7 +335,8 @@ def _single_status_payload(*, post_id: int = 999, text: str = "changed") -> dict
 
 
 def test_live_poll_unchanged_head_stops_after_light_probe(archive: Archive) -> None:
-    archive.record_author_feed_head(1, "111", "2025-11-06T23:53:01+00:00")
+    # head 取最新的非置顶帖（id 222），不是置顶帖 111；记录它来模拟“时间线头未变”。
+    archive.record_author_feed_head(1, "222", "2026-05-31T08:00:45+00:00")
     requested_pages: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -369,7 +370,8 @@ def test_live_poll_unchanged_head_stops_after_light_probe(archive: Archive) -> N
 
 
 def test_live_poll_observes_unchanged_head_once_per_day(archive: Archive) -> None:
-    archive.record_author_feed_head(1, "111", "2025-11-06T23:53:01+00:00")
+    # head 取最新的非置顶帖（id 222），不是置顶帖 111；记录它来模拟“时间线头未变”。
+    archive.record_author_feed_head(1, "222", "2026-05-31T08:00:45+00:00")
     requested_pages: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:

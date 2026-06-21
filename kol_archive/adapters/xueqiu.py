@@ -200,12 +200,15 @@ def parse_feed_page(
         except ValueError:
             parse_failure_count += 1
             continue
-        if head_platform_post_id is None:
-            head_platform_post_id = platform_post_id
-            head_posted_at = posted_at_claimed
         seen_platform_post_ids.append(platform_post_id)
+        # 置顶帖（mark == 1）永远排在时间线最前且不随新发言变化，若拿它当 head，
+        # 时间线“头变没变”的判断会被永久钉死，导致置顶帖下方的新帖一直采不进来。
+        # 这里与 covered_times 一致地跳过置顶帖，用最新的非置顶帖作为 head。
         if raw_status.get("mark") != 1:
             covered_times.append(posted_at_claimed)
+            if head_platform_post_id is None:
+                head_platform_post_id = platform_post_id
+                head_posted_at = posted_at_claimed
         if should_observe is not None and not should_observe(platform_post_id):
             continue
         post, failed = normalize_status(

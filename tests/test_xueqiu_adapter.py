@@ -33,6 +33,10 @@ def test_feed_page_excludes_pinned_post_from_coverage_and_marks_preview() -> Non
     assert page.covered_from == epoch_ms_to_utc(1779000000000)
     assert page.covered_to == epoch_ms_to_utc(1780214445000)
     assert page.covers_window("2026-05-01T00:00:00+00:00") is False
+    # 头部置顶帖（id 111, mark==1）不能当 head，否则时间线“头变没变”判断会被永久钉死；
+    # head 必须是最新的非置顶帖（id 222），其时间即覆盖区间上界。
+    assert page.head_platform_post_id == "222"
+    assert page.head_posted_at == epoch_ms_to_utc(1780214445000)
 
 
 def test_feed_and_direct_fixture_normalize_to_same_hash() -> None:
