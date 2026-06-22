@@ -815,16 +815,27 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         *,
         cache_control: str | None = None,
     ) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", cache_control or "no-store")
-        self.end_headers()
-        # Log before writing the body: send_response already logged the response line
-        # before the write, and logging first makes the trace deterministic instead of
-        # racing the client's read of the socket.
-        self._log_response_body(content_type, body)
-        self.wfile.write(body)
+        # A long synchronous action (e.g. a multi-minute collection run) can outlive the
+        # client's patience: the browser aborts the request and the socket is already dead
+        # by the time we write the result. Writing then raises ConnectionError (WinError
+        # 10053 / broken pipe). Swallow it with a single quiet log line instead of letting
+        # it bubble into do_POST's error path, which would try to write a 500 to the same
+        # dead socket and surface a scary double traceback. The action itself already ran.
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", cache_control or "no-store")
+            self.end_headers()
+            # Log before writing the body: send_response already logged the response line
+            # before the write, and logging first makes the trace deterministic instead of
+            # racing the client's read of the socket.
+            self._log_response_body(content_type, body)
+            self.wfile.write(body)
+        except ConnectionError:
+            LOGGER.info(
+                "web response dropped: client disconnected path=%s", urlparse(self.path).path
+            )
 
     def _log_response_body(self, content_type: str, body: bytes) -> None:
         # The response content we hand back to the client — logged at DEBUG to mirror

@@ -1848,3 +1848,25 @@ def test_rewrite_route_locks_version_and_pins_post(
         )
     finally:
         connection.close()
+
+
+def test_send_bytes_swallows_client_disconnect(caplog: pytest.LogCaptureFixture) -> None:
+    # A long action (e.g. a multi-minute collection) can outlive the client; the browser
+    # aborts and the socket is dead by the time we write the result. The write must fail
+    # quietly with one log line, not raise into do_POST's 500 path and double-fault.
+    handler = ArchiveRequestHandler.__new__(ArchiveRequestHandler)
+    handler.path = "/collect/run-once"
+
+    class _DeadWfile:
+        def write(self, _body: bytes) -> int:
+            raise ConnectionAbortedError(10053, "client aborted")
+
+    handler.wfile = _DeadWfile()  # type: ignore[assignment]
+    handler.send_response = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    handler.send_header = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    handler.end_headers = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.INFO, logger="kol_archive.web"):
+        handler._send_bytes(HTTPStatus.OK, b"payload", "application/json; charset=utf-8")
+
+    assert "client disconnected" in caplog.text
