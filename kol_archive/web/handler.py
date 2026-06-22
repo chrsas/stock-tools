@@ -449,16 +449,19 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _run_collection(self, form: dict[str, list[str]]) -> None:
+        # The run itself takes minutes (per-post recheck throttles for the WAF), far
+        # longer than the browser will hold the connection. Start it on a background
+        # thread and return at once; the frontend polls /api/collect/status for
+        # progress and completion. A run already in flight is reported as 进行中
+        # rather than queuing a second one.
         del form
-        payload, failure_response = jobs._execute_collection(self.server)
-        if failure_response is not None:
-            self._send_text(*failure_response)
-            return
-        assert payload is not None
-        with self.server.automation_settings_lock:
-            if self.server.automation_settings.collection_enabled:
-                _schedule_next_collection(self.server.automation_settings)
-        self._send_json(HTTPStatus.OK, payload)
+        payload, status = jobs._start_background_collection(self.server)
+        if payload.get("started"):
+            # A manual run pushes back the next automatic one so the two do not stack.
+            with self.server.automation_settings_lock:
+                if self.server.automation_settings.collection_enabled:
+                    _schedule_next_collection(self.server.automation_settings)
+        self._send_json(status, payload)
 
     def _collection_status_payload(self) -> dict[str, object]:
         with self.server.collection_status_lock:

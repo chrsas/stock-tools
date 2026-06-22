@@ -27,7 +27,9 @@ from .jobs import (
     _drain_pending_enrichments,
     _execute_author_enrichment,
     _execute_collection,
+    _execute_collection_locked,
     _nudge_enrichment,
+    _start_background_collection,
 )
 from .lifecycle import create_server, serve_archive
 from .payload import _home_payload
@@ -55,6 +57,8 @@ __all__ = [
     "_enrichment_worker_loop",
     "_execute_author_enrichment",
     "_execute_collection",
+    "_execute_collection_locked",
+    "_start_background_collection",
     "_home_payload",
     "_load_automation_settings",
     "_nudge_enrichment",

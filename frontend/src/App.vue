@@ -49,6 +49,8 @@ const addAuthorNotice = ref("");
 const theme = ref(localStorage.getItem("kol-theme") || "system");
 let collectStatusTimer: number | undefined;
 let pollingCollectStatus = false;
+// 立即采集已改为后台运行：请求立即返回，由轮询驱动直到 running 翻回 false 才收尾。
+let collectFinalizePending = false;
 let enrichStatusTimer: number | undefined;
 let pollingEnrichStatus = false;
 let operationsStatusTimer: number | undefined;
@@ -168,20 +170,19 @@ async function runCollection() {
   collectNotice.value = "";
   collectPhase.value = "正在启动采集";
   collectElapsed.value = 0;
-  startCollectStatusPolling();
   try {
+    // 采集已后台化：请求立即返回「已开始」（或「进行中」），实际采集在后台跑。
+    // 无论是本次启动还是已有采集在跑，都转入轮询展示进度直到完成。
     const result = await mutate("/collect/run-once", page.value.csrf_token);
-    const resultMessage = String(result.message || "采集完成。");
-    await refresh();
-    await restoreAutomationSettings();
-    collectNotice.value = resultMessage;
-    window.setTimeout(() => { void restoreEnrichStatus(); }, 300);
+    if (result.started === false) {
+      collectNotice.value = String(result.message || "采集正在进行中，请稍候。");
+    }
+    collectFinalizePending = true;
+    startCollectStatusPolling();
   } catch (reason) {
+    // 仅启动请求本身失败（连接/服务错误）才放开按钮并报错。
     error.value = friendlyRequestError(reason);
-  } finally {
     collecting.value = false;
-    await pollCollectStatus();
-    stopCollectStatusPolling();
   }
 }
 
@@ -191,11 +192,24 @@ async function pollCollectStatus() {
   try {
     const status = await loadCollectionStatus();
     applyCollectionStatus(status);
+    // 后台采集结束（running 翻回 false）时收尾一次：刷新页面、落完成提示、触发富化状态恢复。
+    if (collectFinalizePending && !status.running) {
+      collectFinalizePending = false;
+      await finalizeCollectionRun(status);
+    }
   } catch {
     // The main collection request reports connection failures with actionable text.
   } finally {
     pollingCollectStatus = false;
   }
+}
+
+async function finalizeCollectionRun(status: Row) {
+  stopCollectStatusPolling();
+  collectNotice.value = String(status.phase || "采集完成。");
+  await refresh();
+  await restoreAutomationSettings();
+  window.setTimeout(() => { void restoreEnrichStatus(); }, 300);
 }
 
 function applyCollectionStatus(status: Row) {
