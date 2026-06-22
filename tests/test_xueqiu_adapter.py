@@ -129,7 +129,6 @@ def test_probe_classifies_json_non_object_200_response() -> None:
     [
         {"is_private": True},
         {"is_refused": True},
-        {"legal_user_visible": False},
     ],
 )
 def test_probe_classifies_restricted_visibility_flags(restriction: dict[str, bool]) -> None:
@@ -145,3 +144,20 @@ def test_probe_classifies_restricted_visibility_flags(restriction: dict[str, boo
 
     assert restricted.result is ProbeResult.RESTRICTED
     assert restricted.observed_post is None
+
+
+def test_probe_keeps_legal_user_visible_false_reachable() -> None:
+    # Real public posts return legal_user_visible=false with full text; it must not be
+    # read as a restriction signal (regression for the Track B mis-classification).
+    payload = load_fixture("xueqiu_show_reachable.json")
+    assert payload["legal_user_visible"] is False
+
+    probe = parse_probe_response(
+        200,
+        payload,
+        author_id=1,
+        observed_at="2026-06-01T00:00:00+00:00",
+    )
+
+    assert probe.result is ProbeResult.REACHABLE
+    assert probe.observed_post is not None
