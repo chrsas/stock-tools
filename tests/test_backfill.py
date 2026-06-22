@@ -576,7 +576,9 @@ def test_run_once_skips_backfill_when_live_reaches_timeline_end(
     calls = make_run_once_client(monkeypatch, handle)
     kol_main.run_once(config_dir)
 
-    assert calls == ["feed uid=100 page=1"]  # no page-2 backfill request
+    # Feed asks for page 1 only (no page-2 backfill). The direct-recheck pass may probe
+    # the just-archived posts, which are past-dated fixtures and so already lifecycle-due.
+    assert [c for c in calls if c.startswith("feed")] == ["feed uid=100 page=1"]
     connection = connect_database(db_path)
     try:
         archive = Archive(connection)
@@ -620,7 +622,9 @@ def test_run_once_skips_backfill_when_live_last_page_degraded(
     calls = make_run_once_client(monkeypatch, handle)
     kol_main.run_once(config_dir)
 
-    assert calls == ["feed uid=100 page=1"]  # no page-2 backfill request
+    # Feed asks for page 1 only (no page-2 backfill); the direct-recheck pass may add
+    # probe calls for past-dated fixture posts that are already lifecycle-due.
+    assert [c for c in calls if c.startswith("feed")] == ["feed uid=100 page=1"]
     connection = connect_database(db_path)
     try:
         archive = Archive(connection)
@@ -826,13 +830,15 @@ def test_first_add_detected_via_get_author_id(archive: Archive) -> None:
     assert archive.get_author_id("xueqiu", "200") == new_id
 
 
-def test_live_poll_reconnects_and_infers_absence(archive: Archive) -> None:
+def test_live_poll_reconnects_and_skips_feed_absence(archive: Archive) -> None:
     present_id = seed_present_post(archive)
     requested: list[str] = []
 
     collector = make_collector(archive, two_page_handler(requested))
-    # Previous run's newest post is 2026-05-25, newer than this run's oldest (05-17):
-    # the coverage reconnects, so the healthy live run may infer absence.
+    # Previous run's newest post is 2026-05-25, newer than this run's oldest (05-17): the
+    # coverage reconnects, so the run is healthy and complete. Feed-side absence inference
+    # was retired, so a present post not seen this poll is never marked absent — deletion
+    # detection is the direct-recheck lifecycle's job now.
     run_id = collector.poll_feed(
         1, "100", WINDOW_START, previous_covered_to="2026-05-25T00:00:00+00:00"
     )
@@ -841,10 +847,16 @@ def test_live_poll_reconnects_and_infers_absence(archive: Archive) -> None:
         "SELECT status, pagination_complete, notes FROM fetch_runs WHERE id = ?", (run_id,)
     ).fetchone()
     assert tuple(run) == (RunStatus.OK, 1, None)
-    streak = archive.connection.execute(
-        "SELECT absent_healthy_streak FROM posts WHERE id = ?", (present_id,)
-    ).fetchone()[0]
-    assert streak == 1
+    row = archive.connection.execute(
+        "SELECT feed_state, absent_healthy_streak FROM posts WHERE id = ?", (present_id,)
+    ).fetchone()
+    assert tuple(row) == ("present", 0)
+    assert (
+        archive.connection.execute(
+            "SELECT COUNT(*) FROM post_observations WHERE present = 0"
+        ).fetchone()[0]
+        == 0
+    )
 
 
 def test_live_poll_coverage_gap_blocks_negative_inference(archive: Archive) -> None:
@@ -866,6 +878,44 @@ def test_live_poll_coverage_gap_blocks_negative_inference(archive: Archive) -> N
         "SELECT absent_healthy_streak FROM posts WHERE id = ?", (present_id,)
     ).fetchone()[0]
     assert streak == 0
+
+
+def test_incremental_anchor_only_advances_on_healthy_reconnected_runs(archive: Archive) -> None:
+    def live_run(finished_at: str, covered_to: str, *, healthy: bool) -> FeedRun:
+        return FeedRun(
+            author_id=1,
+            platform="xueqiu",
+            started_at=finished_at,
+            finished_at=finished_at,
+            status=RunStatus.OK if healthy else RunStatus.PARTIAL,
+            login_state=LoginState.VALID,
+            pages_fetched=1,
+            pagination_complete=healthy,
+            covered_from=WINDOW_START,
+            covered_to=covered_to,
+            rate_limited=False,
+            http_error_count=0,
+            ingest_mode=IngestMode.LIVE,
+            adapter_version="xueqiu-1",
+        )
+
+    # A healthy reconnected run sets the contiguous frontier.
+    archive.record_feed_run(live_run(NOW, NOW, healthy=True), [])
+    assert archive.last_live_covered_to(1) == NOW
+
+    # A later coverage_gap partial run grabbed newer posts but did not reconnect: its
+    # covered_to must not become the anchor, or the posts between the gap and the prior
+    # frontier could never be paged back to.
+    archive.record_feed_run(
+        live_run("2026-06-01T00:15:00+00:00", "2026-06-05T00:00:00+00:00", healthy=False), []
+    )
+    assert archive.last_live_covered_to(1) == NOW
+
+    # The next healthy reconnected run advances the frontier past the gap.
+    archive.record_feed_run(
+        live_run("2026-06-01T00:30:00+00:00", "2026-06-06T00:00:00+00:00", healthy=True), []
+    )
+    assert archive.last_live_covered_to(1) == "2026-06-06T00:00:00+00:00"
 
 
 def test_live_poll_empty_timeline_is_healthy_and_skips_inference(archive: Archive) -> None:

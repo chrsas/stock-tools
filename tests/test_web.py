@@ -6,6 +6,7 @@ import logging
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -186,6 +187,22 @@ def _get_json(server: ArchiveHttpServer, path: str) -> dict[str, object]:
     return cast(dict[str, object], json.loads(content))
 
 
+def _wait_collection_idle(server: ArchiveHttpServer, timeout: float = 5.0) -> dict[str, object]:
+    """Poll the status endpoint until the background collection reports not running.
+
+    Collection is now kicked off on a worker thread and the POST returns at once, so
+    tests observe completion the way the frontend does: by polling /api/collect/status
+    until ``running`` flips false. Returns the final status payload.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        payload = _get_json(server, "/api/collect/status")
+        if not payload["running"]:
+            return payload
+        time.sleep(0.02)
+    raise AssertionError("collection did not finish before the timeout")
+
+
 def test_decision_web_flow_and_csrf(web_server: ArchiveHttpServer) -> None:
     payload = _get_json(web_server, "/api/home?view=decisions")
     assert payload["view"] == "decisions"
@@ -290,21 +307,22 @@ def test_collect_run_once_web_flow(
     # Auto-enrich is gated on the background worker being active; with it on, a
     # completed collection nudges the resident worker instead of enriching inline.
     web_server.automation_active = True
+    # The POST now kicks the run onto a worker thread and returns at once instead of
+    # blocking for the whole pass.
     status, _, content = _request(
         web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
     )
-    assert status == 200
+    assert status == 202
     payload = json.loads(content)
     assert payload["ok"] is True
-    assert payload["healthy"] is True
-    assert payload["message"] == "采集完成。"
-    assert payload["auto_enrich_started"] is True
+    assert payload["started"] is True
+    assert payload["message"] == "采集已开始，正在后台运行。"
+    # Completion is observed through the status endpoint, as the frontend does.
+    status_payload = _wait_collection_idle(web_server)
     assert calls == [web_server.config_dir]
     # The nudge wakes the resident enrichment worker; the worker (not started here)
     # is what would then drain the queue.
     assert web_server.enrich_wake.is_set() is True
-    status_payload = _get_json(web_server, "/api/collect/status")
-    assert status_payload["running"] is False
     assert status_payload["phase"] == "采集完成。"
     assert status_payload["healthy"] is True
     collection_logs = cast(list[dict[str, object]], status_payload["logs"])
@@ -324,9 +342,10 @@ def test_collect_run_once_web_flow(
     status, _, content = _request(
         web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
     )
-    payload = json.loads(content)
-    assert payload["healthy"] is False
-    assert "run-once 连续失败" in payload["message"]
+    assert status == 202
+    status_payload = _wait_collection_idle(web_server)
+    assert status_payload["healthy"] is False
+    assert "run-once 连续失败" in str(status_payload["phase"])
 
 
 def test_collect_run_once_reports_browser_not_ready(
@@ -344,8 +363,12 @@ def test_collect_run_once_reports_browser_not_ready(
     status, _, content = _request(
         web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
     )
-    assert status == 503
-    assert "浏览器" in content
+    # The kickoff still returns at once; the browser-not-ready failure shows up in the
+    # polled status phase, not in the immediate response.
+    assert status == 202
+    status_payload = _wait_collection_idle(web_server)
+    assert status_payload["healthy"] is False
+    assert "浏览器" in str(status_payload["phase"])
     # The lock is released after a failed pass so the next click can still collect.
     assert web_server.collect_lock.acquire(blocking=False)
     web_server.collect_lock.release()
@@ -365,9 +388,13 @@ def test_collect_run_once_reports_cross_process_conflict(
     status, _, content = _request(
         web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
     )
-    assert status == 409
-    assert "其他进程" in content
-    # The in-process lock is freed even though the run never started.
+    # The kickoff returns at once; the cross-process conflict is only discovered once
+    # the worker runs, so it surfaces in the polled status phase.
+    assert status == 202
+    status_payload = _wait_collection_idle(web_server)
+    assert status_payload["healthy"] is False
+    assert "另一处采集正在运行" in str(status_payload["phase"])
+    # The in-process lock is freed even though the run never finished a real pass.
     assert web_server.collect_lock.acquire(blocking=False)
     web_server.collect_lock.release()
 
@@ -381,7 +408,8 @@ def test_collect_run_once_guards_csrf_method_and_concurrency(
     status, _, _ = _request(web_server, "GET", "/collect/run-once")
     assert status == 405
 
-    # A run already in flight is rejected, not queued behind the active one.
+    # A run already in flight is reported as 进行中 and not queued behind the active
+    # one: the kickoff returns 200 with started=false rather than starting a second.
     assert web_server.collect_lock.acquire(blocking=False)
     try:
         status, _, content = _request(
@@ -389,8 +417,10 @@ def test_collect_run_once_guards_csrf_method_and_concurrency(
         )
     finally:
         web_server.collect_lock.release()
-    assert status == 409
-    assert "采集正在进行中" in content
+    assert status == 200
+    payload = json.loads(content)
+    assert payload["started"] is False
+    assert "采集正在进行中" in payload["message"]
 
     assert web_server.collect_lock.acquire(blocking=False)
     try:
@@ -410,7 +440,6 @@ def test_collect_status_reports_live_phase(
 
     phase_reported = threading.Event()
     finish_run = threading.Event()
-    response: list[tuple[int, dict[str, str], str]] = []
 
     def wait_in_phase(
         config_dir: Path, *, progress: Callable[[str], None] | None = None
@@ -422,12 +451,13 @@ def test_collect_status_reports_live_phase(
         return collect_module.RunOnceResult(healthy=True, reason=None)
 
     monkeypatch.setattr(collect_module, "execute_run_once", wait_in_phase)
-    request_thread = threading.Thread(
-        target=lambda: response.append(
-            _request(web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN})
-        )
+    # The POST returns immediately while the run continues on a worker thread, so the
+    # live phase is observable through the status endpoint mid-run.
+    status, _, content = _request(
+        web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
     )
-    request_thread.start()
+    assert status == 202
+    assert json.loads(content)["started"] is True
     assert phase_reported.wait(timeout=5)
 
     payload = _get_json(web_server, "/api/collect/status")
@@ -439,8 +469,50 @@ def test_collect_status_reports_live_phase(
     assert live_logs[-1]["message"] == "正在采集博主 2/3 的近期发言"
 
     finish_run.set()
-    request_thread.join(timeout=5)
-    assert response[0][0] == 200
+    final = _wait_collection_idle(web_server)
+    assert final["healthy"] is True
+
+
+def test_collect_run_once_runs_in_background_without_blocking(
+    web_server: ArchiveHttpServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kol_archive.cli.collect as collect_module
+
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[Path] = []
+
+    def slow_run(
+        config_dir: Path, *, progress: Callable[[str], None] | None = None
+    ) -> collect_module.RunOnceResult:
+        calls.append(config_dir)
+        started.set()
+        assert release.wait(timeout=5)
+        return collect_module.RunOnceResult(healthy=True, reason=None)
+
+    monkeypatch.setattr(collect_module, "execute_run_once", slow_run)
+
+    # The kickoff returns at once even though the run is still blocked mid-pass.
+    before = time.monotonic()
+    status, _, content = _request(
+        web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
+    )
+    assert time.monotonic() - before < 2.0
+    assert status == 202
+    assert json.loads(content)["started"] is True
+    assert started.wait(timeout=5)
+
+    # A second click while the first run is still in flight is reported as 进行中 and
+    # does not stack a second run.
+    status, _, content = _request(
+        web_server, "POST", "/collect/run-once", {"csrf_token": CSRF_TOKEN}
+    )
+    assert status == 200
+    assert json.loads(content)["started"] is False
+
+    release.set()
+    _wait_collection_idle(web_server)
+    assert calls == [web_server.config_dir]
 
 
 def test_enrich_author_web_flow(
@@ -1848,3 +1920,25 @@ def test_rewrite_route_locks_version_and_pins_post(
         )
     finally:
         connection.close()
+
+
+def test_send_bytes_swallows_client_disconnect(caplog: pytest.LogCaptureFixture) -> None:
+    # A long action (e.g. a multi-minute collection) can outlive the client; the browser
+    # aborts and the socket is dead by the time we write the result. The write must fail
+    # quietly with one log line, not raise into do_POST's 500 path and double-fault.
+    handler = ArchiveRequestHandler.__new__(ArchiveRequestHandler)
+    handler.path = "/collect/run-once"
+
+    class _DeadWfile:
+        def write(self, _body: bytes) -> int:
+            raise ConnectionAbortedError(10053, "client aborted")
+
+    handler.wfile = _DeadWfile()  # type: ignore[assignment]
+    handler.send_response = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    handler.send_header = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    handler.end_headers = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.INFO, logger="kol_archive.web"):
+        handler._send_bytes(HTTPStatus.OK, b"payload", "application/json; charset=utf-8")
+
+    assert "client disconnected" in caplog.text

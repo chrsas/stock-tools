@@ -56,6 +56,11 @@ class CollectorSettings:
     request_jitter_seconds: float = 1.5
     max_feed_pages: int = 20
     max_feed_requests_per_run: int | None = None
+    # Per-run cap on direct rechecks. The recheck lifecycle can make a large backlog of
+    # posts due at once (e.g. the first run after enabling it), and each probe is a slow
+    # browser round-trip; this bounds a run's duration and lets the backlog drain across
+    # runs, most-overdue first. None = unlimited (used in tests).
+    max_probes_per_run: int | None = None
 
     def __post_init__(self) -> None:
         if self.request_min_interval_seconds < 0:
@@ -66,6 +71,8 @@ class CollectorSettings:
             raise ValueError("max_feed_pages must be positive")
         if self.max_feed_requests_per_run is not None and self.max_feed_requests_per_run < 1:
             raise ValueError("max_feed_requests_per_run must be positive")
+        if self.max_probes_per_run is not None and self.max_probes_per_run < 1:
+            raise ValueError("max_probes_per_run must be positive")
 
 
 @dataclass(frozen=True)
@@ -150,20 +157,31 @@ class XueqiuCollector:
         known_head: tuple[str | None, str | None] = (None, None),
         observe_unchanged_head: bool = False,
     ) -> int:
-        """Live feed poll: page back until the recent window is covered.
+        """Live feed poll: page back only until it reconnects with known content.
 
-        ``previous_covered_to`` is the newest post observed by the prior live run.
-        If this run's coverage does not page back far enough to reconnect with it
-        (a gap left by a long interval or a prolific author), the run is downgraded
-        to ``partial`` so the health gate suppresses any negative inference over the
-        hole — we must not read a not-yet-reached post as a confirmed absence.
+        A live poll is incremental: it stops at the first page that reaches back to
+        the newest post the prior live run already archived (``previous_covered_to``),
+        so a routine 15-minute poll fetches one page instead of re-sweeping a fixed
+        window. Deletion and edit detection no longer ride on feed depth; per-post
+        direct rechecks (Track B) own that now.
+
+        ``window_started_at`` is only the seed bound for the *first* poll of a brand
+        new author, when there is nothing to reconnect with yet.
+
+        If coverage does not page back far enough to reconnect with
+        ``previous_covered_to`` (a gap left by a long interval or a prolific author),
+        the run is downgraded to ``partial`` so the health gate suppresses any
+        negative inference over the hole.
         """
+        overlap_anchor = (
+            previous_covered_to if previous_covered_to is not None else window_started_at
+        )
         fetch = self._fetch_feed(
             author_id,
             platform_uid,
             ingest_mode=IngestMode.LIVE,
             page_budget=self.settings.max_feed_pages,
-            target_reached=lambda page: page.covers_window(window_started_at),
+            target_reached=lambda page: page.covers_window(overlap_anchor),
             cap_note="max_feed_pages_reached",
             known_head=known_head,
             observe_unchanged_head=observe_unchanged_head,
@@ -470,7 +488,9 @@ class XueqiuCollector:
 
     def probe_due_posts(self) -> list[int]:
         run_ids: list[int] = []
-        for target in self.archive.probe_targets():
+        for target in self.archive.probe_targets(
+            self.clock(), limit=self.settings.max_probes_per_run
+        ):
             started_at = self.clock()
             payload: dict[str, Any] | None = None
             try:

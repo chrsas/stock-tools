@@ -88,7 +88,7 @@
 
 - **`reachable`**：`show.json` 200 且 `text` 可解析；HTML 200。
 - **`not_found`**：`20210` / HTML 404（裸不存在）。按规范 §0.7 **记 `source_state=unavailable`，不判 `gone_confirmed`**（无法区分作者删/平台删）。
-- **`restricted`**：状态字段 `is_private=true` / `is_refused=true` / `legal_user_visible=false` / 付费墙 / 被拉黑 → `unavailable`。（样本 `legal_user_visible=false` 字段已现身，具体受限码待运营中遇到真实样本补登。）
+- **`restricted`**：状态字段 `is_private=true` / `is_refused=true` / 付费墙 / 被拉黑 → `unavailable`。**更正（2026-06-22）**：`legal_user_visible` 不是受限信号，实测多条正文完整的公开帖均返回 `legal_user_visible=false`，早先把它纳入受限判据导致绝大多数帖被误判 `restricted`、Track B 复查空转，现已移除该条件。
 - **`explicitly_removed` → `gone_confirmed`**：仅当来源页**显式**显示「已删除/内容已被移除」时。该专属错误码/页面文案**未能在探针阶段构造**（无法主动删除他人帖）；**留作运营中首次遇到真实删帖时学习并回填本表**。在此之前，保守按 not_found→`unavailable` 处理，符合 §0.7 与 `gone_confirmed` 黏性规则（§2.3）。
 
 > 证据：`raw/03_show_391984427.json`(200)、`raw/03_show_bad_*.json`(20210)、`raw/04_html_real.txt`(200)、`raw/04_html_notfound.txt`(404)。
@@ -173,10 +173,10 @@
 2. **`created_at`/`edited_at` 是 epoch 毫秒**，入库统一转 ISO8601/UTC（注意时区，雪球时间为东八区本地）。
 3. **正文哈希按第 8 节双重归一化**，`content_text`/`content_hash`/`raw_payload` 三者分别落（§2.4）。
 4. **置顶帖按 `mark==1` 识别并排除出 covered 范围**（§2）。
-5. **错误码 → 状态机**：`10022`=登录降级（健康门不过）；`20210`/HTML404=not_found→unavailable；显式删除文案=gone_confirmed（码待补）；`is_private/is_refused/legal_user_visible`=restricted→unavailable。
+5. **错误码 → 状态机**：`10022`=登录降级（健康门不过）；`20210`/HTML404=not_found→unavailable；显式删除文案=gone_confirmed（码待补）；`is_private/is_refused`=restricted→unavailable（`legal_user_visible` 已于 2026-06-22 移出受限判据，见第 6 节更正）。
 6. **guest 仅 page1**；`fetch_runs.pagination_complete` 据此判定；有登录 cookie 才做多页/回填。
-7. **`adapter_version`** 起始 `xueqiu-1`；接口结构若变更递增。当前实现为 `xueqiu-2`，
-   增补 `legal_user_visible=false` 的受限映射。
+7. **`adapter_version`** 起始 `xueqiu-1`；接口结构若变更递增。当前实现为 `xueqiu-3`。
+   **更正（2026-06-22）**：早先增补的 `legal_user_visible=false` 受限映射是误判，公开可读帖普遍带该字段为 false，已移除，受限只认 `is_private/is_refused`。
 8. **cookie 仅放环境变量或被忽略的本地 `config.local.yml`**，绝不入库、绝不进导出（规范硬约束）。
 
 ---

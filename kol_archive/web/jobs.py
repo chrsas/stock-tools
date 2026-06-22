@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -17,7 +18,7 @@ from kol_archive.database import connect_database
 from kol_archive.enrich import enrich_targets, load_enrich_settings
 from kol_archive.maintenance import redact_text
 from kol_archive.models import EnrichmentTarget
-from kol_archive.obs import http_client
+from kol_archive.obs import http_client, trace_scope
 from kol_archive.service import Archive
 
 from .settings import EnrichmentStatus
@@ -48,11 +49,79 @@ def _set_collection_status(
             status.finished_at = now
 
 
+def _start_background_collection(
+    server: ArchiveHttpServer,
+) -> tuple[dict[str, object], HTTPStatus]:
+    """Kick off a collection on a worker thread and return at once.
+
+    The shared collect/enrich lock is the mutex and the idempotency guard: if it
+    cannot be taken right now a collection (or enrichment) is already in flight, so
+    report 进行中 without starting a second. On success the lock is handed to the
+    worker, which releases it when the run ends, while the request returns
+    immediately. This is what keeps the multi-minute pass off the request thread so
+    the browser never waits it out and aborts the socket mid-write.
+    """
+    if not server.collect_lock.acquire(blocking=False):
+        return {"ok": True, "started": False, "message": "采集正在进行中，请稍候。"}, HTTPStatus.OK
+    # Mark running synchronously before the thread starts so an immediate status poll
+    # already reflects the run, and a second click arriving before the worker spins
+    # up still sees ``running`` and refuses.
+    _set_collection_status(server, running=True, phase="正在启动采集", healthy=None)
+    thread = threading.Thread(
+        target=_collection_worker, args=(server,), name="web-collection", daemon=True
+    )
+    thread.start()
+    return (
+        {"ok": True, "started": True, "message": "采集已开始，正在后台运行。"},
+        HTTPStatus.ACCEPTED,
+    )
+
+
+def _collection_worker(server: ArchiveHttpServer) -> None:
+    """Run the collection holding the lock the launcher acquired, then release it.
+
+    Wrapped in a fresh trace scope so the background pass gets its own request id in
+    the logs, mirroring the automation loop. No client is waiting, so a failure is
+    only logged; ``_execute_collection_locked`` already recorded the failure phase in
+    ``collection_status`` (which the frontend polls) before re-raising.
+    """
+    try:
+        with trace_scope():
+            _execute_collection_locked(server)
+    except Exception:
+        LOGGER.warning("background web collection failed")
+    finally:
+        server.collect_lock.release()
+
+
 def _execute_collection(
     server: ArchiveHttpServer,
 ) -> tuple[dict[str, object] | None, tuple[HTTPStatus, str] | None]:
+    """Run one collection pass synchronously, acquiring and releasing the lock.
+
+    Kept for the automation loop, which already runs on its own background thread
+    and wants the blocking call plus the CONFLICT result when the lock is busy. The
+    web path uses :func:`_start_background_collection` instead so the request thread
+    is never tied up for the duration of a run.
+    """
     if not server.collect_lock.acquire(blocking=False):
         return None, (HTTPStatus.CONFLICT, "采集正在进行中，请稍候。")
+    try:
+        return _execute_collection_locked(server)
+    finally:
+        server.collect_lock.release()
+
+
+def _execute_collection_locked(
+    server: ArchiveHttpServer,
+) -> tuple[dict[str, object] | None, tuple[HTTPStatus, str] | None]:
+    """Run one collection pass assuming the shared collect/enrich lock is held.
+
+    The caller owns the lock and is responsible for releasing it. Splitting
+    acquisition out lets the web launcher keep the lock across the hand-off to a
+    background thread while the request returns at once, without the release and
+    re-acquire that a second click could otherwise slip through.
+    """
     _set_collection_status(server, running=True, phase="正在启动采集", healthy=None)
     result: Any | None = None
     failure_response: tuple[HTTPStatus, str] | None = None
@@ -100,8 +169,6 @@ def _execute_collection(
             server, running=False, phase="采集失败，请查看服务日志", healthy=False
         )
         raise
-    finally:
-        server.collect_lock.release()
     if failure_response is not None:
         return None, failure_response
     assert result is not None

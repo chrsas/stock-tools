@@ -145,6 +145,7 @@ def _build_collector(archive: Archive, client: Any, polling: dict[str, Any]) -> 
             max_feed_requests_per_run=_optional_positive_int(
                 polling.get("max_feed_requests_per_run")
             ),
+            max_probes_per_run=int(polling.get("max_probes_per_run") or 40),
         ),
     )
 
@@ -272,6 +273,7 @@ def _run_once_with_config(
         ArchiveSettings(
             absent_threshold_n=int(monitoring.get("absent_threshold_n") or 3),
             recent_feed_absent_ttl_days=int(monitoring.get("recent_feed_absent_ttl_days") or 7),
+            first_recheck_after_days=int(monitoring.get("first_recheck_after_days") or 1),
             positive_observation_interval_days=int(
                 monitoring.get("positive_observation_interval_days") or 7
             ),
@@ -488,6 +490,7 @@ def run_backfill(
         ArchiveSettings(
             absent_threshold_n=int(monitoring.get("absent_threshold_n") or 3),
             recent_feed_absent_ttl_days=int(monitoring.get("recent_feed_absent_ttl_days") or 7),
+            first_recheck_after_days=int(monitoring.get("first_recheck_after_days") or 1),
             positive_observation_interval_days=int(
                 monitoring.get("positive_observation_interval_days") or 7
             ),

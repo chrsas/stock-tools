@@ -449,16 +449,19 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _run_collection(self, form: dict[str, list[str]]) -> None:
+        # The run itself takes minutes (per-post recheck throttles for the WAF), far
+        # longer than the browser will hold the connection. Start it on a background
+        # thread and return at once; the frontend polls /api/collect/status for
+        # progress and completion. A run already in flight is reported as 进行中
+        # rather than queuing a second one.
         del form
-        payload, failure_response = jobs._execute_collection(self.server)
-        if failure_response is not None:
-            self._send_text(*failure_response)
-            return
-        assert payload is not None
-        with self.server.automation_settings_lock:
-            if self.server.automation_settings.collection_enabled:
-                _schedule_next_collection(self.server.automation_settings)
-        self._send_json(HTTPStatus.OK, payload)
+        payload, status = jobs._start_background_collection(self.server)
+        if payload.get("started"):
+            # A manual run pushes back the next automatic one so the two do not stack.
+            with self.server.automation_settings_lock:
+                if self.server.automation_settings.collection_enabled:
+                    _schedule_next_collection(self.server.automation_settings)
+        self._send_json(status, payload)
 
     def _collection_status_payload(self) -> dict[str, object]:
         with self.server.collection_status_lock:
@@ -815,16 +818,27 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         *,
         cache_control: str | None = None,
     ) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", cache_control or "no-store")
-        self.end_headers()
-        # Log before writing the body: send_response already logged the response line
-        # before the write, and logging first makes the trace deterministic instead of
-        # racing the client's read of the socket.
-        self._log_response_body(content_type, body)
-        self.wfile.write(body)
+        # A long synchronous action (e.g. a multi-minute collection run) can outlive the
+        # client's patience: the browser aborts the request and the socket is already dead
+        # by the time we write the result. Writing then raises ConnectionError (WinError
+        # 10053 / broken pipe). Swallow it with a single quiet log line instead of letting
+        # it bubble into do_POST's error path, which would try to write a 500 to the same
+        # dead socket and surface a scary double traceback. The action itself already ran.
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", cache_control or "no-store")
+            self.end_headers()
+            # Log before writing the body: send_response already logged the response line
+            # before the write, and logging first makes the trace deterministic instead of
+            # racing the client's read of the socket.
+            self._log_response_body(content_type, body)
+            self.wfile.write(body)
+        except ConnectionError:
+            LOGGER.info(
+                "web response dropped: client disconnected path=%s", urlparse(self.path).path
+            )
 
     def _log_response_body(self, content_type: str, body: bytes) -> None:
         # The response content we hand back to the client — logged at DEBUG to mirror

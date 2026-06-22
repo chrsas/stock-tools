@@ -285,11 +285,12 @@ def parse_probe_response(
             None,
             response_failure_note(http_status, payload_issue),
         )
-    if (
-        bool(payload.get("is_private"))
-        or bool(payload.get("is_refused"))
-        or payload.get("legal_user_visible") is False
-    ):
+    # NOTE: ``legal_user_visible`` is NOT a restriction signal. Real, fully readable
+    # public posts return ``legal_user_visible=false`` alongside complete ``text`` (verified
+    # 2026-06-22 across multiple live posts), so gating on it mis-classified the bulk of the
+    # archive as ``restricted`` and stalled Track B rechecks. Only ``is_private`` / ``is_refused``
+    # mark a genuinely withheld post.
+    if bool(payload.get("is_private")) or bool(payload.get("is_refused")):
         return ProbeParse(
             RunStatus.OK,
             LoginState.VALID,
